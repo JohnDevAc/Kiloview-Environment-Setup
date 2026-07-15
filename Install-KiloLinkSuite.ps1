@@ -15,6 +15,7 @@ param(
     [ValidateSet('Menu', 'Repair', 'Update')]
     [string]$Action = 'Menu',
     [switch]$AcceptLicenses,
+    [switch]$LauncherMode,
     [string]$LogPath
 )
 
@@ -140,6 +141,7 @@ function Ensure-Administrator {
     $elevationArguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     if ($Action -ne 'Menu') { $elevationArguments += " -Action $Action" }
     if ($AcceptLicenses) { $elevationArguments += ' -AcceptLicenses' }
+    if ($LauncherMode) { $elevationArguments += ' -LauncherMode' }
     if ($LogPath) { $elevationArguments += " -LogPath `"$LogPath`"" }
     Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs | Out-Null
     exit 0
@@ -1427,6 +1429,10 @@ try {
         Stop-Transcript | Out-Null
     }
 }
-if ($Action -ne 'Menu' -and $backgroundExitCode -ne 0) {
+if ($backgroundExitCode -ne 0) {
+    if ($Action -eq 'Menu' -and $LauncherMode) {
+        Write-Host ''
+        Read-Host 'Press Enter to close this window' | Out-Null
+    }
     exit $backgroundExitCode
 }

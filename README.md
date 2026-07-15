@@ -11,8 +11,13 @@ Install-KiloLinkSuite.ps1 is a menu-driven Windows 11 installer for:
 ## Run
 
 For the simplest installation, download `Setup.exe`, double-click it, approve
-the Windows Administrator prompt, and use the menu that opens. The executable
-contains the PowerShell installer, so no other downloaded files are required.
+the Windows Administrator prompt, select **Start setup**, and use the PowerShell
+menu that opens. The launcher remains open and provides access to a diagnostic
+log if PowerShell cannot start. The executable contains the PowerShell
+installer, so no other downloaded files are required.
+
+Launcher diagnostics are saved to
+`C:\ProgramData\KiloLink\setup-launcher.log`.
 
 Windows may show an unknown-publisher warning until the executable is signed
 with a trusted code-signing certificate.

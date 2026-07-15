@@ -33,6 +33,7 @@ $compilerArguments = @(
     ('/win32manifest:"{0}"' -f $manifest),
     ('/resource:"{0}",KiloLink.Setup.Install-KiloLinkSuite.ps1' -f $installer),
     '/reference:System.dll',
+    '/reference:System.Drawing.dll',
     '/reference:System.Windows.Forms.dll',
     ('/out:"{0}"' -f $output),
     ('"{0}"' -f $source)
