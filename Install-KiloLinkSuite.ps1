@@ -228,11 +228,40 @@ function Get-WslDistroNames {
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
         return @()
     }
-    $output = & wsl.exe --list --quiet 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # A clean Windows installation has wsl.exe present even when the WSL
+        # platform is not installed. Its expected diagnostic on stderr must not
+        # terminate the installer menu while $ErrorActionPreference is Stop.
+        $ErrorActionPreference = 'Continue'
+        $output = & wsl.exe --list --quiet 2>$null
+        $code = $LASTEXITCODE
+    } catch {
+        Write-InstallerLog "WSL distribution probe is not available: $($_.Exception.Message)"
+        return @()
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($code -ne 0) {
         return @()
     }
     return @($output | ForEach-Object { ([string]$_ -replace [char]0, '').Trim() } | Where-Object { $_ })
+}
+
+function Test-WslRuntime {
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & wsl.exe --status 2>$null | Out-Null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 }
 
 function Get-UbuntuDistro {
@@ -531,8 +560,21 @@ function Ensure-WslFeatures {
         Write-Host 'Restart Windows, rerun this script, then choose Repair / Reconfigure.' -ForegroundColor Yellow
         return $false
     }
-    Invoke-Native wsl.exe @('--set-default-version', '2') -IgnoreExitCode
+
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        throw 'Windows did not make wsl.exe available after enabling the required features. Restart Windows and run Setup.exe again.'
+    }
+    if (-not (Test-WslRuntime)) {
+        Write-Step 'Installing the Windows Subsystem for Linux runtime'
+        Invoke-Native wsl.exe @('--install', '--no-distribution') -IgnoreExitCode
+    }
     Invoke-Native wsl.exe @('--update') -IgnoreExitCode
+    if (-not (Test-WslRuntime)) {
+        Write-Host 'WSL has been enabled but Windows must restart before installation can continue.' -ForegroundColor Yellow
+        Write-Host 'Restart Windows, run Setup.exe again, then choose Repair / Reconfigure.' -ForegroundColor Yellow
+        return $false
+    }
+    Invoke-Native wsl.exe @('--set-default-version', '2')
     return $true
 }
 

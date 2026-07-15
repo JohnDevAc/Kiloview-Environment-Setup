@@ -10,8 +10,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("JohnDevAc")]
 [assembly: AssemblyProduct("KiloLink Environment Setup")]
 [assembly: AssemblyCopyright("Copyright JohnDevAc 2026")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace KiloLink.Setup
 {

@@ -50,6 +50,10 @@ On a clean PC, choose Install. If Windows needs a restart after enabling WSL,
 restart the PC, run the script again, and choose Repair / reconfigure. The
 selected settings are saved under C:\ProgramData\KiloLink.
 
+Missing or disabled WSL is treated as the normal clean-install state. Setup
+enables the required Windows features, installs the WSL runtime without an
+unrelated default distribution, and clearly prompts for a restart when needed.
+
 KiloLink and Docker are installed in a dedicated WSL distribution named
 `KiloLink-Ubuntu`. Existing Ubuntu distributions, packages, and APT sources are
 not reused or modified.
