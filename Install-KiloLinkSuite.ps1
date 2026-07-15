@@ -55,7 +55,10 @@ $script:ProgressLastPulse = [datetime]::MinValue
 function Write-InstallerLog {
     param([string]$Message)
     if (-not (Test-Path -LiteralPath $script:StateRoot)) { return }
-    $line = '{0} {1}' -f (Get-Date).ToString('o'), $Message
+    # wsl.exe can emit UTF-16 text through a native pipeline. Strip embedded
+    # NUL characters so diagnostics remain readable in Notepad and on screen.
+    $cleanMessage = ([string]$Message -replace [char]0, '').TrimEnd()
+    $line = '{0} {1}' -f (Get-Date).ToString('o'), $cleanMessage
     Add-Content -LiteralPath $script:InstallerLogPath -Value $line -Encoding UTF8
 }
 
@@ -194,6 +197,7 @@ function Invoke-Native {
         [switch]$Capture
     )
     $previousErrorActionPreference = $ErrorActionPreference
+    $recentOutput = New-Object Collections.Generic.List[string]
     try {
         # Windows PowerShell 5.1 converts native stderr into non-terminating
         # PowerShell errors. With the script-wide preference set to Stop, normal
@@ -206,19 +210,28 @@ function Invoke-Native {
             # long-running captured commands still animate the progress display.
             $captured = New-Object Collections.Generic.List[string]
             & $FilePath @Arguments 2>&1 | ForEach-Object {
-                $line = [string]$_
+                $line = ([string]$_ -replace [char]0, '').TrimEnd()
                 $captured.Add($line)
+                if ($line) { $recentOutput.Add($line) }
                 Write-InstallerLog $line
                 Update-SuiteProgressPulse
             }
             $output = @($captured)
         } elseif ($Capture) {
-            $output = & $FilePath @Arguments 2>&1
+            $output = @(& $FilePath @Arguments 2>&1 | ForEach-Object {
+                $line = ([string]$_ -replace [char]0, '').TrimEnd()
+                if ($line) { $recentOutput.Add($line) }
+                $line
+            })
         } else {
             # Interactive mode sends verbose native output to the installer log
             # while keeping a frequently refreshed progress bar on screen.
             & $FilePath @Arguments 2>&1 | ForEach-Object {
-                $line = [string]$_
+                $line = ([string]$_ -replace [char]0, '').TrimEnd()
+                if ($line) {
+                    $recentOutput.Add($line)
+                    if ($recentOutput.Count -gt 12) { $recentOutput.RemoveAt(0) }
+                }
                 if ($script:ProgressActive) {
                     Write-InstallerLog $line
                     Update-SuiteProgressPulse
@@ -233,7 +246,10 @@ function Invoke-Native {
         $ErrorActionPreference = $previousErrorActionPreference
     }
     if (-not $IgnoreExitCode -and $code -ne 0) {
-        throw ('Command failed with exit code {0}: {1} {2}' -f $code, $FilePath, ($Arguments -join ' '))
+        $message = 'Command failed with exit code {0}: {1} {2}' -f $code, $FilePath, ($Arguments -join ' ')
+        $diagnostic = @($recentOutput | Where-Object { $_ } | Select-Object -Last 6) -join ' '
+        if ($diagnostic) { $message += [Environment]::NewLine + 'Reported by command: ' + $diagnostic }
+        throw $message
     }
     if ($Capture) {
         return @($output | ForEach-Object { [string]$_ })
@@ -423,6 +439,58 @@ function Test-WslDistroReady {
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+}
+
+function Get-WslDistroLaunchProbe {
+    param([string]$Distro)
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& wsl.exe -d $Distro -u root -- true 2>&1 | ForEach-Object {
+            ([string]$_ -replace [char]0, '').Trim()
+        } | Where-Object { $_ })
+        $code = $LASTEXITCODE
+    } catch {
+        $output = @($_.Exception.Message)
+        $code = -1
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    foreach ($line in $output) { Write-InstallerLog "WSL launch probe: $line" }
+    return [pscustomobject]@{
+        Success = $code -eq 0
+        ExitCode = $code
+        Output = @($output)
+    }
+}
+
+function Get-WslDistroVersion {
+    param([string]$Distro)
+    $lines = @(Invoke-Native wsl.exe @('--list', '--verbose') -IgnoreExitCode -Capture)
+    $escapedName = [regex]::Escape($Distro)
+    foreach ($line in $lines) {
+        $clean = ([string]$line -replace [char]0, '').TrimEnd()
+        if ($clean -match ("^\s*\*?\s*{0}\s+\S+\s+([12])\s*$" -f $escapedName)) {
+            return [int]$Matches[1]
+        }
+    }
+    return $null
+}
+
+function Get-WslLaunchFailureMessage {
+    param([string]$Distro, [string[]]$Output)
+    $diagnostic = @($Output | Where-Object { $_ }) -join ' '
+    if ($diagnostic -match 'WSL_E_VM_MODE_INVALID_STATE|HCS_E_HYPERV_NOT_INSTALLED|virtual machine platform|virtualization') {
+        return @"
+Windows cannot start the WSL 2 virtual machine for '$Distro'. WSL reported: $diagnostic
+
+This guest does not currently have usable virtualization extensions. If Windows is itself running in a VM, enable nested virtualization on the VM host, fully power the VM off and on, then rerun Setup and choose Repair / reconfigure. On a Hyper-V host run: Set-VMProcessor -VMName '<VM name>' -ExposeVirtualizationExtensions `$true
+"@.Trim()
+    }
+    if ($diagnostic) {
+        return "The WSL distribution '$Distro' registered but could not start. WSL reported: $diagnostic"
+    }
+    return "The WSL distribution '$Distro' registered but could not start (exit code unavailable). Check $script:InstallerLogPath."
 }
 
 function Wait-WslDistroReady {
@@ -834,9 +902,24 @@ function Ensure-Ubuntu {
     $Config.DistroName = $distro
     Save-Config $Config
     Write-Step "Verifying $distro as a working WSL 2 distribution"
-    Invoke-Native wsl.exe @('--set-version', $distro, '2')
-    if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 180)) {
-        throw "$distro registered but could not start within 180 seconds. On a virtual machine, enable nested virtualization on the host before retrying."
+    $probe = Get-WslDistroLaunchProbe $distro
+    if (-not $probe.Success) {
+        $message = Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output
+        if ($message -match 'nested virtualization') { throw $message }
+        Set-SuiteProgress -Percent ([Math]::Min(28, $script:ProgressPercent + 1)) -Status "Waiting for $distro to finish its first launch"
+        if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 180)) {
+            $probe = Get-WslDistroLaunchProbe $distro
+            throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output)
+        }
+    }
+    $version = Get-WslDistroVersion $distro
+    if ($version -ne 2) {
+        Write-Step "Converting $distro to WSL 2"
+        Invoke-Native wsl.exe @('--set-version', $distro, '2')
+    }
+    if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 60)) {
+        $probe = Get-WslDistroLaunchProbe $distro
+        throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output)
     }
     return $distro
 }

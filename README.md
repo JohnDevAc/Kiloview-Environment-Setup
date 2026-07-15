@@ -138,3 +138,12 @@ different address, rerun the script and choose Repair / reconfigure.
 
 Windows 11 22H2 or later and internet access are required. The script asks for
 explicit acceptance of the vendor license terms before installation.
+
+When Windows 11 is running inside another virtual machine, the VM host must
+expose hardware virtualization extensions to the guest. Setup detects WSL
+errors such as `WSL_E_VM_MODE_INVALID_STATE` and reports that nested
+virtualization must be enabled on the host instead of repeatedly reinstalling
+Ubuntu. For a Hyper-V VM, fully stop the VM and run this on the host before
+starting it again:
+
+    Set-VMProcessor -VMName '<VM name>' -ExposeVirtualizationExtensions $true
