@@ -407,6 +407,7 @@ function Read-SuiteConfig {
 function Confirm-LicenseAcceptance {
     Write-Host ''
     Write-Host 'This downloads Kiloview and NDI software and performs unattended installation.' -ForegroundColor Yellow
+    Write-Host "Kiloview's current licence is published in its official installer: $($script:KiloInstallerUrl)" -ForegroundColor Yellow
     Write-Host 'You must accept the vendors license agreements to continue.' -ForegroundColor Yellow
     return (Read-Host 'Type YES to accept and continue') -ieq 'YES'
 }
@@ -610,32 +611,10 @@ function Install-KiloLink {
     }
 
     Write-Step 'Installing KiloLink Server Pro'
-    $existsOutput = Invoke-Wsl $Config.DistroName "test -d '$($Config.LinuxDataPath)' && echo yes || echo no" -Capture
-    $pathExists = (@($existsOutput | Select-Object -Last 1)[0]).Trim() -eq 'yes'
-    $answers = New-Object Collections.Generic.List[string]
-    $answers.Add('y')
-    $answers.Add([string]$Config.LinuxDataPath)
-    if ($pathExists) { $answers.Add('y') }
-    $answers.Add([string]$Config.WebPort)
-    $answers.Add([string]$Config.LinkPort)
-    $answers.Add([string]$Config.PublicIp)
-    $input = ($answers -join [Environment]::NewLine) + [Environment]::NewLine
-    $answerBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($input))
-
-    $template = @'
-set -euo pipefail
-export PAGER=cat
-curl -fsSL "__INSTALL_URL__" -o /tmp/install-kilolink.sh
-test -s /tmp/install-kilolink.sh
-printf '%s' '__ANSWERS__' | base64 -d | bash /tmp/install-kilolink.sh
-docker update --restart always "__CONTAINER__" >/dev/null
-docker start "__CONTAINER__" >/dev/null || true
-docker inspect "__CONTAINER__" >/dev/null
-'@
-    $content = $template.Replace('__INSTALL_URL__', $script:KiloInstallerUrl)
-    $content = $content.Replace('__ANSWERS__', $answerBase64)
-    $content = $content.Replace('__CONTAINER__', $script:ContainerName)
-    Invoke-WslScript $Config.DistroName $content
+    # Deploy the official image with the same container settings published by
+    # Kiloview's installer. This avoids automating a variable interactive prompt
+    # sequence while retaining the user's explicit licence acceptance above.
+    Recreate-KiloContainer $Config -Pull
     Write-Host 'KiloLink Server Pro installed.' -ForegroundColor Green
 }
 

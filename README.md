@@ -25,6 +25,11 @@ KiloLink and Docker are installed in a dedicated WSL distribution named
 `KiloLink-Ubuntu`. Existing Ubuntu distributions, packages, and APT sources are
 not reused or modified.
 
+The script deploys Kiloview's official `kiloview/klnk-pro` container image with
+the host-network, Avahi/DBus mounts, persistent data, privileges, and restart
+policy used by Kiloview's installer. This avoids depending on its changing
+interactive prompt sequence.
+
 ## Menu
 
 Once a complete or partial installation is detected, the menu offers:
