@@ -385,7 +385,7 @@ function Confirm-LicenseAcceptance {
     Write-Host ''
     Write-Host 'This downloads Kiloview and NDI software and performs unattended installation.' -ForegroundColor Yellow
     Write-Host 'You must accept the vendors license agreements to continue.' -ForegroundColor Yellow
-    return (Read-Host 'Type YES to accept and continue') -ceq 'YES'
+    return (Read-Host 'Type YES to accept and continue') -ieq 'YES'
 }
 
 function Test-SupportedWindows {
