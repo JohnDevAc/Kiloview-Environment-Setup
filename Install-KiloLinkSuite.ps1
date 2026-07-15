@@ -4,10 +4,10 @@
     Menu-driven installer for KiloLink Server Pro, NDI Tools, and NDI Discovery Server.
 
 .DESCRIPTION
-    KiloLink runs in Docker Engine inside Ubuntu WSL 2. Windows 11 mirrored
-    networking exposes its TCP, UDP, and multicast traffic on physical adapters.
-    The selected wired/DHCP address is advertised to KiloLink devices, while the
-    services listen on all available interfaces.
+    KiloLink runs in Docker Engine inside a dedicated Ubuntu WSL 2 distribution.
+    Windows 11 mirrored networking exposes its TCP, UDP, and multicast traffic
+    on physical adapters. The selected wired/DHCP address is advertised to
+    KiloLink devices, while the services listen on all available interfaces.
 #>
 
 [CmdletBinding()]
@@ -24,6 +24,7 @@ $script:NdiTaskName = 'NDI Discovery Server Startup'
 $script:FirewallGroup = 'KiloLink Suite Installer'
 $script:HyperVPrefix = 'KiloLinkSuite-'
 $script:WslVmCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
+$script:ManagedDistroName = 'KiloLink-Ubuntu'
 $script:ContainerName = 'KLNKSVR-pro'
 $script:KiloImage = 'kiloview/klnk-pro:latest'
 $script:LinuxDataPath = '/opt/kilolink-server'
@@ -136,7 +137,10 @@ function Get-UbuntuDistro {
     if ($Preferred -and $distros -contains $Preferred) {
         return $Preferred
     }
-    return @($distros | Where-Object { $_ -match '^Ubuntu(?:-|$)' } | Select-Object -First 1)[0]
+    if ($distros -contains $script:ManagedDistroName) {
+        return $script:ManagedDistroName
+    }
+    return $null
 }
 
 function Invoke-Wsl {
@@ -359,9 +363,16 @@ function Get-LegacyKiloConfig {
 function Read-SuiteConfig {
     param([switch]$UseSaved)
     $saved = if ($UseSaved) { Get-SavedConfig } else { $null }
-    $preferredDistro = if ($saved) { [string](Get-PropertyValue $saved 'DistroName' 'Ubuntu') } else { 'Ubuntu' }
+    $savedDistro = if ($saved) { [string](Get-PropertyValue $saved 'DistroName' '') } else { '' }
+    $savedDistroHasKiloLink = $savedDistro -and
+        ((Get-WslDistroNames) -contains $savedDistro) -and
+        (Test-KiloContainer $savedDistro)
+    $preferredDistro = if ($savedDistroHasKiloLink) { $savedDistro } else { $script:ManagedDistroName }
+    if ($savedDistro -and $savedDistro -ne $preferredDistro) {
+        Write-Host "Using dedicated WSL distribution '$($script:ManagedDistroName)'; '$savedDistro' will not be modified." -ForegroundColor Yellow
+    }
     $distro = Get-UbuntuDistro $preferredDistro
-    if (-not $distro) { $distro = 'Ubuntu' }
+    if (-not $distro) { $distro = $preferredDistro }
     $legacy = if (-not $saved -and (Get-WslDistroNames) -contains $distro) { Get-LegacyKiloConfig $distro } else { $null }
     $adapter = Select-PrimaryLanAddress $saved
     $webDefault = if ($saved) { [int](Get-PropertyValue $saved 'WebPort' 80) } elseif ($legacy -and $legacy.WebPort) { [int]$legacy.WebPort } else { 80 }
@@ -484,24 +495,23 @@ function Ensure-Ubuntu {
     param($Config)
     $distro = Get-UbuntuDistro ([string]$Config.DistroName)
     if (-not $distro) {
-        Write-Step 'Installing Ubuntu under WSL 2'
-        Invoke-Native wsl.exe @('--install', '--distribution', 'Ubuntu', '--no-launch')
-        $distro = Get-UbuntuDistro 'Ubuntu'
+        Write-Step "Installing dedicated Ubuntu WSL 2 distribution '$($script:ManagedDistroName)'"
+        Invoke-Native wsl.exe @('--install', 'Ubuntu', '--name', $script:ManagedDistroName, '--version', '2', '--no-launch')
+        $distro = Get-UbuntuDistro $script:ManagedDistroName
         if (-not $distro) {
-            Write-Host 'Ubuntu was requested but is not ready. Restart if prompted, then choose Repair / Reconfigure.' -ForegroundColor Yellow
+            Write-Host "$($script:ManagedDistroName) was requested but is not ready. Restart if prompted, then choose Repair / Reconfigure." -ForegroundColor Yellow
             return $null
         }
     }
     $Config.DistroName = $distro
     Save-Config $Config
-    Invoke-Native wsl.exe @('--set-version', $distro, '2') -IgnoreExitCode
     Invoke-Wsl $distro 'true'
     return $distro
 }
 
 function Ensure-Docker {
     param([string]$Distro)
-    Write-Step 'Installing systemd, Docker Engine, and Avahi in Ubuntu'
+    Write-Step "Installing systemd, Docker Engine, and Avahi in $Distro"
 
     $enableSystemd = @'
 set -euo pipefail
@@ -1002,7 +1012,8 @@ function Uninstall-Suite {
     Write-Heading 'Uninstall KiloLink Suite'
     Write-Host 'This removes KiloLink and its persisted data, NDI Tools/Discovery Server,' -ForegroundColor Yellow
     Write-Host 'scheduled tasks, installer firewall rules, and browser shortcuts.' -ForegroundColor Yellow
-    Write-Host 'WSL, Ubuntu, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
+    Write-Host "The dedicated $($script:ManagedDistroName) distribution will be deleted." -ForegroundColor Yellow
+    Write-Host 'WSL, unrelated distributions, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
     if ((Read-Host 'Type UNINSTALL to continue') -cne 'UNINSTALL') {
         Write-Host 'Uninstall cancelled.' -ForegroundColor Yellow
         return
@@ -1060,8 +1071,12 @@ function Uninstall-Suite {
             Remove-Item -LiteralPath $programs -Force
         }
     }
+    if ($distro -eq $script:ManagedDistroName -and (Get-WslDistroNames) -contains $script:ManagedDistroName) {
+        Write-Step "Removing dedicated WSL distribution '$($script:ManagedDistroName)'"
+        Invoke-Native wsl.exe @('--unregister', $script:ManagedDistroName)
+    }
     Remove-Item -LiteralPath $script:StateRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host 'Uninstall complete. WSL and Ubuntu were retained.' -ForegroundColor Green
+    Write-Host 'Uninstall complete. WSL and unrelated distributions were retained.' -ForegroundColor Green
 }
 
 function Show-State {
@@ -1069,7 +1084,7 @@ function Show-State {
     Write-Host ("KiloLink Server Pro:  " + $(if ($State.KiloLink) { 'Installed' } else { 'Not detected' }))
     Write-Host ("NDI Tools:            " + $(if ($State.NDITools) { 'Installed' } else { 'Not detected' }))
     Write-Host ("NDI Discovery Server: " + $(if ($State.NDIServer) { 'Configured' } else { 'Not detected' }))
-    Write-Host ("Ubuntu WSL:           " + $(if ($State.Distro) { $State.Distro } else { 'Not detected' }))
+    Write-Host ("KiloLink WSL distro:  " + $(if ($State.Distro) { $State.Distro } else { 'Not detected' }))
 }
 
 function Show-Menu {

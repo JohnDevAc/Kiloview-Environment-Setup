@@ -21,6 +21,10 @@ On a clean PC, choose Install. If Windows needs a restart after enabling WSL,
 restart the PC, run the script again, and choose Repair / reconfigure. The
 selected settings are saved under C:\ProgramData\KiloLink.
 
+KiloLink and Docker are installed in a dedicated WSL distribution named
+`KiloLink-Ubuntu`. Existing Ubuntu distributions, packages, and APT sources are
+not reused or modified.
+
 ## Menu
 
 Once a complete or partial installation is detected, the menu offers:
@@ -35,8 +39,9 @@ packages, and the Kiloview KiloLink container image.
 
 Uninstall removes KiloLink and its persisted application data, NDI Tools and
 Discovery Server, the scheduled tasks, installer firewall rules, legacy port
-proxies associated with the saved configuration, and shortcuts. It deliberately
-retains WSL and Ubuntu so unrelated Linux data is not destroyed.
+proxies associated with the saved configuration, shortcuts, and the dedicated
+`KiloLink-Ubuntu` distribution. It retains WSL, unrelated distributions, and
+the shared `.wslconfig` file so unrelated Linux data is not destroyed.
 
 ## Multi-NIC behavior
 
