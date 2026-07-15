@@ -46,13 +46,18 @@ Interactive operations use a single frequently refreshed PowerShell progress
 bar. Detailed WSL, APT, Docker, and installer output is written to
 `C:\ProgramData\KiloLink\installer.log` instead of filling the console.
 
-On a clean PC, choose Install. If Windows needs a restart after enabling WSL,
-restart the PC, run the script again, and choose Repair / reconfigure. The
-selected settings are saved under C:\ProgramData\KiloLink.
+On a clean PC, choose Install. Missing or disabled WSL is treated as the normal
+clean-install state. Setup enables and verifies WSL and Virtual Machine
+Platform, installs and updates the WSL runtime without an unrelated default
+distribution, and waits for each prerequisite to become healthy before moving
+on.
 
-Missing or disabled WSL is treated as the normal clean-install state. Setup
-enables the required Windows features, installs the WSL runtime without an
-unrelated default distribution, and clearly prompts for a restart when needed.
+When Windows must restart, Setup saves its configuration, registers a maximum
+of three elevated continuation attempts, and offers to restart Windows with a
+20-second warning. About 20 seconds after the same user signs back in, the
+persisted launcher resumes automatically, waits for physical networking, and
+re-verifies Windows features and WSL before continuing with Ubuntu, Docker,
+KiloLink, and NDI. The continuation task and state are removed after success.
 
 KiloLink and Docker are installed in a dedicated WSL distribution named
 `KiloLink-Ubuntu`. Existing Ubuntu distributions, packages, and APT sources are
@@ -80,6 +85,10 @@ menu prompts from an elevated PowerShell session:
     .\Install-KiloLinkSuite.ps1 -Action Repair -AcceptLicenses -LogPath C:\ProgramData\KiloLink\background-install.log
 
 Use `-AcceptLicenses` only after reviewing and accepting the vendor agreements.
+Unattended repair schedules its continuation but does not restart Windows unless
+`-AutoRestart` is also supplied. Interactive Setup asks before restarting, and
+an already-resumed installation automatically performs any additional required
+restart within its three-attempt safety limit.
 For a non-interactive update check, use `-Action Update` with an optional
 `-LogPath`. Uninstall remains interactive-only to protect application data.
 

@@ -10,8 +10,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("JohnDevAc")]
 [assembly: AssemblyProduct("KiloLink Environment Setup")]
 [assembly: AssemblyCopyright("Copyright JohnDevAc 2026")]
-[assembly: AssemblyVersion("1.1.1.0")]
-[assembly: AssemblyFileVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 namespace KiloLink.Setup
 {
@@ -21,14 +21,23 @@ namespace KiloLink.Setup
         private const string InstallerFileName = "Install-KiloLinkSuite.ps1";
 
         [STAThread]
-        private static int Main()
+        private static int Main(string[] arguments)
         {
             try
             {
+                bool autoResume = false;
+                foreach (string argument in arguments)
+                {
+                    if (String.Equals(argument, "--resume", StringComparison.OrdinalIgnoreCase))
+                    {
+                        autoResume = true;
+                    }
+                }
                 if (!IsAdministrator())
                 {
                     ProcessStartInfo elevation = new ProcessStartInfo();
                     elevation.FileName = Assembly.GetExecutingAssembly().Location;
+                    elevation.Arguments = autoResume ? "--resume" : String.Empty;
                     elevation.Verb = "runas";
                     elevation.UseShellExecute = true;
                     Process.Start(elevation);
@@ -37,7 +46,7 @@ namespace KiloLink.Setup
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new SetupForm());
+                Application.Run(new SetupForm(autoResume));
                 return Environment.ExitCode;
             }
             catch (Exception exception)
@@ -88,13 +97,17 @@ namespace KiloLink.Setup
         private readonly Label statusLabel;
         private Process installerProcess;
         private readonly string launcherDirectory;
+        private readonly string persistentLauncherPath;
         private readonly string installerPath;
         private readonly string logPath;
+        private readonly bool autoResume;
 
-        internal SetupForm()
+        internal SetupForm(bool resume)
         {
+            autoResume = resume;
             string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             launcherDirectory = Path.Combine(programData, "KiloLink", "Launcher");
+            persistentLauncherPath = Path.Combine(launcherDirectory, "Setup.exe");
             installerPath = Path.Combine(launcherDirectory, "Install-KiloLinkSuite.ps1");
             logPath = Path.Combine(programData, "KiloLink", "setup-launcher.log");
 
@@ -118,7 +131,7 @@ namespace KiloLink.Setup
             description.Location = new System.Drawing.Point(27, 65);
 
             startButton = new Button();
-            startButton.Text = "Start setup";
+            startButton.Text = autoResume ? "Resume setup" : "Start setup";
             startButton.Size = new System.Drawing.Size(135, 36);
             startButton.Location = new System.Drawing.Point(29, 111);
             startButton.Click += StartButtonClick;
@@ -149,13 +162,31 @@ namespace KiloLink.Setup
             Controls.Add(closeButton);
             Controls.Add(statusLabel);
             AcceptButton = startButton;
+            if (autoResume)
+            {
+                statusLabel.Text = "Waiting for Windows to finish sign-in before resuming setup...";
+                Shown += delegate { BeginInvoke((MethodInvoker)StartInstaller); };
+            }
         }
 
         private void StartButtonClick(object sender, EventArgs eventArgs)
         {
+            StartInstaller();
+        }
+
+        private void StartInstaller()
+        {
             try
             {
                 Directory.CreateDirectory(launcherDirectory);
+                string currentLauncher = Assembly.GetExecutingAssembly().Location;
+                if (!String.Equals(
+                    Path.GetFullPath(currentLauncher),
+                    Path.GetFullPath(persistentLauncherPath),
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Copy(currentLauncher, persistentLauncherPath, true);
+                }
                 SetupLauncher.ExtractInstaller(installerPath);
 
                 string systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
@@ -169,6 +200,7 @@ namespace KiloLink.Setup
                 startInfo.FileName = powershellPath;
                 startInfo.Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File "
                     + SetupLauncher.Quote(installerPath)
+                    + (autoResume ? " -Action Resume -AcceptLicenses" : String.Empty)
                     + " -LauncherMode -LogPath "
                     + SetupLauncher.Quote(logPath);
                 startInfo.WorkingDirectory = launcherDirectory;
@@ -185,7 +217,9 @@ namespace KiloLink.Setup
                 }
 
                 startButton.Enabled = false;
-                statusLabel.Text = "Installer running. Follow the menu in the PowerShell window.";
+                statusLabel.Text = autoResume
+                    ? "Resumed installer running. Windows and WSL state are being verified."
+                    : "Installer running. Follow the menu in the PowerShell window.";
             }
             catch (Exception exception)
             {
@@ -209,7 +243,9 @@ namespace KiloLink.Setup
                 logButton.Enabled = File.Exists(logPath);
                 if (exitCode == 0)
                 {
-                    statusLabel.Text = "Installer closed. You can run it again if required.";
+                    statusLabel.Text = autoResume
+                        ? "Resumed setup finished. Review the PowerShell completion summary."
+                        : "Installer closed. You can run it again if required.";
                 }
                 else
                 {

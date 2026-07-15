@@ -12,9 +12,10 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Repair', 'Update')]
+    [ValidateSet('Menu', 'Repair', 'Update', 'Resume')]
     [string]$Action = 'Menu',
     [switch]$AcceptLicenses,
+    [switch]$AutoRestart,
     [switch]$LauncherMode,
     [string]$LogPath
 )
@@ -37,6 +38,11 @@ $script:LinuxDataPath = '/opt/kilolink-server'
 $script:NdiToolsUrl = 'https://downloads.ndi.tv/Tools/NDI%206%20Tools.exe'
 $script:KiloInstallerUrl = 'https://www.kiloview.com/downloads/klnk-pro/install.sh'
 $script:InstallerLogPath = Join-Path $script:StateRoot 'installer.log'
+$script:ResumeStatePath = Join-Path $script:StateRoot 'resume-state.json'
+$script:ResumeTaskName = 'KiloLink Suite Installation Resume'
+$script:PersistentLauncherPath = Join-Path $script:StateRoot 'Launcher\Setup.exe'
+$script:RestartScheduled = $false
+$script:MaximumResumeAttempts = 3
 $script:KiloDefaultUsername = 'admin'
 $script:KiloDefaultPassword = 'Kiloview001'
 $script:ProgressActive = $false
@@ -82,6 +88,15 @@ function Update-SuiteProgressPulse {
     $frame = $frames[$script:ProgressPulseIndex % $frames.Count]
     $script:ProgressPulseIndex++
     Write-Progress -Id 1 -Activity $script:ProgressActivity -Status ("{0} ({1}%)" -f $script:ProgressStatus, $script:ProgressPercent) -CurrentOperation ("Working {0}" -f $frame) -PercentComplete $script:ProgressPercent
+}
+
+function Wait-SuiteProgressInterval {
+    param([int]$Milliseconds = 3000)
+    $deadline = (Get-Date).AddMilliseconds($Milliseconds)
+    do {
+        Update-SuiteProgressPulse
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
 }
 
 function Stop-SuiteProgress {
@@ -141,6 +156,7 @@ function Ensure-Administrator {
     $elevationArguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     if ($Action -ne 'Menu') { $elevationArguments += " -Action $Action" }
     if ($AcceptLicenses) { $elevationArguments += ' -AcceptLicenses' }
+    if ($AutoRestart) { $elevationArguments += ' -AutoRestart' }
     if ($LauncherMode) { $elevationArguments += ' -LauncherMode' }
     if ($LogPath) { $elevationArguments += " -LogPath `"$LogPath`"" }
     Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs | Out-Null
@@ -264,6 +280,110 @@ function Test-WslRuntime {
     }
 }
 
+function Wait-WslRuntime {
+    param([int]$TimeoutSeconds = 180)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-WslRuntime) {
+            return $true
+        }
+        Wait-SuiteProgressInterval
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Get-ResumeState {
+    if (-not (Test-Path -LiteralPath $script:ResumeStatePath)) {
+        return $null
+    }
+    try {
+        return Get-Content -Raw -LiteralPath $script:ResumeStatePath | ConvertFrom-Json
+    } catch {
+        Write-InstallerLog "Resume state could not be read: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Remove-ResumeTask {
+    Unregister-ScheduledTask -TaskName $script:ResumeTaskName -Confirm:$false -ErrorAction SilentlyContinue
+}
+
+function Clear-ResumeContinuation {
+    Remove-ResumeTask
+    Remove-Item -LiteralPath $script:ResumeStatePath -Force -ErrorAction SilentlyContinue
+}
+
+function Register-ResumeContinuation {
+    param([string]$Reason)
+    New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
+    $oldState = Get-ResumeState
+    $attempt = if ($oldState) { [int](Get-PropertyValue $oldState 'Attempt' 0) + 1 } else { 1 }
+    if ($attempt -gt $script:MaximumResumeAttempts) {
+        throw "Windows prerequisites still require a restart after $($script:MaximumResumeAttempts) attempts. Check virtualization and Windows Update before retrying."
+    }
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if (Test-Path -LiteralPath $script:PersistentLauncherPath) {
+        $taskAction = New-ScheduledTaskAction -Execute $script:PersistentLauncherPath -Argument '--resume'
+    } else {
+        if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
+            throw 'Setup cannot create a restart continuation because neither the persistent launcher nor a script path is available.'
+        }
+        $resumeScript = Join-Path $script:StateRoot 'Launcher\Install-KiloLinkSuite.ps1'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $resumeScript) -Force | Out-Null
+        if (-not [string]::Equals([IO.Path]::GetFullPath($PSCommandPath), [IO.Path]::GetFullPath($resumeScript), [StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $PSCommandPath -Destination $resumeScript -Force
+        }
+        $arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$resumeScript`" -Action Resume -AcceptLicenses -LauncherMode -LogPath `"$(Join-Path $script:StateRoot 'setup-launcher.log')`""
+        $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
+    }
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
+    if ($null -ne $trigger.PSObject.Properties['Delay']) {
+        $trigger.Delay = 'PT20S'
+    }
+    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 4) -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName $script:ResumeTaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    $registeredTask = Get-ScheduledTask -TaskName $script:ResumeTaskName -ErrorAction SilentlyContinue
+    if (-not $registeredTask) {
+        throw 'Windows did not retain the scheduled continuation task, so Setup will not restart the computer.'
+    }
+
+    [pscustomobject]@{
+        SchemaVersion = 1
+        Attempt = $attempt
+        Reason = $Reason
+        RegisteredAt = (Get-Date).ToString('o')
+        User = $identity
+    } | ConvertTo-Json | Set-Content -LiteralPath $script:ResumeStatePath -Encoding UTF8
+    Write-InstallerLog "Registered restart continuation attempt $attempt for $identity. Reason: $Reason"
+}
+
+function Request-RestartAndResume {
+    param([string]$Reason)
+    Register-ResumeContinuation -Reason $Reason
+    $script:RestartScheduled = $true
+    if ($script:ProgressActive) {
+        Stop-SuiteProgress
+    }
+    Write-Host ''
+    Write-Heading 'Windows restart required'
+    Write-Host $Reason -ForegroundColor Yellow
+    Write-Host 'Setup will resume automatically about 20 seconds after you sign back in.' -ForegroundColor Green
+
+    $restartNow = $Action -eq 'Resume' -or $AutoRestart
+    if ($Action -eq 'Menu') {
+        $answer = Read-Host 'Restart Windows now? [Y/n]'
+        $restartNow = [string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(?i)y(?:es)?$'
+    }
+    if ($restartNow) {
+        Write-Host 'Windows will restart in 20 seconds. Save any other open work now.' -ForegroundColor Yellow
+        Invoke-Native shutdown.exe @('/r', '/t', '20', '/c', 'KiloLink Environment Setup is continuing after restart.')
+    } else {
+        Write-Host 'Restart Windows manually when ready; Setup will continue after the next sign-in.' -ForegroundColor Yellow
+    }
+}
+
 function Get-UbuntuDistro {
     param([string]$Preferred)
     $distros = @(Get-WslDistroNames)
@@ -274,6 +394,47 @@ function Get-UbuntuDistro {
         return $script:ManagedDistroName
     }
     return $null
+}
+
+function Wait-WslDistroRegistration {
+    param([string]$Distro, [int]$TimeoutSeconds = 180)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if ((Get-WslDistroNames) -contains $Distro) {
+            return $true
+        }
+        Wait-SuiteProgressInterval
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Test-WslDistroReady {
+    param([string]$Distro)
+    if (-not $Distro -or -not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & wsl.exe -d $Distro -u root -- true 2>$null | Out-Null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
+function Wait-WslDistroReady {
+    param([string]$Distro, [int]$TimeoutSeconds = 180)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-WslDistroReady $Distro) {
+            return $true
+        }
+        Wait-SuiteProgressInterval
+    } while ((Get-Date) -lt $deadline)
+    return $false
 }
 
 function Invoke-Wsl {
@@ -550,31 +711,50 @@ function Ensure-WslFeatures {
     $restart = $false
     foreach ($name in @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')) {
         $feature = Get-WindowsOptionalFeature -Online -FeatureName $name
+        if ($feature.State -eq 'EnablePending') {
+            $restart = $true
+            continue
+        }
         if ($feature.State -ne 'Enabled') {
             Write-Detail "Enabling $name"
             $result = Enable-WindowsOptionalFeature -Online -FeatureName $name -All -NoRestart
             if ($result.RestartNeeded) { $restart = $true }
+            $verified = Get-WindowsOptionalFeature -Online -FeatureName $name
+            if ($verified.State -notin @('Enabled', 'EnablePending')) {
+                throw "Windows feature $name did not enter an enabled state. Current state: $($verified.State)."
+            }
+            if ($verified.State -eq 'EnablePending') { $restart = $true }
         }
     }
     if ($restart) {
-        Write-Host 'Restart Windows, rerun this script, then choose Repair / Reconfigure.' -ForegroundColor Yellow
+        Request-RestartAndResume 'Windows must finish enabling WSL and Virtual Machine Platform before Linux can start.'
         return $false
     }
 
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-        throw 'Windows did not make wsl.exe available after enabling the required features. Restart Windows and run Setup.exe again.'
+        Request-RestartAndResume 'Windows enabled the required features but wsl.exe is not available until the next restart.'
+        return $false
     }
     if (-not (Test-WslRuntime)) {
         Write-Step 'Installing the Windows Subsystem for Linux runtime'
         Invoke-Native wsl.exe @('--install', '--no-distribution') -IgnoreExitCode
+        Set-SuiteProgress -Percent ([Math]::Min(14, $script:ProgressPercent + 2)) -Status 'Waiting for the WSL runtime to become ready'
+        if (-not (Wait-WslRuntime -TimeoutSeconds 120)) {
+            Request-RestartAndResume 'The WSL runtime was installed but has not become ready in the current Windows session.'
+            return $false
+        }
     }
+    Write-Step 'Updating and verifying the Windows Subsystem for Linux runtime'
     Invoke-Native wsl.exe @('--update') -IgnoreExitCode
-    if (-not (Test-WslRuntime)) {
-        Write-Host 'WSL has been enabled but Windows must restart before installation can continue.' -ForegroundColor Yellow
-        Write-Host 'Restart Windows, run Setup.exe again, then choose Repair / Reconfigure.' -ForegroundColor Yellow
+    if (-not (Wait-WslRuntime -TimeoutSeconds 180)) {
+        Request-RestartAndResume 'WSL did not report a healthy runtime after installation and update.'
         return $false
     }
     Invoke-Native wsl.exe @('--set-default-version', '2')
+    if (-not (Test-WslRuntime)) {
+        throw 'WSL stopped responding after its default version was set. Check virtualization support and the diagnostic log.'
+    }
+    Write-Detail 'WSL runtime and required Windows features are ready.' Green
     return $true
 }
 
@@ -644,15 +824,20 @@ function Ensure-Ubuntu {
     if (-not $distro) {
         Write-Step "Installing dedicated Ubuntu WSL 2 distribution '$($script:ManagedDistroName)'"
         Invoke-Native wsl.exe @('--install', 'Ubuntu', '--name', $script:ManagedDistroName, '--version', '2', '--no-launch')
-        $distro = Get-UbuntuDistro $script:ManagedDistroName
-        if (-not $distro) {
-            Write-Host "$($script:ManagedDistroName) was requested but is not ready. Restart if prompted, then choose Repair / Reconfigure." -ForegroundColor Yellow
+        Set-SuiteProgress -Percent ([Math]::Min(27, $script:ProgressPercent + 2)) -Status 'Waiting for the dedicated Ubuntu distribution to register'
+        if (-not (Wait-WslDistroRegistration -Distro $script:ManagedDistroName -TimeoutSeconds 180)) {
+            Request-RestartAndResume "The $($script:ManagedDistroName) distribution was installed but has not registered in the current Windows session."
             return $null
         }
+        $distro = $script:ManagedDistroName
     }
     $Config.DistroName = $distro
     Save-Config $Config
-    Invoke-Wsl $distro 'true'
+    Write-Step "Verifying $distro as a working WSL 2 distribution"
+    Invoke-Native wsl.exe @('--set-version', $distro, '2')
+    if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 180)) {
+        throw "$distro registered but could not start within 180 seconds. On a virtual machine, enable nested virtualization on the host before retrying."
+    }
     return $distro
 }
 
@@ -708,8 +893,9 @@ mv /etc/wsl.conf.kilolink /etc/wsl.conf
     Invoke-WslScript $Distro $enableSystemd
     Set-SuiteProgress -Percent ([Math]::Min(42, $script:ProgressPercent + 2)) -Status 'Restarting WSL with systemd enabled'
     Invoke-Native wsl.exe @('--shutdown') -IgnoreExitCode
-    Start-Sleep -Seconds 2
-    Invoke-Wsl $Distro 'true'
+    if (-not (Wait-WslDistroReady -Distro $Distro -TimeoutSeconds 120)) {
+        throw "$Distro did not restart with systemd within 120 seconds."
+    }
 
     Set-SuiteProgress -Percent ([Math]::Min(44, $script:ProgressPercent + 2)) -Status 'Installing Linux networking and service prerequisites'
     $installDocker = @'
@@ -1119,7 +1305,7 @@ function Repair-Suite {
         Write-Host 'Operation cancelled.' -ForegroundColor Yellow
         return
     }
-    $showProgress = $Action -eq 'Menu'
+    $showProgress = $Action -in @('Menu', 'Resume')
     $succeeded = $false
     if ($showProgress) { Start-SuiteProgress -Activity 'Installing KiloLink Server Pro and NDI' -Status 'Preparing the saved configuration' }
     try {
@@ -1157,7 +1343,39 @@ function Repair-Suite {
     } finally {
         if ($showProgress) { Stop-SuiteProgress }
     }
-    if ($succeeded) { Show-SuiteSummary $config }
+    if ($succeeded) {
+        Clear-ResumeContinuation
+        Show-SuiteSummary $config
+    }
+}
+
+function Wait-ResumeNetwork {
+    param([int]$TimeoutSeconds = 120)
+    Write-Detail 'Waiting for Windows networking and DHCP to become ready...' Yellow
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (@(Get-LanCandidates).Count -gt 0) {
+            Write-Detail 'Windows networking is ready.' Green
+            return
+        }
+        Wait-SuiteProgressInterval
+    } while ((Get-Date) -lt $deadline)
+    throw "No usable physical IPv4 adapter became ready within $TimeoutSeconds seconds after sign-in."
+}
+
+function Resume-Suite {
+    Remove-ResumeTask
+    if (-not (Get-SavedConfig)) {
+        throw 'Setup cannot resume because its saved configuration is missing.'
+    }
+    Write-Heading 'Resuming KiloLink Environment Setup after Windows restart'
+    Start-SuiteProgress -Activity 'Resuming KiloLink Environment Setup' -Status 'Waiting for Windows networking and DHCP'
+    try {
+        Wait-ResumeNetwork
+    } finally {
+        Stop-SuiteProgress
+    }
+    Repair-Suite -UseSavedConfiguration -LicenseAccepted
 }
 
 function Update-KiloLink {
@@ -1320,6 +1538,7 @@ function Uninstall-Suite {
     $config = Get-SavedConfig
     $preferred = if ($config) { [string](Get-PropertyValue $config 'DistroName' '') } else { '' }
     $distro = Get-UbuntuDistro $preferred
+    Remove-ResumeTask
     Unregister-ScheduledTask -TaskName $script:StartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $script:NdiTaskName -Confirm:$false -ErrorAction SilentlyContinue
     $ndiService = Get-NdiDiscoveryService
@@ -1435,6 +1654,9 @@ function Show-Menu {
                 Write-Host 'Rerun the script and choose Repair / Reconfigure after correcting the problem.' -ForegroundColor Yellow
             }
         }
+        if ($script:RestartScheduled) {
+            return
+        }
         Write-Host ''
         Read-Host 'Press Enter to return to the menu' | Out-Null
     }
@@ -1461,6 +1683,16 @@ try {
             Repair-Suite -UseSavedConfiguration -LicenseAccepted
         }
         'Update' { Update-Suite }
+        'Resume' {
+            if (-not $AcceptLicenses) {
+                throw 'A restart continuation requires the license acceptance recorded by the initial setup run.'
+            }
+            Resume-Suite
+            if ($LauncherMode -and -not $script:RestartScheduled) {
+                Write-Host ''
+                Read-Host 'Setup has finished. Press Enter to close this window' | Out-Null
+            }
+        }
     }
 } catch {
     $backgroundExitCode = 1
@@ -1472,7 +1704,7 @@ try {
     }
 }
 if ($backgroundExitCode -ne 0) {
-    if ($Action -eq 'Menu' -and $LauncherMode) {
+    if ($Action -in @('Menu', 'Resume') -and $LauncherMode) {
         Write-Host ''
         Read-Host 'Press Enter to close this window' | Out-Null
     }
