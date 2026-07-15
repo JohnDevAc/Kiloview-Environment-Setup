@@ -18,6 +18,10 @@ Open PowerShell and run:
 
 The script requests Administrator elevation if needed.
 
+Interactive operations use a single frequently refreshed PowerShell progress
+bar. Detailed WSL, APT, Docker, and installer output is written to
+`C:\ProgramData\KiloLink\installer.log` instead of filling the console.
+
 On a clean PC, choose Install. If Windows needs a restart after enabling WSL,
 restart the PC, run the script again, and choose Repair / reconfigure. The
 selected settings are saved under C:\ProgramData\KiloLink.
@@ -50,6 +54,18 @@ menu prompts from an elevated PowerShell session:
 Use `-AcceptLicenses` only after reviewing and accepting the vendor agreements.
 For a non-interactive update check, use `-Action Update` with an optional
 `-LogPath`. Uninstall remains interactive-only to protect application data.
+
+After a successful install, repair, or update, the console shows the KiloLink
+web address, NDI Discovery Server endpoint, and login details. Kiloview's
+[installation and deployment manual](https://www.kiloview.com/downloads/downloads/Firmware/kilolink-server-pro/Kilolink_Server_Pro_Installation_and_Deployment_Manual.pdf)
+documents these defaults for a new KiloLink Server Pro installation:
+
+- Username: `admin`
+- Password: `Kiloview001`
+
+Change the default password immediately after the first login. Existing
+installations retain their previously configured password. NDI Tools and NDI
+Discovery Server do not provide a web login.
 
 Update checks the official current NDI Tools package, Ubuntu and Docker
 packages, and the Kiloview KiloLink container image.

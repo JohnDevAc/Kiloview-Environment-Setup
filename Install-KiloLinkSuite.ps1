@@ -35,6 +35,67 @@ $script:KiloImage = 'kiloview/klnk-pro:latest'
 $script:LinuxDataPath = '/opt/kilolink-server'
 $script:NdiToolsUrl = 'https://downloads.ndi.tv/Tools/NDI%206%20Tools.exe'
 $script:KiloInstallerUrl = 'https://www.kiloview.com/downloads/klnk-pro/install.sh'
+$script:InstallerLogPath = Join-Path $script:StateRoot 'installer.log'
+$script:KiloDefaultUsername = 'admin'
+$script:KiloDefaultPassword = 'Kiloview001'
+$script:ProgressActive = $false
+$script:ProgressActivity = ''
+$script:ProgressStatus = ''
+$script:ProgressPercent = 0
+$script:ProgressPulseIndex = 0
+$script:ProgressLastPulse = [datetime]::MinValue
+
+function Write-InstallerLog {
+    param([string]$Message)
+    if (-not (Test-Path -LiteralPath $script:StateRoot)) { return }
+    $line = '{0} {1}' -f (Get-Date).ToString('o'), $Message
+    Add-Content -LiteralPath $script:InstallerLogPath -Value $line -Encoding UTF8
+}
+
+function Start-SuiteProgress {
+    param([string]$Activity, [string]$Status = 'Preparing')
+    $script:ProgressActive = $true
+    $script:ProgressActivity = $Activity
+    $script:ProgressStatus = $Status
+    $script:ProgressPercent = 0
+    $script:ProgressPulseIndex = 0
+    $script:ProgressLastPulse = [datetime]::MinValue
+    Set-SuiteProgress -Percent 1 -Status $Status
+}
+
+function Set-SuiteProgress {
+    param([int]$Percent, [string]$Status)
+    if (-not $script:ProgressActive) { return }
+    $script:ProgressPercent = [Math]::Max($script:ProgressPercent, [Math]::Min(100, $Percent))
+    if ($Status) { $script:ProgressStatus = $Status }
+    Write-Progress -Id 1 -Activity $script:ProgressActivity -Status ("{0} ({1}%)" -f $script:ProgressStatus, $script:ProgressPercent) -PercentComplete $script:ProgressPercent
+    Write-InstallerLog ("PROGRESS {0}% - {1}" -f $script:ProgressPercent, $script:ProgressStatus)
+}
+
+function Update-SuiteProgressPulse {
+    if (-not $script:ProgressActive) { return }
+    $now = Get-Date
+    if (($now - $script:ProgressLastPulse).TotalMilliseconds -lt 250) { return }
+    $script:ProgressLastPulse = $now
+    $frames = @('|', '/', '-', '\')
+    $frame = $frames[$script:ProgressPulseIndex % $frames.Count]
+    $script:ProgressPulseIndex++
+    Write-Progress -Id 1 -Activity $script:ProgressActivity -Status ("{0} ({1}%)" -f $script:ProgressStatus, $script:ProgressPercent) -CurrentOperation ("Working {0}" -f $frame) -PercentComplete $script:ProgressPercent
+}
+
+function Stop-SuiteProgress {
+    if (-not $script:ProgressActive) { return }
+    Write-Progress -Id 1 -Activity $script:ProgressActivity -Completed
+    $script:ProgressActive = $false
+}
+
+function Write-Detail {
+    param([string]$Text, [ConsoleColor]$ForegroundColor = [ConsoleColor]::Gray)
+    Write-InstallerLog $Text
+    if (-not $script:ProgressActive) {
+        Write-Host $Text -ForegroundColor $ForegroundColor
+    }
+}
 
 function Write-Heading {
     param([string]$Text)
@@ -46,6 +107,10 @@ function Write-Heading {
 
 function Write-Step {
     param([string]$Text)
+    if ($script:ProgressActive) {
+        Set-SuiteProgress -Percent ([Math]::Min(98, $script:ProgressPercent + 1)) -Status $Text
+        return
+    }
     Write-Host ''
     Write-Host "-- $Text" -ForegroundColor Yellow
 }
@@ -117,12 +182,32 @@ function Invoke-Native {
         # progress written to stderr (for example by systemctl enable) would
         # otherwise terminate the operation even when the process exits 0.
         $ErrorActionPreference = 'Continue'
-        if ($Capture) {
+        if ($Capture -and $script:ProgressActive) {
+            # Some checks need their output returned to the caller (for example,
+            # docker pull/image comparison). Stream those lines into a list so
+            # long-running captured commands still animate the progress display.
+            $captured = New-Object Collections.Generic.List[string]
+            & $FilePath @Arguments 2>&1 | ForEach-Object {
+                $line = [string]$_
+                $captured.Add($line)
+                Write-InstallerLog $line
+                Update-SuiteProgressPulse
+            }
+            $output = @($captured)
+        } elseif ($Capture) {
             $output = & $FilePath @Arguments 2>&1
         } else {
-            # Show native progress without emitting it into the PowerShell
-            # success pipeline. Callers may return a value of their own.
-            & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Host ([string]$_) }
+            # Interactive mode sends verbose native output to the installer log
+            # while keeping a frequently refreshed progress bar on screen.
+            & $FilePath @Arguments 2>&1 | ForEach-Object {
+                $line = [string]$_
+                if ($script:ProgressActive) {
+                    Write-InstallerLog $line
+                    Update-SuiteProgressPulse
+                } else {
+                    Write-Host $line
+                }
+            }
             $output = $null
         }
         $code = $LASTEXITCODE
@@ -435,7 +520,7 @@ function Ensure-WslFeatures {
     foreach ($name in @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')) {
         $feature = Get-WindowsOptionalFeature -Online -FeatureName $name
         if ($feature.State -ne 'Enabled') {
-            Write-Host "Enabling $name"
+            Write-Detail "Enabling $name"
             $result = Enable-WindowsOptionalFeature -Online -FeatureName $name -All -NoRestart
             if ($result.RestartNeeded) { $restart = $true }
         }
@@ -531,6 +616,7 @@ function Ensure-Docker {
     param([string]$Distro)
     Write-Step "Installing systemd, Docker Engine, and Avahi in $Distro"
 
+    Set-SuiteProgress -Percent ([Math]::Min(40, $script:ProgressPercent + 2)) -Status 'Enabling systemd in the dedicated WSL distribution'
     $enableSystemd = @'
 set -euo pipefail
 touch /etc/wsl.conf
@@ -576,10 +662,12 @@ END {
 mv /etc/wsl.conf.kilolink /etc/wsl.conf
 '@
     Invoke-WslScript $Distro $enableSystemd
+    Set-SuiteProgress -Percent ([Math]::Min(42, $script:ProgressPercent + 2)) -Status 'Restarting WSL with systemd enabled'
     Invoke-Native wsl.exe @('--shutdown') -IgnoreExitCode
     Start-Sleep -Seconds 2
     Invoke-Wsl $Distro 'true'
 
+    Set-SuiteProgress -Percent ([Math]::Min(44, $script:ProgressPercent + 2)) -Status 'Installing Linux networking and service prerequisites'
     $installDocker = @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -613,7 +701,7 @@ docker version >/dev/null
 function Install-KiloLink {
     param($Config)
     if (Test-KiloContainer $Config.DistroName) {
-        Write-Host 'KiloLink Server Pro is already installed.' -ForegroundColor Green
+        Write-Detail 'KiloLink Server Pro is already installed.' Green
         Invoke-Wsl $Config.DistroName "docker update --restart always '$script:ContainerName' >/dev/null; docker start '$script:ContainerName' >/dev/null || true"
         return
     }
@@ -623,11 +711,12 @@ function Install-KiloLink {
     # Kiloview's installer. This avoids automating a variable interactive prompt
     # sequence while retaining the user's explicit licence acceptance above.
     Recreate-KiloContainer $Config -Pull
-    Write-Host 'KiloLink Server Pro installed.' -ForegroundColor Green
+    Write-Detail 'KiloLink Server Pro installed.' Green
 }
 
 function Recreate-KiloContainer {
     param($Config, [switch]$Pull)
+    Set-SuiteProgress -Percent ([Math]::Min(88, $script:ProgressPercent + 2)) -Status $(if ($Pull) { 'Downloading the KiloLink Server Pro image' } else { 'Preparing the KiloLink Server Pro image' })
     $pullCommand = if ($Pull) { 'docker pull "__IMAGE__"' } else { 'docker image inspect "__IMAGE__" >/dev/null' }
     $template = @'
 set -euo pipefail
@@ -645,6 +734,7 @@ docker inspect "__CONTAINER__" >/dev/null
     $content = $content.Replace('__LINK__', [string]$Config.LinkPort)
     $content = $content.Replace('__IP__', [string]$Config.PublicIp)
     $content = $content.Replace('__IMAGE__', [string]$Config.KiloLinkImage)
+    Set-SuiteProgress -Percent ([Math]::Min(90, $script:ProgressPercent + 2)) -Status 'Creating the KiloLink Server Pro container'
     Invoke-WslScript $Config.DistroName $content
 }
 
@@ -674,16 +764,86 @@ function Convert-ToVersion {
     try { return [version]$match.Value } catch { return $null }
 }
 
+function Download-FileWithProgress {
+    param(
+        [string]$Uri,
+        [string]$Destination,
+        [int]$BasePercent,
+        [int]$PercentSpan,
+        [string]$Status
+    )
+    Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    if (-not $script:ProgressActive -or -not (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue)) {
+        Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination
+        return
+    }
+
+    $job = $null
+    try {
+        $job = Start-BitsTransfer -Source $Uri -Destination $Destination -DisplayName 'KiloLink Suite package download' -Asynchronous
+        while ($true) {
+            $job = Get-BitsTransfer -Id $job.Id
+            if ($job.JobState -eq 'Transferred') { break }
+            if ($job.JobState -in @('Error', 'TransientError', 'Cancelled')) {
+                throw "BITS download entered state $($job.JobState): $($job.ErrorDescription)"
+            }
+            if ($job.BytesTotal -gt 0) {
+                $fraction = [Math]::Min(1, [double]$job.BytesTransferred / [double]$job.BytesTotal)
+                $percent = $BasePercent + [int]([Math]::Floor($fraction * $PercentSpan))
+                $downloaded = [Math]::Round($job.BytesTransferred / 1MB, 1)
+                $total = [Math]::Round($job.BytesTotal / 1MB, 1)
+                Set-SuiteProgress -Percent $percent -Status ("{0}: {1} MB / {2} MB" -f $Status, $downloaded, $total)
+            } else {
+                Update-SuiteProgressPulse
+            }
+            Start-Sleep -Milliseconds 300
+        }
+        Complete-BitsTransfer -BitsJob $job
+    } catch {
+        if ($job) {
+            Remove-BitsTransfer -BitsJob $job -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        Write-InstallerLog "BITS download failed; falling back to Invoke-WebRequest: $($_.Exception.Message)"
+        Set-SuiteProgress -Percent $BasePercent -Status "$Status (fallback download)"
+        Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination
+    }
+}
+
+function Get-InstallerSignatureWithProgress {
+    param([string]$Path)
+    if (-not $script:ProgressActive) {
+        return Get-AuthenticodeSignature -LiteralPath $Path
+    }
+    $job = Start-Job -ScriptBlock {
+        param($InstallerPath)
+        Get-AuthenticodeSignature -LiteralPath $InstallerPath
+    } -ArgumentList $Path
+    try {
+        while ($job.State -in @('NotStarted', 'Running')) {
+            Update-SuiteProgressPulse
+            Start-Sleep -Milliseconds 300
+            $job = Get-Job -Id $job.Id
+        }
+        if ($job.State -ne 'Completed') {
+            $reason = [string]$job.ChildJobs[0].JobStateInfo.Reason
+            throw "Signature verification failed to complete: $reason"
+        }
+        return Receive-Job -Job $job
+    } finally {
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Install-NdiTools {
     param([switch]$UpdateOnly)
     $registration = Get-NdiRegistration
     if ($UpdateOnly -and -not $registration) {
-        Write-Host 'NDI Tools is missing. Choose Repair / Reconfigure to install it.' -ForegroundColor Yellow
+        Write-Detail 'NDI Tools is missing. Choose Repair / Reconfigure to install it.' Yellow
         return
     }
     if ($registration -and -not $UpdateOnly) {
         $installedVersion = Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' ''))
-        Write-Host "NDI Tools $installedVersion is already installed." -ForegroundColor Green
+        Write-Detail "NDI Tools $installedVersion is already installed." Green
         return
     }
 
@@ -691,22 +851,29 @@ function Install-NdiTools {
     $downloadDir = Join-Path $env:TEMP 'KiloLinkSuite'
     $installer = Join-Path $downloadDir 'NDI-Tools.exe'
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-    Invoke-WebRequest -UseBasicParsing -Uri $script:NdiToolsUrl -OutFile $installer
+    Download-FileWithProgress -Uri $script:NdiToolsUrl -Destination $installer -BasePercent $script:ProgressPercent -PercentSpan 8 -Status 'Downloading NDI Tools'
 
-    $signature = Get-AuthenticodeSignature -LiteralPath $installer
-    if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+    Set-SuiteProgress -Percent ([Math]::Min(90, $script:ProgressPercent + 1)) -Status 'Verifying the NDI Tools signature'
+    $signature = Get-InstallerSignatureWithProgress -Path $installer
+    if ([string]$signature.Status -ne 'Valid') {
         throw "NDI installer signature validation failed: $($signature.Status)"
     }
     $installedVersion = if ($registration) { Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' '')) } else { $null }
     $packageVersion = Convert-ToVersion ((Get-Item -LiteralPath $installer).VersionInfo.ProductVersion)
     $install = -not $registration -or -not $installedVersion -or -not $packageVersion -or $packageVersion -gt $installedVersion
     if (-not $install) {
-        Write-Host "NDI Tools $installedVersion is current." -ForegroundColor Green
+        Write-Detail "NDI Tools $installedVersion is current." Green
         Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
         return
     }
 
-    $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-') -Wait -PassThru
+    Set-SuiteProgress -Percent ([Math]::Min(92, $script:ProgressPercent + 2)) -Status 'Installing NDI Tools'
+    $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-') -PassThru
+    while (-not $process.HasExited) {
+        Update-SuiteProgressPulse
+        Start-Sleep -Milliseconds 300
+        $process.Refresh()
+    }
     if ($process.ExitCode -notin @(0, 3010)) {
         throw "NDI Tools installer failed with exit code $($process.ExitCode)."
     }
@@ -714,7 +881,7 @@ function Install-NdiTools {
     if (-not (Get-NdiRegistration)) {
         throw 'NDI Tools finished installing but was not detected in Programs and Features.'
     }
-    Write-Host 'NDI Tools installed or updated.' -ForegroundColor Green
+    Write-Detail 'NDI Tools installed or updated.' Green
 }
 
 function Configure-NdiServer {
@@ -751,7 +918,7 @@ function Configure-NdiServer {
         } else {
             Start-Service -Name $service.Name
         }
-        Write-Host "NDI Discovery Server is running as $($service.DisplayName)." -ForegroundColor Green
+        Write-Detail "NDI Discovery Server is running as $($service.DisplayName)." Green
         return
     }
 
@@ -762,7 +929,7 @@ function Configure-NdiServer {
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $script:NdiTaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
     Start-ScheduledTask -TaskName $script:NdiTaskName
-    Write-Host 'NDI Discovery Server startup task installed.' -ForegroundColor Green
+    Write-Detail 'NDI Discovery Server startup task installed.' Green
 }
 
 function Install-FirewallRules {
@@ -797,7 +964,7 @@ function Install-Shortcuts {
     New-Item -ItemType Directory -Path $programs -Force | Out-Null
     $content | Set-Content -LiteralPath (Join-Path $desktop 'KiloLink Server Pro.url') -Encoding ASCII
     $content | Set-Content -LiteralPath (Join-Path $programs 'KiloLink Server Pro.url') -Encoding ASCII
-    Write-Host "Shortcut target: $url" -ForegroundColor Green
+    Write-Detail "Shortcut target: $url" Green
 }
 
 function Install-StartupTask {
@@ -862,17 +1029,31 @@ function Test-SuiteHealth {
     $url = "http://$($Config.PublicIp):$($Config.WebPort)/"
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri $url -Method Head -TimeoutSec 15
-        Write-Host "KiloLink web response: HTTP $($response.StatusCode)" -ForegroundColor Green
+        Write-Detail "KiloLink web response: HTTP $($response.StatusCode)" Green
     } catch {
         Write-Warning "KiloLink is running, but the web check failed: $($_.Exception.Message)"
     }
+}
+
+function Show-SuiteSummary {
+    param($Config, [string]$Heading = 'Suite configuration is complete')
+    $url = "http://$($Config.PublicIp):$($Config.WebPort)/"
     Write-Host ''
-    Write-Host 'Suite configuration is complete.' -ForegroundColor Green
+    Write-Heading $Heading
     Write-Host "Primary adapter:       $($Config.PrimaryInterfaceAlias) / $($Config.PublicIp)"
     Write-Host 'Listening adapters:    all active physical adapters (0.0.0.0)'
-    Write-Host "KiloLink web UI:       $url"
+    Write-Host ''
+    Write-Host 'Installed products and access details' -ForegroundColor Green
+    Write-Host "KiloLink Server Pro:   $url"
+    Write-Host "  Default username:    $($script:KiloDefaultUsername)"
+    Write-Host "  Default password:    $($script:KiloDefaultPassword)"
+    Write-Host '  Change this password immediately after the first login.' -ForegroundColor Yellow
+    Write-Host '  Existing installations retain their previously configured password.' -ForegroundColor DarkGray
+    Write-Host 'NDI Tools:             Installed Windows applications (no web interface)'
+    Write-Host "NDI Discovery Server:  tcp://$($Config.PublicIp):$($Config.NdiDiscoveryPort) (no web interface or login)"
     Write-Host "KiloLink device link:  $($Config.PublicIp):$($Config.LinkPort)-$([int]$Config.LinkPort + 1) UDP"
-    Write-Host "NDI Discovery Server:  $($Config.PublicIp):$($Config.NdiDiscoveryPort) TCP"
+    Write-Host ''
+    Write-Host "Detailed install log:  $($script:InstallerLogPath)" -ForegroundColor DarkGray
 }
 
 function Repair-Suite {
@@ -894,29 +1075,51 @@ function Repair-Suite {
         Write-Host 'Operation cancelled.' -ForegroundColor Yellow
         return
     }
-    if (-not (Ensure-WslFeatures)) { return }
-    Ensure-MirroredNetworking
-    $distro = Ensure-Ubuntu $config
-    if (-not $distro) { return }
-    Ensure-Docker $distro
-    if ($old -and (Test-KiloContainer $distro)) {
-        Sync-KiloConfig $old $config
-    } else {
-        Install-KiloLink $config
+    $showProgress = $Action -eq 'Menu'
+    $succeeded = $false
+    if ($showProgress) { Start-SuiteProgress -Activity 'Installing KiloLink Server Pro and NDI' -Status 'Preparing the saved configuration' }
+    try {
+        Set-SuiteProgress -Percent 5 -Status 'Checking Windows and WSL prerequisites'
+        if (-not (Ensure-WslFeatures)) { return }
+        Set-SuiteProgress -Percent 15 -Status 'Configuring mirrored multi-adapter networking'
+        Ensure-MirroredNetworking
+        Set-SuiteProgress -Percent 22 -Status 'Preparing the dedicated Ubuntu environment'
+        $distro = Ensure-Ubuntu $config
+        if (-not $distro) { return }
+        Set-SuiteProgress -Percent 30 -Status 'Preparing systemd, Docker Engine, and Avahi'
+        Ensure-Docker $distro
+        Set-SuiteProgress -Percent 48 -Status 'Installing or validating KiloLink Server Pro'
+        if ($old -and (Test-KiloContainer $distro)) {
+            Sync-KiloConfig $old $config
+        } else {
+            Install-KiloLink $config
+        }
+        Set-SuiteProgress -Percent 60 -Status 'Installing or validating NDI Tools'
+        Install-NdiTools
+        Set-SuiteProgress -Percent 70 -Status 'Configuring NDI Discovery Server'
+        Configure-NdiServer $config
+        Set-SuiteProgress -Percent 77 -Status 'Opening Windows and WSL firewall ports'
+        Install-FirewallRules $config
+        Set-SuiteProgress -Percent 84 -Status 'Creating browser shortcuts'
+        Install-Shortcuts $config
+        Set-SuiteProgress -Percent 89 -Status 'Installing the persistent WSL watchdog'
+        Install-StartupTask $config
+        Set-SuiteProgress -Percent 94 -Status 'Saving the suite configuration'
+        Save-Config $config
+        Set-SuiteProgress -Percent 96 -Status 'Verifying services and web access'
+        Test-SuiteHealth $config
+        Set-SuiteProgress -Percent 100 -Status 'Installation complete'
+        $succeeded = $true
+    } finally {
+        if ($showProgress) { Stop-SuiteProgress }
     }
-    Install-NdiTools
-    Configure-NdiServer $config
-    Install-FirewallRules $config
-    Install-Shortcuts $config
-    Install-StartupTask $config
-    Save-Config $config
-    Test-SuiteHealth $config
+    if ($succeeded) { Show-SuiteSummary $config }
 }
 
 function Update-KiloLink {
     param($Config)
     if (-not (Test-KiloContainer $Config.DistroName)) {
-        Write-Host 'KiloLink is missing. Choose Repair / Reconfigure.' -ForegroundColor Yellow
+        Write-Detail 'KiloLink is missing. Choose Repair / Reconfigure.' Yellow
         return
     }
     Write-Step 'Checking the current KiloLink image'
@@ -934,11 +1137,11 @@ fi
     $content = $template.Replace('__CONTAINER__', $script:ContainerName).Replace('__IMAGE__', [string]$Config.KiloLinkImage)
     $output = Invoke-WslScript $Config.DistroName $content -Capture
     if ($output -contains 'KILOLINK_UPDATE') {
-        Write-Host 'A newer image was found. Recreating the container while retaining its data.' -ForegroundColor Yellow
+        Write-Detail 'A newer image was found. Recreating the container while retaining its data.' Yellow
         Recreate-KiloContainer $Config
-        Write-Host 'KiloLink updated.' -ForegroundColor Green
+        Write-Detail 'KiloLink updated.' Green
     } else {
-        Write-Host 'KiloLink is current.' -ForegroundColor Green
+        Write-Detail 'KiloLink is current.' Green
     }
 }
 
@@ -948,25 +1151,33 @@ function Update-Suite {
         Write-Host 'No saved configuration exists. Choose Repair / Reconfigure.' -ForegroundColor Yellow
         return
     }
-    if (-not (Ensure-WslFeatures)) { return }
-    $distro = Get-UbuntuDistro ([string]$config.DistroName)
-    if (-not $distro) {
-        Write-Host 'Ubuntu is missing. Choose Repair / Reconfigure.' -ForegroundColor Yellow
-        return
-    }
-    $config.DistroName = $distro
-    Invoke-Wsl $distro 'systemctl start docker; systemctl start avahi-daemon'
-    $oldConfig = ($config | ConvertTo-Json -Depth 5) | ConvertFrom-Json
-    $currentAdapter = @(Get-LanCandidates | Where-Object {
-        $_.Alias -eq $config.PrimaryInterfaceAlias -and $_.Dhcp
-    } | Select-Object -First 1)[0]
-    if ($currentAdapter -and $currentAdapter.Address -ne $config.PublicIp) {
-        Write-Host "DHCP changed $($config.PrimaryInterfaceAlias) from $($config.PublicIp) to $($currentAdapter.Address)." -ForegroundColor Yellow
-        $config.PublicIp = $currentAdapter.Address
-        Sync-KiloConfig $oldConfig $config
-    }
-    Write-Step 'Updating Ubuntu and Docker packages'
-    $linuxUpdate = @'
+    $showProgress = $Action -eq 'Menu'
+    $succeeded = $false
+    if ($showProgress) { Start-SuiteProgress -Activity 'Updating KiloLink Server Pro and NDI' -Status 'Preparing the saved configuration' }
+    try {
+        Set-SuiteProgress -Percent 6 -Status 'Checking Windows and WSL prerequisites'
+        if (-not (Ensure-WslFeatures)) { return }
+        Set-SuiteProgress -Percent 16 -Status 'Starting the dedicated Ubuntu services'
+        $distro = Get-UbuntuDistro ([string]$config.DistroName)
+        if (-not $distro) {
+            Write-Host 'Ubuntu is missing. Choose Repair / Reconfigure.' -ForegroundColor Yellow
+            return
+        }
+        $config.DistroName = $distro
+        Invoke-Wsl $distro 'systemctl start docker; systemctl start avahi-daemon'
+        Set-SuiteProgress -Percent 23 -Status 'Checking the primary DHCP address'
+        $oldConfig = ($config | ConvertTo-Json -Depth 5) | ConvertFrom-Json
+        $currentAdapter = @(Get-LanCandidates | Where-Object {
+            $_.Alias -eq $config.PrimaryInterfaceAlias -and $_.Dhcp
+        } | Select-Object -First 1)[0]
+        if ($currentAdapter -and $currentAdapter.Address -ne $config.PublicIp) {
+            Write-Detail "DHCP changed $($config.PrimaryInterfaceAlias) from $($config.PublicIp) to $($currentAdapter.Address)." Yellow
+            $config.PublicIp = $currentAdapter.Address
+            Sync-KiloConfig $oldConfig $config
+        }
+        Set-SuiteProgress -Percent 30 -Status 'Updating Ubuntu and Docker packages'
+        Write-Step 'Updating Ubuntu and Docker packages'
+        $linuxUpdate = @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -974,15 +1185,28 @@ apt-get upgrade -y
 systemctl enable --now docker
 systemctl enable --now avahi-daemon
 '@
-    Invoke-WslScript $distro $linuxUpdate
-    Update-KiloLink $config
-    Install-NdiTools -UpdateOnly
-    Configure-NdiServer $config
-    Install-FirewallRules $config
-    Install-Shortcuts $config
-    Install-StartupTask $config
-    Save-Config $config
-    Test-SuiteHealth $config
+        Invoke-WslScript $distro $linuxUpdate
+        Set-SuiteProgress -Percent 52 -Status 'Checking the KiloLink container image'
+        Update-KiloLink $config
+        Set-SuiteProgress -Percent 64 -Status 'Checking the NDI Tools package'
+        Install-NdiTools -UpdateOnly
+        Set-SuiteProgress -Percent 76 -Status 'Refreshing NDI Discovery Server'
+        Configure-NdiServer $config
+        Set-SuiteProgress -Percent 82 -Status 'Refreshing firewall rules and shortcuts'
+        Install-FirewallRules $config
+        Install-Shortcuts $config
+        Set-SuiteProgress -Percent 89 -Status 'Refreshing the persistent WSL watchdog'
+        Install-StartupTask $config
+        Set-SuiteProgress -Percent 94 -Status 'Saving the updated configuration'
+        Save-Config $config
+        Set-SuiteProgress -Percent 96 -Status 'Verifying services and web access'
+        Test-SuiteHealth $config
+        Set-SuiteProgress -Percent 100 -Status 'Update complete'
+        $succeeded = $true
+    } finally {
+        if ($showProgress) { Stop-SuiteProgress }
+    }
+    if ($succeeded) { Show-SuiteSummary $config 'Suite update is complete' }
 }
 
 function Invoke-UninstallCommand {
@@ -1005,7 +1229,12 @@ function Invoke-UninstallCommand {
     } else {
         $arguments += ' /VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
     }
-    $process = Start-Process -FilePath $exe -ArgumentList $arguments -Wait -PassThru
+    $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru
+    while (-not $process.HasExited) {
+        Update-SuiteProgressPulse
+        Start-Sleep -Milliseconds 300
+        $process.Refresh()
+    }
     if ($process.ExitCode -notin @(0, 1605, 3010)) {
         throw "NDI uninstaller failed with exit code $($process.ExitCode)."
     }
@@ -1040,6 +1269,10 @@ function Uninstall-Suite {
         return
     }
 
+    $showProgress = $Action -eq 'Menu'
+    if ($showProgress) { Start-SuiteProgress -Activity 'Uninstalling the KiloLink and NDI suite' -Status 'Preparing removal' }
+    try {
+    Set-SuiteProgress -Percent 8 -Status 'Stopping startup tasks and NDI services'
     $config = Get-SavedConfig
     $preferred = if ($config) { [string](Get-PropertyValue $config 'DistroName' '') } else { '' }
     $distro = Get-UbuntuDistro $preferred
@@ -1051,6 +1284,7 @@ function Uninstall-Suite {
     }
 
     if ($distro -and (Test-KiloContainer $distro)) {
+        Set-SuiteProgress -Percent 24 -Status 'Removing the KiloLink container and application data'
         Write-Step 'Removing KiloLink container and data'
         $inspectLines = Invoke-Wsl $distro "docker inspect '$script:ContainerName'" -Capture
         $inspection = ($inspectLines -join [Environment]::NewLine) | ConvertFrom-Json
@@ -1067,6 +1301,7 @@ function Uninstall-Suite {
 
     $ndi = Get-NdiRegistration
     if ($ndi) {
+        Set-SuiteProgress -Percent 50 -Status 'Uninstalling NDI Tools and Discovery Server'
         Write-Step 'Uninstalling NDI Tools and Discovery Server'
         $command = [string](Get-PropertyValue $ndi 'QuietUninstallString' '')
         if (-not $command) { $command = [string](Get-PropertyValue $ndi 'UninstallString' '') }
@@ -1077,6 +1312,7 @@ function Uninstall-Suite {
         }
     }
 
+    Set-SuiteProgress -Percent 70 -Status 'Removing firewall rules and shortcuts'
     Write-Step 'Removing firewall rules and shortcuts'
     Get-NetFirewallRule -Group $script:FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     if (Get-Command Get-NetFirewallHyperVRule -ErrorAction SilentlyContinue) {
@@ -1093,10 +1329,15 @@ function Uninstall-Suite {
         }
     }
     if ($distro -eq $script:ManagedDistroName -and (Get-WslDistroNames) -contains $script:ManagedDistroName) {
+        Set-SuiteProgress -Percent 90 -Status "Removing the dedicated $($script:ManagedDistroName) distribution"
         Write-Step "Removing dedicated WSL distribution '$($script:ManagedDistroName)'"
         Invoke-Native wsl.exe @('--unregister', $script:ManagedDistroName)
     }
+    Set-SuiteProgress -Percent 100 -Status 'Uninstall complete'
     Remove-Item -LiteralPath $script:StateRoot -Recurse -Force -ErrorAction SilentlyContinue
+    } finally {
+        if ($showProgress) { Stop-SuiteProgress }
+    }
     Write-Host 'Uninstall complete. WSL and unrelated distributions were retained.' -ForegroundColor Green
 }
 
