@@ -6,6 +6,7 @@ Install-KiloLinkSuite.ps1 is a menu-driven Windows 11 installer for:
 - NDI Tools
 - NDI Discovery Server, configured to start automatically
 - KiloLink browser shortcuts on the public desktop and common Start Menu
+- A persistent watchdog task that keeps the dedicated WSL service environment running
 
 ## Run
 

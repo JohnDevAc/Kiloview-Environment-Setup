@@ -681,6 +681,11 @@ function Install-NdiTools {
         Write-Host 'NDI Tools is missing. Choose Repair / Reconfigure to install it.' -ForegroundColor Yellow
         return
     }
+    if ($registration -and -not $UpdateOnly) {
+        $installedVersion = Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' ''))
+        Write-Host "NDI Tools $installedVersion is already installed." -ForegroundColor Green
+        return
+    }
 
     Write-Step 'Checking the current NDI Tools package'
     $downloadDir = Join-Path $env:TEMP 'KiloLinkSuite'
@@ -806,7 +811,7 @@ $Container = '__CONTAINER__'
 $LogPath = '__LOG__'
 Start-Transcript -Path $LogPath -Append | Out-Null
 Write-Host ('KiloLink watchdog ' + [DateTime]::Now.ToString('o'))
-$linux = "systemctl start docker; systemctl start avahi-daemon; docker update --restart always '$Container' >/dev/null 2>&1 || true; docker start '$Container' >/dev/null 2>&1 || true; docker ps --filter name='$Container'"
+$linux = "systemctl start docker; systemctl start avahi-daemon; docker update --restart always '$Container' >/dev/null 2>&1 || true; docker start '$Container' >/dev/null 2>&1 || true; docker ps --filter name='$Container'; exec sleep infinity"
 & wsl.exe -d $Distro -u root -- bash -lc $linux
 Stop-Transcript | Out-Null
 '@
@@ -821,7 +826,7 @@ Stop-Transcript | Out-Null
     $logon = New-ScheduledTaskTrigger -AtLogOn
     $logon.Delay = 'PT30S'
     $watchdog = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew -StartWhenAvailable
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew -StartWhenAvailable
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     try {
         $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType S4U -RunLevel Highest
@@ -837,6 +842,15 @@ Stop-Transcript | Out-Null
 function Test-SuiteHealth {
     param($Config)
     Write-Step 'Verifying installed components'
+    $taskDeadline = (Get-Date).AddSeconds(20)
+    do {
+        $startupTask = Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue
+        if ($startupTask -and $startupTask.State -eq 'Running') { break }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $taskDeadline)
+    if (-not $startupTask -or $startupTask.State -ne 'Running') {
+        throw 'The KiloLink WSL keepalive task did not remain running.'
+    }
     $statusOutput = Invoke-Wsl $Config.DistroName "docker inspect -f '{{.State.Status}}' '$script:ContainerName'" -IgnoreExitCode -Capture
     $status = @($statusOutput | Select-Object -Last 1)[0]
     if ($status -ne 'running') {
