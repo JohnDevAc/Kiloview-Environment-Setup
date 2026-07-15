@@ -102,16 +102,25 @@ function Invoke-Native {
         [switch]$IgnoreExitCode,
         [switch]$Capture
     )
-    if ($Capture) {
-        $output = & $FilePath @Arguments 2>&1
-    } else {
-        # Show native progress without emitting it into the PowerShell success
-        # pipeline. Callers often return a value of their own (for example, a
-        # WSL distro name), which must not be mixed with command status text.
-        & $FilePath @Arguments 2>&1 | Out-Host
-        $output = $null
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 converts native stderr into non-terminating
+        # PowerShell errors. With the script-wide preference set to Stop, normal
+        # progress written to stderr (for example by systemctl enable) would
+        # otherwise terminate the operation even when the process exits 0.
+        $ErrorActionPreference = 'Continue'
+        if ($Capture) {
+            $output = & $FilePath @Arguments 2>&1
+        } else {
+            # Show native progress without emitting it into the PowerShell
+            # success pipeline. Callers may return a value of their own.
+            & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Host ([string]$_) }
+            $output = $null
+        }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
-    $code = $LASTEXITCODE
     if (-not $IgnoreExitCode -and $code -ne 0) {
         throw ('Command failed with exit code {0}: {1} {2}' -f $code, $FilePath, ($Arguments -join ' '))
     }
