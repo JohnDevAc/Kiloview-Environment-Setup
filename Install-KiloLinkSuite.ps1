@@ -104,7 +104,10 @@ function Invoke-Native {
     if ($Capture) {
         $output = & $FilePath @Arguments 2>&1
     } else {
-        & $FilePath @Arguments
+        # Show native progress without emitting it into the PowerShell success
+        # pipeline. Callers often return a value of their own (for example, a
+        # WSL distro name), which must not be mixed with command status text.
+        & $FilePath @Arguments 2>&1 | Out-Host
         $output = $null
     }
     $code = $LASTEXITCODE
