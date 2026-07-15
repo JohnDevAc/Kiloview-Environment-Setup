@@ -11,7 +11,12 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('Menu', 'Repair', 'Update')]
+    [string]$Action = 'Menu',
+    [switch]$AcceptLicenses,
+    [string]$LogPath
+)
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -67,8 +72,11 @@ function Ensure-Administrator {
         throw 'Save this script to a .ps1 file before running it.'
     }
     Write-Host 'Requesting Administrator access...' -ForegroundColor Yellow
-    $quotedPath = '"' + $PSCommandPath + '"'
-    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File $quotedPath" -Verb RunAs | Out-Null
+    $elevationArguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    if ($Action -ne 'Menu') { $elevationArguments += " -Action $Action" }
+    if ($AcceptLicenses) { $elevationArguments += ' -AcceptLicenses' }
+    if ($LogPath) { $elevationArguments += " -LogPath `"$LogPath`"" }
+    Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs | Out-Null
     exit 0
 }
 
@@ -755,12 +763,12 @@ function Configure-NdiServer {
 function Install-FirewallRules {
     param($Config)
     Write-Step 'Opening the required Windows and WSL firewall ports'
-    Get-NetFirewallRule -DisplayGroup $script:FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    Get-NetFirewallRule -Group $script:FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     $tcpPorts = @([string]$Config.WebPort, '30000-30300', '5960-7961')
     $udpPorts = @([string]$Config.LinkPort, [string]([int]$Config.LinkPort + 1), '30000-30300', '5353', '5960-7961')
-    New-NetFirewallRule -DisplayName 'KiloLink Suite TCP' -DisplayGroup $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort $tcpPorts | Out-Null
-    New-NetFirewallRule -DisplayName 'KiloLink Suite UDP' -DisplayGroup $script:FirewallGroup -Direction Inbound -Action Allow -Protocol UDP -LocalPort $udpPorts | Out-Null
-    New-NetFirewallRule -DisplayName 'NDI Discovery Server TCP' -DisplayGroup $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort ([string]$Config.NdiDiscoveryPort) | Out-Null
+    New-NetFirewallRule -DisplayName 'KiloLink Suite TCP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort $tcpPorts | Out-Null
+    New-NetFirewallRule -DisplayName 'KiloLink Suite UDP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol UDP -LocalPort $udpPorts | Out-Null
+    New-NetFirewallRule -DisplayName 'NDI Discovery Server TCP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort ([string]$Config.NdiDiscoveryPort) | Out-Null
     if (Get-Command Get-NetFirewallHyperVRule -ErrorAction SilentlyContinue) {
         foreach ($name in @("$($script:HyperVPrefix)TCP", "$($script:HyperVPrefix)UDP")) {
             Get-NetFirewallHyperVRule -Name $name -ErrorAction SilentlyContinue | Remove-NetFirewallHyperVRule
@@ -854,10 +862,21 @@ function Test-SuiteHealth {
 }
 
 function Repair-Suite {
+    param(
+        [switch]$UseSavedConfiguration,
+        [switch]$LicenseAccepted
+    )
     $old = Get-SavedConfig
-    $config = Read-SuiteConfig -UseSaved
+    if ($UseSavedConfiguration) {
+        if (-not $old) {
+            throw 'A saved configuration is required for unattended repair.'
+        }
+        $config = ($old | ConvertTo-Json -Depth 5) | ConvertFrom-Json
+    } else {
+        $config = Read-SuiteConfig -UseSaved
+    }
     Save-Config $config
-    if (-not (Confirm-LicenseAcceptance)) {
+    if (-not $LicenseAccepted -and -not (Confirm-LicenseAcceptance)) {
         Write-Host 'Operation cancelled.' -ForegroundColor Yellow
         return
     }
@@ -1045,7 +1064,7 @@ function Uninstall-Suite {
     }
 
     Write-Step 'Removing firewall rules and shortcuts'
-    Get-NetFirewallRule -DisplayGroup $script:FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    Get-NetFirewallRule -Group $script:FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     if (Get-Command Get-NetFirewallHyperVRule -ErrorAction SilentlyContinue) {
         Get-NetFirewallHyperVRule -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "$($script:HyperVPrefix)*" } | Remove-NetFirewallHyperVRule
     }
@@ -1123,4 +1142,36 @@ function Show-Menu {
 }
 
 Ensure-Administrator
-Show-Menu
+$transcriptStarted = $false
+$backgroundExitCode = 0
+try {
+    if ($LogPath) {
+        $logDirectory = Split-Path -Parent $LogPath
+        if ($logDirectory) {
+            New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+        }
+        Start-Transcript -LiteralPath $LogPath -Append | Out-Null
+        $transcriptStarted = $true
+    }
+    switch ($Action) {
+        'Menu' { Show-Menu }
+        'Repair' {
+            if (-not $AcceptLicenses) {
+                throw 'Unattended repair requires -AcceptLicenses after the vendor agreements have been reviewed and accepted.'
+            }
+            Repair-Suite -UseSavedConfiguration -LicenseAccepted
+        }
+        'Update' { Update-Suite }
+    }
+} catch {
+    $backgroundExitCode = 1
+    Write-Host "Operation failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "State and logs are under $script:StateRoot" -ForegroundColor Yellow
+} finally {
+    if ($transcriptStarted) {
+        Stop-Transcript | Out-Null
+    }
+}
+if ($Action -ne 'Menu' -and $backgroundExitCode -ne 0) {
+    exit $backgroundExitCode
+}

@@ -39,6 +39,17 @@ Once a complete or partial installation is detected, the menu offers:
 3. Uninstall
 4. Exit
 
+### Background repair and update
+
+After an interactive run has saved the configuration, repair can run without
+menu prompts from an elevated PowerShell session:
+
+    .\Install-KiloLinkSuite.ps1 -Action Repair -AcceptLicenses -LogPath C:\ProgramData\KiloLink\background-install.log
+
+Use `-AcceptLicenses` only after reviewing and accepting the vendor agreements.
+For a non-interactive update check, use `-Action Update` with an optional
+`-LogPath`. Uninstall remains interactive-only to protect application data.
+
 Update checks the official current NDI Tools package, Ubuntu and Docker
 packages, and the Kiloview KiloLink container image.
 
