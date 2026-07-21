@@ -10,11 +10,11 @@ Install-KiloLinkSuite.ps1 is a menu-driven Windows 11 installer for:
 
 ## Run
 
-For the simplest installation, download `Setup.exe`, double-click it, approve
-the Windows Administrator prompt, select **Start setup**, and use the PowerShell
-menu that opens. The launcher remains open and provides access to a diagnostic
-log if PowerShell cannot start. The executable contains the PowerShell
-installer, so no other downloaded files are required.
+For the simplest installation, download `KiloLink-Environment-Setup.exe`,
+double-click it, approve the Windows Administrator prompt, select **Start
+setup**, and use the PowerShell menu that opens. The launcher remains open and
+provides access to a diagnostic log if PowerShell cannot start. The executable
+contains the PowerShell installer, so no other downloaded files are required.
 
 Launcher diagnostics are saved to
 `C:\ProgramData\KiloLink\setup-launcher.log`.
@@ -30,10 +30,11 @@ Alternatively, open PowerShell and run:
 
 The script requests Administrator elevation if needed.
 
-## Building Setup.exe
+## Building KiloLink-Environment-Setup.exe
 
-`Setup.exe` is built with the .NET Framework compiler included with Windows 11.
-After changing `Install-KiloLinkSuite.ps1` or the launcher source, run:
+`KiloLink-Environment-Setup.exe` is built with the .NET Framework compiler
+included with Windows 11. After changing `Install-KiloLinkSuite.ps1` or the
+launcher source, run:
 
 ```powershell
 .\Build-Setup.ps1

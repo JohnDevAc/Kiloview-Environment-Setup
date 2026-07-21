@@ -8,7 +8,8 @@ $source = Join-Path $root 'launcher\SetupLauncher.cs'
 $manifest = Join-Path $root 'launcher\Setup.exe.manifest'
 $installer = Join-Path $root 'Install-KiloLinkSuite.ps1'
 $icon = Join-Path $root 'assets\setup.ico'
-$output = Join-Path $root 'Setup.exe'
+$outputName = 'KiloLink-Environment-Setup.exe'
+$output = Join-Path $root $outputName
 
 $compilerCandidates = @(
     (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
@@ -43,7 +44,7 @@ $compilerArguments = @(
 
 & $compiler @compilerArguments
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $output)) {
-    throw "Setup.exe build failed with exit code $LASTEXITCODE."
+    throw "$outputName build failed with exit code $LASTEXITCODE."
 }
 
 $file = Get-Item -LiteralPath $output

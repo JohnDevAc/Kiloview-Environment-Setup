@@ -107,7 +107,7 @@ namespace KiloLink.Setup
             autoResume = resume;
             string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             launcherDirectory = Path.Combine(programData, "KiloLink", "Launcher");
-            persistentLauncherPath = Path.Combine(launcherDirectory, "Setup.exe");
+            persistentLauncherPath = Path.Combine(launcherDirectory, "KiloLink-Environment-Setup.exe");
             installerPath = Path.Combine(launcherDirectory, "Install-KiloLinkSuite.ps1");
             logPath = Path.Combine(programData, "KiloLink", "setup-launcher.log");
 
