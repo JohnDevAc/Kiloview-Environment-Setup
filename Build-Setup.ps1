@@ -1,4 +1,6 @@
 #Requires -Version 5.1
+# Copyright (c) 2026 John Lightfoot
+# SPDX-License-Identifier: MIT
 [CmdletBinding()]
 param()
 
@@ -8,6 +10,9 @@ $source = Join-Path $root 'launcher\SetupLauncher.cs'
 $manifest = Join-Path $root 'launcher\Setup.exe.manifest'
 $installer = Join-Path $root 'Install-KiloLinkSuite.ps1'
 $icon = Join-Path $root 'assets\setup.ico'
+$iconArtwork = Join-Path $root 'assets\setup-icon.png'
+$license = Join-Path $root 'LICENSE'
+$thirdPartyNotices = Join-Path $root 'THIRD_PARTY_NOTICES.md'
 $outputName = 'Kiloview-Environment-Setup.exe'
 $output = Join-Path $root $outputName
 
@@ -20,7 +25,7 @@ if (-not $compiler) {
     throw 'The Windows .NET Framework C# compiler was not found.'
 }
 
-foreach ($requiredFile in @($source, $manifest, $installer, $icon)) {
+foreach ($requiredFile in @($source, $manifest, $installer, $icon, $iconArtwork, $license, $thirdPartyNotices)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
         throw "Required build input is missing: $requiredFile"
     }
@@ -35,9 +40,13 @@ $compilerArguments = @(
     ('/win32manifest:"{0}"' -f $manifest),
     ('/win32icon:"{0}"' -f $icon),
     ('/resource:"{0}",KiloLink.Setup.Install-KiloLinkSuite.ps1' -f $installer),
+    ('/resource:"{0}",KiloLink.Setup.setup-icon.png' -f $iconArtwork),
+    ('/resource:"{0}",KiloLink.Setup.LICENSE' -f $license),
+    ('/resource:"{0}",KiloLink.Setup.THIRD_PARTY_NOTICES.md' -f $thirdPartyNotices),
     '/reference:System.dll',
     '/reference:System.Drawing.dll',
     '/reference:System.Windows.Forms.dll',
+    '/reference:System.Web.Extensions.dll',
     ('/out:"{0}"' -f $output),
     ('"{0}"' -f $source)
 )

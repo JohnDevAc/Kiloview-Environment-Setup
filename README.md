@@ -12,9 +12,12 @@ Kiloview Environment Setup is a menu-driven Windows 11 installer for:
 
 For the simplest installation, download `Kiloview-Environment-Setup.exe`,
 double-click it, approve the Windows Administrator prompt, select **Start
-setup**, and use the PowerShell menu that opens. The launcher remains open and
-provides access to a diagnostic log if PowerShell cannot start. The executable
-contains the PowerShell installer, so no other downloaded files are required.
+setup**, and follow the choices shown in the application. The deployment engine
+runs without a separate PowerShell window. Granular progress, current activity,
+interactive prompts, and installer output remain in the same Windows UI.
+
+The executable contains the deployment script, application artwork, licence,
+and third-party notices, so no other downloaded project files are required.
 
 Launcher diagnostics are saved to
 `C:\ProgramData\KiloLink\setup-launcher.log`.
@@ -43,11 +46,12 @@ launcher source, run:
 The build embeds the current PowerShell script into the executable. Launcher
 source and its Administrator manifest are under `launcher`. The Windows icon
 source and multi-resolution `.ico` file are under `assets` and are embedded by
-the same build.
+the same build. The MIT licence and third-party notices are also embedded and
+can be viewed from the launcher's **Licences** button.
 
-Interactive operations use a single frequently refreshed PowerShell progress
-bar. Detailed WSL, APT, Docker, and installer output is written to
-`C:\ProgramData\KiloLink\installer.log` instead of filling the console.
+Interactive operations use the application's granular progress view. Detailed
+WSL, APT, Docker, and installer output is shown in the activity panel and
+written to `C:\ProgramData\KiloLink\installer.log`.
 
 On a clean PC, choose Install. Missing or disabled WSL is treated as the normal
 clean-install state. Setup enables and verifies WSL and Virtual Machine
@@ -95,8 +99,9 @@ restart within its three-attempt safety limit.
 For a non-interactive update check, use `-Action Update` with an optional
 `-LogPath`. Uninstall remains interactive-only to protect application data.
 
-After a successful install, repair, or update, the console shows the KiloLink
-web address, NDI Discovery Server endpoint, and login details. Kiloview's
+After a successful install, repair, or update, the application activity view
+shows the KiloLink web address, NDI Discovery Server endpoint, and login
+details. Kiloview's
 [installation and deployment manual](https://www.kiloview.com/downloads/downloads/Firmware/kilolink-server-pro/Kilolink_Server_Pro_Installation_and_Deployment_Manual.pdf)
 documents these defaults for a new KiloLink Server Pro installation:
 
@@ -141,6 +146,24 @@ different address, rerun the script and choose Repair / reconfigure.
 
 Windows 11 22H2 or later and internet access are required. The script asks for
 explicit acceptance of the vendor license terms before installation.
+
+## Licence and third-party software
+
+Copyright (c) 2026 John Lightfoot.
+
+The original source code, documentation, executable launcher, and artwork in
+this repository are available under the [MIT License](LICENSE). This permits
+use, modification, redistribution, sublicensing, and commercial use while
+requiring the copyright and licence notice to be retained.
+
+Kiloview Environment Setup is an independent project and is not affiliated
+with, sponsored, approved, or endorsed by Kiloview or Vizrt NDI AB. Software
+downloaded by the installer—including Kiloview KiloLink Server Pro and NDI
+Tools—is not covered by the project's MIT licence and remains subject to the
+respective vendor terms. See [third-party notices](THIRD_PARTY_NOTICES.md).
+
+NDI® is a registered trademark of Vizrt NDI AB. Kiloview, KiloLink, and other
+third-party names and marks belong to their respective owners.
 
 When Windows 11 is running inside another virtual machine, the VM host must
 expose hardware virtualization extensions to the guest. Setup detects WSL

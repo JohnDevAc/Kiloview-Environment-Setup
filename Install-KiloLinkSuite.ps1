@@ -1,4 +1,6 @@
 #Requires -Version 5.1
+# Copyright (c) 2026 John Lightfoot
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     Menu-driven installer for KiloLink Server Pro, NDI Tools, and NDI Discovery Server.
@@ -51,6 +53,27 @@ $script:ProgressStatus = ''
 $script:ProgressPercent = 0
 $script:ProgressPulseIndex = 0
 $script:ProgressLastPulse = [datetime]::MinValue
+$script:LauncherEventPrefix = '@@KILOVIEW_EVENT@@'
+
+function Write-LauncherEvent {
+    param([string]$Type, [hashtable]$Data = @{})
+    if (-not $LauncherMode) { return }
+    $payload = [ordered]@{ type = $Type }
+    foreach ($key in $Data.Keys) {
+        $payload[$key] = $Data[$key]
+    }
+    [Console]::Out.WriteLine($script:LauncherEventPrefix + ($payload | ConvertTo-Json -Compress -Depth 4))
+    [Console]::Out.Flush()
+}
+
+function Read-InstallerInput {
+    param([string]$Prompt)
+    if ($LauncherMode) {
+        Write-LauncherEvent -Type 'prompt' -Data @{ prompt = $Prompt }
+        return [Console]::In.ReadLine()
+    }
+    return Read-Host $Prompt
+}
 
 function Write-InstallerLog {
     param([string]$Message)
@@ -78,7 +101,14 @@ function Set-SuiteProgress {
     if (-not $script:ProgressActive) { return }
     $script:ProgressPercent = [Math]::Max($script:ProgressPercent, [Math]::Min(100, $Percent))
     if ($Status) { $script:ProgressStatus = $Status }
-    Write-Progress -Id 1 -Activity $script:ProgressActivity -Status ("{0} ({1}%)" -f $script:ProgressStatus, $script:ProgressPercent) -PercentComplete $script:ProgressPercent
+    if (-not $LauncherMode) {
+        Write-Progress -Id 1 -Activity $script:ProgressActivity -Status ("{0} ({1}%)" -f $script:ProgressStatus, $script:ProgressPercent) -PercentComplete $script:ProgressPercent
+    }
+    Write-LauncherEvent -Type 'progress' -Data @{
+        activity = $script:ProgressActivity
+        status = $script:ProgressStatus
+        percent = $script:ProgressPercent
+    }
     Write-InstallerLog ("PROGRESS {0}% - {1}" -f $script:ProgressPercent, $script:ProgressStatus)
 }
 
@@ -90,7 +120,14 @@ function Update-SuiteProgressPulse {
     $frames = @('|', '/', '-', '\')
     $frame = $frames[$script:ProgressPulseIndex % $frames.Count]
     $script:ProgressPulseIndex++
-    Write-Progress -Id 1 -Activity $script:ProgressActivity -Status ("{0} ({1}%)" -f $script:ProgressStatus, $script:ProgressPercent) -CurrentOperation ("Working {0}" -f $frame) -PercentComplete $script:ProgressPercent
+    if (-not $LauncherMode) {
+        Write-Progress -Id 1 -Activity $script:ProgressActivity -Status ("{0} ({1}%)" -f $script:ProgressStatus, $script:ProgressPercent) -CurrentOperation ("Working {0}" -f $frame) -PercentComplete $script:ProgressPercent
+    }
+    Write-LauncherEvent -Type 'pulse' -Data @{
+        activity = $script:ProgressActivity
+        status = $script:ProgressStatus
+        percent = $script:ProgressPercent
+    }
 }
 
 function Wait-SuiteProgressInterval {
@@ -104,13 +141,21 @@ function Wait-SuiteProgressInterval {
 
 function Stop-SuiteProgress {
     if (-not $script:ProgressActive) { return }
-    Write-Progress -Id 1 -Activity $script:ProgressActivity -Completed
+    if (-not $LauncherMode) {
+        Write-Progress -Id 1 -Activity $script:ProgressActivity -Completed
+    }
+    Write-LauncherEvent -Type 'progress' -Data @{
+        activity = $script:ProgressActivity
+        status = $script:ProgressStatus
+        percent = $script:ProgressPercent
+    }
     $script:ProgressActive = $false
 }
 
 function Write-Detail {
     param([string]$Text, [ConsoleColor]$ForegroundColor = [ConsoleColor]::Gray)
     Write-InstallerLog $Text
+    Write-LauncherEvent -Type 'log' -Data @{ message = $Text }
     if (-not $script:ProgressActive) {
         Write-Host $Text -ForegroundColor $ForegroundColor
     }
@@ -389,7 +434,7 @@ function Request-RestartAndResume {
 
     $restartNow = $Action -eq 'Resume' -or $AutoRestart
     if ($Action -eq 'Menu') {
-        $answer = Read-Host 'Restart Windows now? [Y/n]'
+        $answer = Read-InstallerInput 'Restart Windows now? [Y/n]'
         $restartNow = [string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(?i)y(?:es)?$'
     }
     if ($restartNow) {
@@ -432,7 +477,7 @@ function Test-WslDistroReady {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & wsl.exe -d $Distro -u root -- true 2>$null | Out-Null
+        & wsl.exe -d $Distro -u root --cd / -- true 2>$null | Out-Null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -446,7 +491,7 @@ function Get-WslDistroLaunchProbe {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $output = @(& wsl.exe -d $Distro -u root -- true 2>&1 | ForEach-Object {
+        $output = @(& wsl.exe -d $Distro -u root --cd / -- true 2>&1 | ForEach-Object {
             ([string]$_ -replace [char]0, '').Trim()
         } | Where-Object { $_ })
         $code = $LASTEXITCODE
@@ -512,7 +557,7 @@ function Invoke-Wsl {
         [switch]$IgnoreExitCode,
         [switch]$Capture
     )
-    $arguments = @('-d', $Distro, '-u', 'root', '--', 'bash', '-lc', $Command)
+    $arguments = @('-d', $Distro, '-u', 'root', '--cd', '/', '--', 'bash', '-lc', $Command)
     return Invoke-Native wsl.exe $arguments -IgnoreExitCode:$IgnoreExitCode -Capture:$Capture
 }
 
@@ -522,8 +567,12 @@ function Invoke-WslScript {
         [string]$Content,
         [switch]$Capture
     )
+    # PowerShell here-strings use Windows CRLF endings. Bash treats the trailing
+    # carriage return as part of tokens such as "pipefail", so normalize every
+    # generated Linux script before it crosses the WSL boundary.
+    $normalizedContent = ([string]$Content).Replace("`r`n", "`n").Replace("`r", "`n")
     $utf8 = New-Object Text.UTF8Encoding($false)
-    $base64 = [Convert]::ToBase64String($utf8.GetBytes($Content))
+    $base64 = [Convert]::ToBase64String($utf8.GetBytes($normalizedContent))
     $command = "printf '%s' '$base64' | base64 -d > /tmp/kilolink-suite.sh && chmod 700 /tmp/kilolink-suite.sh && bash /tmp/kilolink-suite.sh"
     return Invoke-Wsl $Distro $command -Capture:$Capture
 }
@@ -539,7 +588,7 @@ function Test-KiloContainer {
         # when the command succeeds. Health detection must follow the native
         # exit code rather than promoting that warning to a terminating error.
         $ErrorActionPreference = 'Continue'
-        & wsl.exe -d $Distro -u root -- bash -lc "docker inspect '$script:ContainerName' >/dev/null 2>&1" 2>$null
+        & wsl.exe -d $Distro -u root --cd / -- bash -lc "docker inspect '$script:ContainerName' >/dev/null 2>&1" 2>$null
         $code = $LASTEXITCODE
         return $code -eq 0
     } catch {
@@ -672,7 +721,7 @@ function Select-PrimaryLanAddress {
         Write-Host ("  {0}. {1} - {2} ({3}, {4})" -f ($i + 1), $candidates[$i].Alias, $candidates[$i].Address, $type, $origin)
     }
     while ($true) {
-        $answer = Read-Host "Primary advertised adapter [$($defaultIndex + 1)]"
+        $answer = Read-InstallerInput "Primary advertised adapter [$($defaultIndex + 1)]"
         if ([string]::IsNullOrWhiteSpace($answer)) {
             return $candidates[$defaultIndex]
         }
@@ -687,7 +736,7 @@ function Select-PrimaryLanAddress {
 function Read-Port {
     param([string]$Prompt, [int]$Default, [switch]$EvenPair)
     while ($true) {
-        $answer = Read-Host "$Prompt [$Default]"
+        $answer = Read-InstallerInput "$Prompt [$Default]"
         $number = $Default
         if ($answer -and -not [int]::TryParse($answer, [ref]$number)) {
             Write-Host 'Enter a numeric port.' -ForegroundColor Red
@@ -775,7 +824,7 @@ function Confirm-LicenseAcceptance {
     Write-Host 'This downloads Kiloview and NDI software and performs unattended installation.' -ForegroundColor Yellow
     Write-Host "Kiloview's current licence is published in its official installer: $($script:KiloInstallerUrl)" -ForegroundColor Yellow
     Write-Host 'You must accept the vendors license agreements to continue.' -ForegroundColor Yellow
-    return (Read-Host 'Type YES to accept and continue') -ieq 'YES'
+    return (Read-InstallerInput 'Type YES to accept and continue') -ieq 'YES'
 }
 
 function Test-SupportedWindows {
@@ -1310,7 +1359,7 @@ $LogPath = '__LOG__'
 Start-Transcript -Path $LogPath -Append | Out-Null
 Write-Host ('KiloLink watchdog ' + [DateTime]::Now.ToString('o'))
 $linux = "systemctl start docker; systemctl start avahi-daemon; docker update --restart always '$Container' >/dev/null 2>&1 || true; docker start '$Container' >/dev/null 2>&1 || true; docker ps --filter name='$Container'; exec sleep infinity"
-& wsl.exe -d $Distro -u root -- bash -lc $linux
+& wsl.exe -d $Distro -u root --cd / -- bash -lc $linux
 Stop-Transcript | Out-Null
 '@
     $helper = $template.Replace('__DISTRO__', [string]$Config.DistroName)
@@ -1627,7 +1676,7 @@ function Uninstall-Suite {
     Write-Host 'scheduled tasks, installer firewall rules, and browser shortcuts.' -ForegroundColor Yellow
     Write-Host "The dedicated $($script:ManagedDistroName) distribution will be deleted." -ForegroundColor Yellow
     Write-Host 'WSL, unrelated distributions, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
-    if ((Read-Host 'Type UNINSTALL to continue') -cne 'UNINSTALL') {
+    if ((Read-InstallerInput 'Type UNINSTALL to continue') -cne 'UNINSTALL') {
         Write-Host 'Uninstall cancelled.' -ForegroundColor Yellow
         return
     }
@@ -1726,7 +1775,7 @@ function Show-Menu {
             Write-Host '  2. Repair / reconfigure'
             Write-Host '  3. Uninstall'
             Write-Host '  4. Exit'
-            $choice = Read-Host 'Choose an option'
+            $choice = Read-InstallerInput 'Choose an option'
             try {
                 switch ($choice) {
                     '1' { Update-Suite }
@@ -1743,7 +1792,7 @@ function Show-Menu {
             Write-Host ''
             Write-Host '  1. Install KiloLink Server Pro, NDI Tools, and NDI Discovery Server'
             Write-Host '  2. Exit'
-            $choice = Read-Host 'Choose an option'
+            $choice = Read-InstallerInput 'Choose an option'
             try {
                 switch ($choice) {
                     '1' { Repair-Suite }
@@ -1759,7 +1808,7 @@ function Show-Menu {
             return
         }
         Write-Host ''
-        Read-Host 'Press Enter to return to the menu' | Out-Null
+        Read-InstallerInput 'Press Enter to return to the menu' | Out-Null
     }
 }
 
@@ -1791,7 +1840,7 @@ try {
             Resume-Suite
             if ($LauncherMode -and -not $script:RestartScheduled) {
                 Write-Host ''
-                Read-Host 'Setup has finished. Press Enter to close this window' | Out-Null
+                Read-InstallerInput 'Setup has finished. Press Enter to close this window' | Out-Null
             }
         }
     }
@@ -1807,7 +1856,7 @@ try {
 if ($backgroundExitCode -ne 0) {
     if ($Action -in @('Menu', 'Resume') -and $LauncherMode) {
         Write-Host ''
-        Read-Host 'Press Enter to close this window' | Out-Null
+        Read-InstallerInput 'Press Enter to close this window' | Out-Null
     }
     exit $backgroundExitCode
 }
