@@ -40,7 +40,9 @@ After changing `Install-KiloLinkSuite.ps1` or the launcher source, run:
 ```
 
 The build embeds the current PowerShell script into the executable. Launcher
-source and its Administrator manifest are under `launcher`.
+source and its Administrator manifest are under `launcher`. The Windows icon
+source and multi-resolution `.ico` file are under `assets` and are embedded by
+the same build.
 
 Interactive operations use a single frequently refreshed PowerShell progress
 bar. Detailed WSL, APT, Docker, and installer output is written to

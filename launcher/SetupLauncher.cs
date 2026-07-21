@@ -10,8 +10,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("JohnDevAc")]
 [assembly: AssemblyProduct("KiloLink Environment Setup")]
 [assembly: AssemblyCopyright("Copyright JohnDevAc 2026")]
-[assembly: AssemblyVersion("1.2.1.0")]
-[assembly: AssemblyFileVersion("1.2.1.0")]
+[assembly: AssemblyVersion("1.2.4.0")]
+[assembly: AssemblyFileVersion("1.2.4.0")]
 
 namespace KiloLink.Setup
 {
@@ -118,6 +118,7 @@ namespace KiloLink.Setup
             MinimizeBox = true;
             ClientSize = new System.Drawing.Size(500, 225);
             Font = new System.Drawing.Font("Segoe UI", 9F);
+            Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
 
             Label title = new Label();
             title.Text = "KiloLink Server Pro + NDI Environment";

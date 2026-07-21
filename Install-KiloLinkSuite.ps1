@@ -533,8 +533,21 @@ function Test-KiloContainer {
     if (-not $Distro) {
         return $false
     }
-    & wsl.exe -d $Distro -u root -- bash -lc "docker inspect '$script:ContainerName' >/dev/null 2>&1" 2>$null
-    return $LASTEXITCODE -eq 0
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Some nested hypervisors emit a non-fatal WSL warning on stderr even
+        # when the command succeeds. Health detection must follow the native
+        # exit code rather than promoting that warning to a terminating error.
+        $ErrorActionPreference = 'Continue'
+        & wsl.exe -d $Distro -u root -- bash -lc "docker inspect '$script:ContainerName' >/dev/null 2>&1" 2>$null
+        $code = $LASTEXITCODE
+        return $code -eq 0
+    } catch {
+        Write-InstallerLog "KiloLink container probe failed: $($_.Exception.Message)"
+        return $false
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 }
 
 function Get-NdiRegistration {
@@ -1094,13 +1107,18 @@ function Download-FileWithProgress {
     $job = $null
     try {
         $job = Start-BitsTransfer -Source $Uri -Destination $Destination -DisplayName 'KiloLink Suite package download' -Asynchronous
+        if (-not $job.JobId) {
+            throw 'BITS did not return a job identifier.'
+        }
         while ($true) {
-            $job = Get-BitsTransfer -Id $job.Id
+            $job = Get-BitsTransfer -JobId $job.JobId
             if ($job.JobState -eq 'Transferred') { break }
             if ($job.JobState -in @('Error', 'TransientError', 'Cancelled')) {
                 throw "BITS download entered state $($job.JobState): $($job.ErrorDescription)"
             }
-            if ($job.BytesTotal -gt 0) {
+            # BITS reports UInt64.MaxValue until the server supplies the content length.
+            # Treat that sentinel as unknown so the UI never displays an absurd total.
+            if ($job.BytesTotal -gt 0 -and [uint64]$job.BytesTotal -ne [uint64]::MaxValue) {
                 $fraction = [Math]::Min(1, [double]$job.BytesTransferred / [double]$job.BytesTotal)
                 $percent = $BasePercent + [int]([Math]::Floor($fraction * $PercentSpan))
                 $downloaded = [Math]::Round($job.BytesTransferred / 1MB, 1)

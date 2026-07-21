@@ -7,6 +7,7 @@ $root = $PSScriptRoot
 $source = Join-Path $root 'launcher\SetupLauncher.cs'
 $manifest = Join-Path $root 'launcher\Setup.exe.manifest'
 $installer = Join-Path $root 'Install-KiloLinkSuite.ps1'
+$icon = Join-Path $root 'assets\setup.ico'
 $output = Join-Path $root 'Setup.exe'
 
 $compilerCandidates = @(
@@ -18,7 +19,7 @@ if (-not $compiler) {
     throw 'The Windows .NET Framework C# compiler was not found.'
 }
 
-foreach ($requiredFile in @($source, $manifest, $installer)) {
+foreach ($requiredFile in @($source, $manifest, $installer, $icon)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
         throw "Required build input is missing: $requiredFile"
     }
@@ -31,6 +32,7 @@ $compilerArguments = @(
     '/optimize+',
     '/platform:anycpu',
     ('/win32manifest:"{0}"' -f $manifest),
+    ('/win32icon:"{0}"' -f $icon),
     ('/resource:"{0}",KiloLink.Setup.Install-KiloLinkSuite.ps1' -f $installer),
     '/reference:System.dll',
     '/reference:System.Drawing.dll',
