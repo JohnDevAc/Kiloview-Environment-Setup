@@ -1,6 +1,6 @@
-# KiloLink Server Pro and NDI installer
+# Kiloview Environment Setup
 
-Install-KiloLinkSuite.ps1 is a menu-driven Windows 11 installer for:
+Kiloview Environment Setup is a menu-driven Windows 11 installer for:
 
 - Kiloview KiloLink Server Pro
 - NDI Tools
@@ -10,7 +10,7 @@ Install-KiloLinkSuite.ps1 is a menu-driven Windows 11 installer for:
 
 ## Run
 
-For the simplest installation, download `KiloLink-Environment-Setup.exe`,
+For the simplest installation, download `Kiloview-Environment-Setup.exe`,
 double-click it, approve the Windows Administrator prompt, select **Start
 setup**, and use the PowerShell menu that opens. The launcher remains open and
 provides access to a diagnostic log if PowerShell cannot start. The executable
@@ -30,9 +30,9 @@ Alternatively, open PowerShell and run:
 
 The script requests Administrator elevation if needed.
 
-## Building KiloLink-Environment-Setup.exe
+## Building Kiloview-Environment-Setup.exe
 
-`KiloLink-Environment-Setup.exe` is built with the .NET Framework compiler
+`Kiloview-Environment-Setup.exe` is built with the .NET Framework compiler
 included with Windows 11. After changing `Install-KiloLinkSuite.ps1` or the
 launcher source, run:
 

@@ -5,13 +5,13 @@ using System.Reflection;
 using System.Security.Principal;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("KiloLink Environment Setup")]
+[assembly: AssemblyTitle("Kiloview Environment Setup")]
 [assembly: AssemblyDescription("Launcher for KiloLink Server Pro and NDI Environment Setup")]
 [assembly: AssemblyCompany("JohnDevAc")]
-[assembly: AssemblyProduct("KiloLink Environment Setup")]
+[assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright JohnDevAc 2026")]
-[assembly: AssemblyVersion("1.2.4.0")]
-[assembly: AssemblyFileVersion("1.2.4.0")]
+[assembly: AssemblyVersion("1.2.5.0")]
+[assembly: AssemblyFileVersion("1.2.5.0")]
 
 namespace KiloLink.Setup
 {
@@ -52,8 +52,8 @@ namespace KiloLink.Setup
             catch (Exception exception)
             {
                 MessageBox.Show(
-                    "KiloLink Environment Setup could not start.\r\n\r\n" + exception.Message,
-                    "KiloLink Environment Setup",
+                    "Kiloview Environment Setup could not start.\r\n\r\n" + exception.Message,
+                    "Kiloview Environment Setup",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return 1;
@@ -98,6 +98,7 @@ namespace KiloLink.Setup
         private Process installerProcess;
         private readonly string launcherDirectory;
         private readonly string persistentLauncherPath;
+        private readonly string legacyPersistentLauncherPath;
         private readonly string installerPath;
         private readonly string logPath;
         private readonly bool autoResume;
@@ -107,11 +108,12 @@ namespace KiloLink.Setup
             autoResume = resume;
             string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             launcherDirectory = Path.Combine(programData, "KiloLink", "Launcher");
-            persistentLauncherPath = Path.Combine(launcherDirectory, "KiloLink-Environment-Setup.exe");
+            persistentLauncherPath = Path.Combine(launcherDirectory, "Kiloview-Environment-Setup.exe");
+            legacyPersistentLauncherPath = Path.Combine(launcherDirectory, "KiloLink-Environment-Setup.exe");
             installerPath = Path.Combine(launcherDirectory, "Install-KiloLinkSuite.ps1");
             logPath = Path.Combine(programData, "KiloLink", "setup-launcher.log");
 
-            Text = "KiloLink Environment Setup";
+            Text = "Kiloview Environment Setup";
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -188,6 +190,16 @@ namespace KiloLink.Setup
                 {
                     File.Copy(currentLauncher, persistentLauncherPath, true);
                 }
+                if (File.Exists(legacyPersistentLauncherPath)
+                    && !String.Equals(
+                        Path.GetFullPath(currentLauncher),
+                        Path.GetFullPath(legacyPersistentLauncherPath),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    try { File.Delete(legacyPersistentLauncherPath); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
                 SetupLauncher.ExtractInstaller(installerPath);
 
                 string systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
@@ -229,7 +241,7 @@ namespace KiloLink.Setup
                 logButton.Enabled = File.Exists(logPath);
                 MessageBox.Show(
                     "Setup could not start.\r\n\r\n" + exception.Message,
-                    "KiloLink Environment Setup",
+                    "Kiloview Environment Setup",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -256,7 +268,7 @@ namespace KiloLink.Setup
                         "The PowerShell installer exited before completing startup.\r\n\r\n"
                         + "Exit code: " + exitCode + "\r\n"
                         + "Diagnostic log: " + logPath,
-                        "KiloLink Environment Setup",
+                        "Kiloview Environment Setup",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
                 }

@@ -40,7 +40,7 @@ $script:KiloInstallerUrl = 'https://www.kiloview.com/downloads/klnk-pro/install.
 $script:InstallerLogPath = Join-Path $script:StateRoot 'installer.log'
 $script:ResumeStatePath = Join-Path $script:StateRoot 'resume-state.json'
 $script:ResumeTaskName = 'KiloLink Suite Installation Resume'
-$script:PersistentLauncherPath = Join-Path $script:StateRoot 'Launcher\KiloLink-Environment-Setup.exe'
+$script:PersistentLauncherPath = Join-Path $script:StateRoot 'Launcher\Kiloview-Environment-Setup.exe'
 $script:RestartScheduled = $false
 $script:MaximumResumeAttempts = 3
 $script:KiloDefaultUsername = 'admin'
@@ -394,7 +394,7 @@ function Request-RestartAndResume {
     }
     if ($restartNow) {
         Write-Host 'Windows will restart in 20 seconds. Save any other open work now.' -ForegroundColor Yellow
-        Invoke-Native shutdown.exe @('/r', '/t', '20', '/c', 'KiloLink Environment Setup is continuing after restart.')
+        Invoke-Native shutdown.exe @('/r', '/t', '20', '/c', 'Kiloview Environment Setup is continuing after restart.')
     } else {
         Write-Host 'Restart Windows manually when ready; Setup will continue after the next sign-in.' -ForegroundColor Yellow
     }
@@ -1469,8 +1469,8 @@ function Resume-Suite {
     if (-not (Get-SavedConfig)) {
         throw 'Setup cannot resume because its saved configuration is missing.'
     }
-    Write-Heading 'Resuming KiloLink Environment Setup after Windows restart'
-    Start-SuiteProgress -Activity 'Resuming KiloLink Environment Setup' -Status 'Waiting for Windows networking and DHCP'
+    Write-Heading 'Resuming Kiloview Environment Setup after Windows restart'
+    Start-SuiteProgress -Activity 'Resuming Kiloview Environment Setup' -Status 'Waiting for Windows networking and DHCP'
     try {
         Wait-ResumeNetwork
     } finally {

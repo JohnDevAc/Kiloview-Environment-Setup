@@ -8,7 +8,7 @@ $source = Join-Path $root 'launcher\SetupLauncher.cs'
 $manifest = Join-Path $root 'launcher\Setup.exe.manifest'
 $installer = Join-Path $root 'Install-KiloLinkSuite.ps1'
 $icon = Join-Path $root 'assets\setup.ico'
-$outputName = 'KiloLink-Environment-Setup.exe'
+$outputName = 'Kiloview-Environment-Setup.exe'
 $output = Join-Path $root $outputName
 
 $compilerCandidates = @(

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <assemblyIdentity version="1.2.4.0" name="JohnDevAc.KiloLinkEnvironmentSetup" />
-  <description>KiloLink Environment Setup</description>
+  <description>Kiloview Environment Setup</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
