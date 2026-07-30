@@ -8,6 +8,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -17,8 +18,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("John Lightfoot")]
 [assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 John Lightfoot")]
-[assembly: AssemblyVersion("1.2.5.0")]
-[assembly: AssemblyFileVersion("1.2.5.0")]
+[assembly: AssemblyVersion("1.2.6.0")]
+[assembly: AssemblyFileVersion("1.2.6.0")]
 
 namespace KiloLink.Setup
 {
@@ -246,6 +247,11 @@ namespace KiloLink.Setup
 
     internal sealed class SetupForm : Form
     {
+        private const int WmDpiChanged = 0x02E0;
+        private static readonly Size WelcomeLogicalClientSize = new Size(680, 370);
+        private static readonly Size ProgressLogicalClientSize = new Size(860, 680);
+        private static readonly Size ProgressLogicalContentSize = new Size(850, 550);
+
         private readonly Button startButton;
         private readonly Button logButton;
         private readonly Button closeButton;
@@ -269,6 +275,10 @@ namespace KiloLink.Setup
         private readonly string installerPath;
         private readonly string logPath;
         private readonly bool autoResume;
+        private bool progressViewVisible;
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr windowHandle);
 
         internal SetupForm(bool resume)
         {
@@ -287,15 +297,17 @@ namespace KiloLink.Setup
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = true;
-            ClientSize = new Size(680, 370);
+            ClientSize = WelcomeLogicalClientSize;
             Font = new Font("Segoe UI", 9F);
             BackColor = SetupTheme.Surface;
+            AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             FormClosing += SetupFormClosing;
 
             Panel headerPanel = new Panel();
             headerPanel.Dock = DockStyle.Top;
+            headerPanel.Size = new Size(WelcomeLogicalClientSize.Width, 118);
             headerPanel.Height = 118;
             headerPanel.BackColor = SetupTheme.Navy;
 
@@ -338,6 +350,7 @@ namespace KiloLink.Setup
             welcomePanel = new Panel();
             welcomePanel.Dock = DockStyle.Fill;
             welcomePanel.BackColor = SetupTheme.Surface;
+            welcomePanel.AutoScroll = true;
 
             Label description = new Label();
             description.Text = "Guided Windows 11 deployment with restart-safe setup, repair, updates,\r\nand diagnostics in one application.";
@@ -404,6 +417,7 @@ namespace KiloLink.Setup
             progressPanel = new Panel();
             progressPanel.Dock = DockStyle.Fill;
             progressPanel.BackColor = SetupTheme.Surface;
+            progressPanel.AutoScroll = true;
             progressPanel.Visible = false;
 
             activityLabel = new Label();
@@ -505,6 +519,8 @@ namespace KiloLink.Setup
             pulseTimer.Interval = 90;
             pulseTimer.Tick += delegate { progressBar.AdvancePulse(); };
 
+            Shown += SetupFormShown;
+
             if (autoResume)
             {
                 Shown += delegate
@@ -537,17 +553,113 @@ namespace KiloLink.Setup
             table.Controls.Add(button, column, 0);
         }
 
+        private void SetupFormShown(object sender, EventArgs eventArgs)
+        {
+            ApplyViewClientSize(false);
+        }
+
+        private float CurrentDpiScale()
+        {
+            float dpi = 96F;
+            if (IsHandleCreated)
+            {
+                try
+                {
+                    uint windowDpi = GetDpiForWindow(Handle);
+                    if (windowDpi > 0)
+                    {
+                        dpi = windowDpi;
+                    }
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    using (Graphics graphics = CreateGraphics())
+                    {
+                        dpi = graphics.DpiX;
+                    }
+                }
+            }
+
+            return Math.Max(1F, dpi / 96F);
+        }
+
+        private Size ScaleLogicalSize(Size logicalSize)
+        {
+            float scale = CurrentDpiScale();
+            return new Size(
+                Math.Max(1, (int)Math.Ceiling(logicalSize.Width * scale)),
+                Math.Max(1, (int)Math.Ceiling(logicalSize.Height * scale)));
+        }
+
+        private void ApplyViewClientSize(bool centerOnCurrentScreen)
+        {
+            Size logicalSize = progressViewVisible
+                ? ProgressLogicalClientSize
+                : WelcomeLogicalClientSize;
+            Size requestedClientSize = ScaleLogicalSize(logicalSize);
+
+            Screen screen = Screen.FromControl(this);
+            Rectangle workingArea = screen.WorkingArea;
+            Size nonClientSize = new Size(
+                Math.Max(0, Width - ClientSize.Width),
+                Math.Max(0, Height - ClientSize.Height));
+            int margin = Math.Max(8, (int)Math.Ceiling(16F * CurrentDpiScale()));
+            int maximumClientWidth = Math.Max(
+                1,
+                workingArea.Width - nonClientSize.Width - (margin * 2));
+            int maximumClientHeight = Math.Max(
+                1,
+                workingArea.Height - nonClientSize.Height - (margin * 2));
+
+            ClientSize = new Size(
+                Math.Min(requestedClientSize.Width, maximumClientWidth),
+                Math.Min(requestedClientSize.Height, maximumClientHeight));
+
+            progressPanel.AutoScrollMinSize = ScaleLogicalSize(ProgressLogicalContentSize);
+
+            if (centerOnCurrentScreen)
+            {
+                Location = new Point(
+                    workingArea.Left + Math.Max(0, (workingArea.Width - Width) / 2),
+                    workingArea.Top + Math.Max(0, (workingArea.Height - Height) / 2));
+            }
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            bool dpiChanged = message.Msg == WmDpiChanged;
+            base.WndProc(ref message);
+
+            if (dpiChanged && IsHandleCreated && !IsDisposed)
+            {
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (!IsDisposed)
+                        {
+                            ApplyViewClientSize(false);
+                        }
+                    });
+                }
+                catch (InvalidOperationException)
+                {
+                    // The window is already closing.
+                }
+            }
+        }
+
         private void ShowProgressView()
         {
-            if (progressPanel.Visible)
+            if (progressViewVisible)
             {
                 return;
             }
 
+            progressViewVisible = true;
             welcomePanel.Visible = false;
             progressPanel.Visible = true;
-            ClientSize = new Size(860, 680);
-            CenterToScreen();
+            ApplyViewClientSize(true);
             AcceptButton = responseButton;
             pulseTimer.Start();
             AppendOutput("Kiloview Environment Setup started.");
@@ -906,7 +1018,17 @@ namespace KiloLink.Setup
                 {
                     noticeForm.Text = "Licences and third-party notices";
                     noticeForm.StartPosition = FormStartPosition.CenterParent;
+                    noticeForm.AutoScaleDimensions = new SizeF(96F, 96F);
+                    noticeForm.AutoScaleMode = AutoScaleMode.Dpi;
                     noticeForm.Size = new Size(720, 560);
+                    noticeForm.Shown += delegate
+                    {
+                        Size noticeSize = ScaleLogicalSize(new Size(720, 560));
+                        Rectangle workingArea = Screen.FromControl(this).WorkingArea;
+                        noticeForm.Size = new Size(
+                            Math.Min(noticeSize.Width, Math.Max(320, workingArea.Width - 40)),
+                            Math.Min(noticeSize.Height, Math.Max(240, workingArea.Height - 40)));
+                    };
                     noticeForm.MinimizeBox = false;
                     noticeForm.MaximizeBox = true;
                     noticeForm.ShowIcon = false;

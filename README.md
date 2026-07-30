@@ -19,6 +19,11 @@ interactive prompts, and installer output remain in the same Windows UI.
 The executable contains the deployment script, application artwork, licence,
 and third-party notices, so no other downloaded project files are required.
 
+The launcher is per-monitor DPI aware. Its welcome and progress views scale for
+the active display, including mixed-DPI monitor changes. When the effective
+desktop area is smaller than the full progress layout, the activity view
+remains accessible by scrolling instead of clipping controls.
+
 Launcher diagnostics are saved to
 `C:\ProgramData\KiloLink\setup-launcher.log`.
 
