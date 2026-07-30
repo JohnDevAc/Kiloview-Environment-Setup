@@ -11,10 +11,22 @@ Kiloview Environment Setup is a menu-driven Windows 11 installer for:
 ## Run
 
 For the simplest installation, download `Kiloview-Environment-Setup.exe`,
-double-click it, approve the Windows Administrator prompt, select **Start
-setup**, and follow the choices shown in the application. The deployment engine
-runs without a separate PowerShell window. Granular progress, current activity,
-interactive prompts, and installer output remain in the same Windows UI.
+double-click it and approve the Windows Administrator prompt. The first screen
+lists the PC's physical Ethernet and Wi-Fi adapters and pre-fills the current
+IPv4, prefix, gateway, and DNS values. Select the adapter that will carry
+KiloLink and NDI traffic, review the values, and choose **Apply static IP and
+continue**. Applying the address can briefly interrupt that adapter's network
+connection.
+
+A **Skip for now** option is available for PCs that already have a stable
+address or DHCP reservation. It displays a server-reliability warning before
+continuing because a changing address can make KiloLink and NDI endpoints
+unreachable.
+
+After networking is confirmed, select **Start setup** and follow the choices
+shown in the application. The deployment engine runs without a separate
+PowerShell window. Granular progress, current activity, interactive prompts,
+and installer output remain in the same Windows UI.
 
 The executable contains the deployment script, application artwork, licence,
 and third-party notices, so no other downloaded project files are required.
@@ -128,17 +140,20 @@ the shared `.wslconfig` file so unrelated Linux data is not destroyed.
 
 ## Multi-NIC behavior
 
-The installer lists active physical Ethernet and Wi-Fi IPv4 addresses. Docker,
-WSL, Hyper-V, tunnel, VPN, and loopback adapters are excluded. A wired address
-assigned by DHCP is preferred.
+The launcher's first screen lists physical Ethernet and Wi-Fi adapters. Docker,
+WSL, Hyper-V, tunnel, VPN, and loopback adapters are excluded. Connected wired
+adapters are listed first. The selected adapter and address are passed into the
+deployment engine so the same adapter does not need to be selected again.
 
 The selected address is the primary address advertised to KiloLink devices and
 is used in the browser shortcuts. WSL mirrored networking and host networking
 inside Docker allow KiloLink to listen through all active physical adapters.
 NDI Discovery Server binds to 0.0.0.0 for the same reason.
 
-Use a DHCP reservation for the chosen Ethernet address. If DHCP later assigns a
-different address, rerun the script and choose Repair / reconfigure.
+Use a static address that is excluded from the DHCP pool, or reserve it on the
+DHCP server before choosing **Skip for now**. If an address later changes,
+rerun the launcher, correct the static configuration, and choose Repair /
+reconfigure.
 
 ## Defaults
 

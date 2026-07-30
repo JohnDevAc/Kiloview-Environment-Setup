@@ -8,7 +8,7 @@
 .DESCRIPTION
     KiloLink runs in Docker Engine inside a dedicated Ubuntu WSL 2 distribution.
     Windows 11 mirrored networking exposes its TCP, UDP, and multicast traffic
-    on physical adapters. The selected wired/DHCP address is advertised to
+    on physical adapters. The selected stable IPv4 address is advertised to
     KiloLink devices, while the services listen on all available interfaces.
 #>
 
@@ -19,7 +19,9 @@ param(
     [switch]$AcceptLicenses,
     [switch]$AutoRestart,
     [switch]$LauncherMode,
-    [string]$LogPath
+    [string]$LogPath,
+    [string]$PreferredInterfaceAlias,
+    [string]$PreferredIpAddress
 )
 
 Set-StrictMode -Version 2.0
@@ -700,7 +702,11 @@ function Get-LanCandidates {
 }
 
 function Select-PrimaryLanAddress {
-    param($Saved)
+    param(
+        $Saved,
+        [string]$PreferredAlias,
+        [string]$PreferredAddress
+    )
     $candidates = @(Get-LanCandidates)
     if ($candidates.Count -eq 0) {
         throw 'No physical Ethernet or Wi-Fi IPv4 address was detected. Connect the PC to the network and retry.'
@@ -708,9 +714,16 @@ function Select-PrimaryLanAddress {
     $savedAlias = if ($Saved) { [string](Get-PropertyValue $Saved 'PrimaryInterfaceAlias' '') } else { '' }
     $defaultIndex = 0
     for ($i = 0; $i -lt $candidates.Count; $i++) {
+        $preferredAliasMatches = $PreferredAlias -and
+            $candidates[$i].Alias -eq $PreferredAlias
+        $preferredAddressMatches = -not $PreferredAddress -or
+            $candidates[$i].Address -eq $PreferredAddress
+        if ($preferredAliasMatches -and $preferredAddressMatches) {
+            Write-Host "Using the adapter selected in the launcher: $($candidates[$i].Alias) / $($candidates[$i].Address)" -ForegroundColor Cyan
+            return $candidates[$i]
+        }
         if ($savedAlias -and $candidates[$i].Alias -eq $savedAlias) {
             $defaultIndex = $i
-            break
         }
     }
     Write-Host ''
@@ -798,12 +811,17 @@ function Read-SuiteConfig {
     $distro = Get-UbuntuDistro $preferredDistro
     if (-not $distro) { $distro = $preferredDistro }
     $legacy = if (-not $saved -and (Get-WslDistroNames) -contains $distro) { Get-LegacyKiloConfig $distro } else { $null }
-    $adapter = Select-PrimaryLanAddress $saved
+    $adapter = Select-PrimaryLanAddress `
+        -Saved $saved `
+        -PreferredAlias $PreferredInterfaceAlias `
+        -PreferredAddress $PreferredIpAddress
     $webDefault = if ($saved) { [int](Get-PropertyValue $saved 'WebPort' 80) } elseif ($legacy -and $legacy.WebPort) { [int]$legacy.WebPort } else { 80 }
     $linkDefault = if ($saved) { [int](Get-PropertyValue $saved 'LinkPort' 50000) } elseif ($legacy -and $legacy.LinkPort) { [int]$legacy.LinkPort } else { 50000 }
     $ndiDefault = if ($saved) { [int](Get-PropertyValue $saved 'NdiDiscoveryPort' 5959) } else { 5959 }
-    if (-not $adapter.Dhcp) {
-        Write-Host 'Warning: the chosen address was not assigned by DHCP. A DHCP reservation or stable static address is recommended.' -ForegroundColor Yellow
+    if ($adapter.Dhcp) {
+        Write-Host 'Warning: this server is using DHCP. Configure a DHCP reservation or rerun the launcher to set a static address.' -ForegroundColor Yellow
+    } else {
+        Write-Host 'Using a stable static/manual IPv4 address for this server.' -ForegroundColor Green
     }
     return [pscustomobject]@{
         SchemaVersion = 1
