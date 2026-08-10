@@ -1067,7 +1067,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl gnupg avahi-daemon dbus iproute2 libnss-mdns
 
-if ! command -v docker >/dev/null 2>&1; then
+# WSL appends the Windows PATH by default. Docker Desktop can therefore make
+# `command -v docker` resolve to a Windows interop shim under /mnt/c even when
+# this dedicated distro has no Linux Docker Engine or docker.service.
+if [ ! -x /usr/bin/docker ] || ! dpkg-query -W -f='${Status}' docker-ce 2>/dev/null | grep -q 'install ok installed'; then
     for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
         apt-get remove -y "$pkg" >/dev/null 2>&1 || true
     done
