@@ -18,6 +18,10 @@ KiloLink and NDI traffic, review the values, and choose **Apply static IP and
 continue**. Applying the address can briefly interrupt that adapter's network
 connection.
 
+Setup waits for Windows to confirm that the address is usable. A duplicate
+address or a 30-second readiness timeout triggers an attempt to restore the
+previous network settings and prevents setup from proceeding with that address.
+
 A **Skip for now** option is available for PCs that already have a stable
 address or DHCP reservation. It displays a server-reliability warning before
 continuing because a changing address can make KiloLink and NDI endpoints
@@ -66,6 +70,19 @@ source and multi-resolution `.ico` file are under `assets` and are embedded by
 the same build. The MIT licence and third-party notices are also embedded and
 can be viewed from the launcher's **Licences** button.
 
+Run the regression checks after building:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Installer.Regression.ps1
+```
+
+The checks use isolated configuration files, fake Windows services and network
+adapters, and the compiled launcher. Git for Windows Bash is required to test
+the generated Linux watchdog; use `-BashPath` if it is installed elsewhere.
+These checks do not install software, change network settings, or register
+scheduled tasks. A complete installation and reboot should also be tested on
+a disposable Windows 11 machine before release.
+
 Interactive operations use the application's granular progress view. Detailed
 WSL, APT, Docker, and installer output is shown in the activity panel and
 written to `C:\ProgramData\KiloLink\installer.log`.
@@ -82,6 +99,22 @@ of three elevated continuation attempts, and offers to restart Windows with a
 persisted launcher resumes automatically, waits for physical networking, and
 re-verifies Windows features and WSL before continuing with Ubuntu, Docker,
 KiloLink, and NDI. The continuation task and state are removed after success.
+
+Repair compares the requested settings with the actual Docker container, so an
+interrupted attempt does not prevent a later repair from applying them. Cancelling
+the license prompt preserves the previous saved configuration. Repair also
+reinstalls NDI Tools when its Discovery Service executable is missing.
+
+The watchdog checks Docker, Avahi, and the container every 30 seconds. Failures
+exit with an error so Task Scheduler can retry after one minute, up to three
+times; the regular five-minute trigger remains available afterward.
+
+Installation and update finish successfully only after the watchdog and
+container are running, NDI owns a listening socket on the configured port, and
+the KiloLink web interface responds. Readiness checks retry for up to two minutes.
+The launcher distinguishes successful completion, cancellation, failure, and a
+pending restart. Exiting the menu after a failure retains an error result until
+a subsequent operation completes successfully.
 
 KiloLink and Docker are installed in a dedicated WSL distribution named
 `KiloLink-Ubuntu`. Existing Ubuntu distributions, packages, and APT sources are
@@ -116,6 +149,11 @@ restart within its three-attempt safety limit.
 For a non-interactive update check, use `-Action Update` with an optional
 `-LogPath`. Uninstall remains interactive-only to protect application data.
 
+Process exit codes are `0` for normal completion or cancellation, `1` for a
+failure, and `3010` when setup needs a Windows restart to continue. A zero exit
+code alone does not mean an installation took place; the launcher displays the
+operation outcome separately.
+
 After a successful install, repair, or update, the application activity view
 shows the KiloLink web address, NDI Discovery Server endpoint, and login
 details. Kiloview's
@@ -145,8 +183,9 @@ WSL, Hyper-V, tunnel, VPN, and loopback adapters are excluded. Connected wired
 adapters are listed first. The selected adapter and address are passed into the
 deployment engine so the same adapter does not need to be selected again.
 
-The selected address is the primary address advertised to KiloLink devices and
-is used in the browser shortcuts. WSL mirrored networking and host networking
+The selected address is the primary address advertised to KiloLink devices.
+Local browser shortcuts use `127.0.0.1` so their targets survive address changes.
+WSL mirrored networking and host networking
 inside Docker allow KiloLink to listen through all active physical adapters.
 NDI Discovery Server binds to 0.0.0.0 for the same reason.
 
@@ -155,6 +194,11 @@ DHCP server before choosing **Skip for now**. If an address later changes,
 rerun the launcher, correct the static configuration, and choose Repair /
 reconfigure.
 
+Update also applies the adapter and address selected in the launcher, including
+static addresses. Unattended repair and update refresh the saved adapter's
+address when it has changed; if several addresses make the choice ambiguous,
+setup asks you to use Repair / reconfigure.
+
 ## Defaults
 
 | Setting | Default |
@@ -162,7 +206,14 @@ reconfigure.
 | KiloLink web | 80/TCP |
 | KiloLink device link pair | 50000-50001/UDP |
 | NDI Discovery Server | 5959/TCP |
+| NDI control and streaming firewall range | 5960-10000/TCP and UDP |
+| KiloLink audio/video firewall range | 30000-30300/TCP and UDP |
+| mDNS discovery | 5353/UDP |
 | KiloLink persistent Linux data | /opt/kilolink-server |
+
+The NDI firewall range includes Kiloview's documented TCP/UDP streaming ports
+7960-10000 in both the Windows and WSL Hyper-V firewall rules. See
+[Kiloview's port requirements](https://www.kiloview.com/en/support-doc/docs/home/?a=index&aid=846568314808303616&g=Doc&id=7&m=Article).
 
 Windows 11 22H2 or later and internet access are required. The script asks for
 explicit acceptance of the vendor license terms before installation.

@@ -56,6 +56,28 @@ $script:ProgressPercent = 0
 $script:ProgressPulseIndex = 0
 $script:ProgressLastPulse = [datetime]::MinValue
 $script:LauncherEventPrefix = '@@KILOVIEW_EVENT@@'
+$script:OperationOutcome = 'Idle'
+$script:OperationMessage = 'No deployment operation was performed.'
+$script:OperationFailed = $false
+
+function Set-OperationOutcome {
+    param(
+        [ValidateSet('Idle', 'Running', 'Completed', 'Cancelled', 'RestartRequired', 'Failed')]
+        [string]$Outcome,
+        [string]$Message
+    )
+    $script:OperationOutcome = $Outcome
+    $script:OperationMessage = $Message
+    if ($Outcome -eq 'Failed') { $script:OperationFailed = $true }
+    if ($Outcome -eq 'Completed') { $script:OperationFailed = $false }
+    Write-LauncherEvent -Type 'outcome' -Data @{ outcome = $Outcome; message = $Message }
+}
+
+function Get-InstallerExitCode {
+    if ($script:OperationOutcome -eq 'RestartRequired') { return 3010 }
+    if ($script:OperationFailed -or $script:OperationOutcome -eq 'Running') { return 1 }
+    return 0
+}
 
 function Write-LauncherEvent {
     param([string]$Type, [hashtable]$Data = @{})
@@ -426,6 +448,7 @@ function Request-RestartAndResume {
     param([string]$Reason)
     Register-ResumeContinuation -Reason $Reason
     $script:RestartScheduled = $true
+    Set-OperationOutcome 'RestartRequired' 'Restart Windows and sign back in to continue setup.'
     if ($script:ProgressActive) {
         Stop-SuiteProgress
     }
@@ -743,6 +766,31 @@ function Select-PrimaryLanAddress {
             return $candidates[$number - 1]
         }
         Write-Host 'Choose one of the listed adapter numbers.' -ForegroundColor Red
+    }
+}
+
+function Sync-PrimaryLanAddress {
+    param($Config)
+    $alias = if ($PreferredInterfaceAlias) { $PreferredInterfaceAlias } else { $Config.PrimaryInterfaceAlias }
+    $candidates = @(Get-LanCandidates | Where-Object { $_.Alias -eq $alias })
+    if ($candidates.Count -eq 0) {
+        throw "The selected adapter '$alias' has no usable IPv4 address. Connect it or choose Repair / reconfigure."
+    }
+    $address = if ($PreferredInterfaceAlias -and $PreferredIpAddress) { $PreferredIpAddress } else { $Config.PublicIp }
+    $matching = @($candidates | Where-Object { $_.Address -eq $address })
+    if ($matching.Count -gt 0) {
+        $adapter = $matching[0]
+    } elseif ($PreferredInterfaceAlias -and $PreferredIpAddress) {
+        throw "The address selected in the launcher ($PreferredIpAddress) is no longer available on '$alias'. Refresh the launcher and retry."
+    } elseif ($candidates.Count -eq 1) {
+        $adapter = $candidates[0]
+    } else {
+        throw "The saved address is no longer available on '$alias', which has multiple IPv4 addresses. Choose Repair / reconfigure to select one."
+    }
+    if ($Config.PublicIp -ne $adapter.Address -or $Config.PrimaryInterfaceAlias -ne $adapter.Alias) {
+        Write-Detail "Using current server address $($adapter.Alias) / $($adapter.Address)." Yellow
+        $Config.PublicIp = $adapter.Address
+        $Config.PrimaryInterfaceAlias = $adapter.Alias
     }
 }
 
@@ -1067,7 +1115,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl gnupg avahi-daemon dbus iproute2 libnss-mdns
 
-if ! command -v docker >/dev/null 2>&1; then
+# WSL appends the Windows PATH by default. Docker Desktop can therefore make
+# `command -v docker` resolve to a Windows interop shim under /mnt/c even when
+# this dedicated distro has no Linux Docker Engine or docker.service.
+if [ ! -x /usr/bin/docker ] || ! dpkg-query -W -f='${Status}' docker-ce 2>/dev/null | grep -q 'install ok installed'; then
     for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
         apt-get remove -y "$pkg" >/dev/null 2>&1 || true
     done
@@ -1132,20 +1183,28 @@ docker inspect "__CONTAINER__" >/dev/null
 }
 
 function Sync-KiloConfig {
-    param($Old, $New)
-    if (-not (Test-KiloContainer $New.DistroName)) {
-        Install-KiloLink $New
+    param($Config)
+    if (-not (Test-KiloContainer $Config.DistroName)) {
+        Install-KiloLink $Config
         return
     }
+    # The saved file records the requested settings for restart continuation.
+    # Only the live container can tell us what a previous attempt actually applied.
+    $actual = Get-LegacyKiloConfig $Config.DistroName
+    if (-not $actual) {
+        throw 'Could not read the live KiloLink container configuration. Repair cannot safely compare its settings.'
+    }
     $changed =
-        ([string](Get-PropertyValue $Old 'PublicIp' '') -ne [string]$New.PublicIp) -or
-        ([int](Get-PropertyValue $Old 'WebPort' 0) -ne [int]$New.WebPort) -or
-        ([int](Get-PropertyValue $Old 'LinkPort' 0) -ne [int]$New.LinkPort)
+        ([string]$actual.PublicIp -ne [string]$Config.PublicIp) -or
+        ([int]$actual.WebPort -ne [int]$Config.WebPort) -or
+        ([int]$actual.LinkPort -ne [int]$Config.LinkPort) -or
+        ([string]$actual.LinuxDataPath -ne [string]$Config.LinuxDataPath) -or
+        ([string]$actual.KiloLinkImage -ne [string]$Config.KiloLinkImage)
     if ($changed) {
         Write-Step 'Applying the changed KiloLink network configuration'
-        Recreate-KiloContainer $New
+        Recreate-KiloContainer $Config
     } else {
-        Invoke-Wsl $New.DistroName "docker update --restart always '$script:ContainerName' >/dev/null; docker start '$script:ContainerName' >/dev/null || true"
+        Invoke-Wsl $Config.DistroName "docker update --restart always '$script:ContainerName' >/dev/null && docker start '$script:ContainerName' >/dev/null"
     }
 }
 
@@ -1236,10 +1295,10 @@ function Install-NdiTools {
     param([switch]$UpdateOnly)
     $registration = Get-NdiRegistration
     if ($UpdateOnly -and -not $registration) {
-        Write-Detail 'NDI Tools is missing. Choose Repair / Reconfigure to install it.' Yellow
-        return
+        throw 'NDI Tools is missing. Choose Repair / Reconfigure to install it.'
     }
-    if ($registration -and -not $UpdateOnly) {
+    $componentsMissing = -not (Get-NdiDiscoveryExe)
+    if ($registration -and -not $UpdateOnly -and -not $componentsMissing) {
         $installedVersion = Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' ''))
         Write-Detail "NDI Tools $installedVersion is already installed." Green
         return
@@ -1258,7 +1317,7 @@ function Install-NdiTools {
     }
     $installedVersion = if ($registration) { Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' '')) } else { $null }
     $packageVersion = Convert-ToVersion ((Get-Item -LiteralPath $installer).VersionInfo.ProductVersion)
-    $install = -not $registration -or -not $installedVersion -or -not $packageVersion -or $packageVersion -gt $installedVersion
+    $install = $componentsMissing -or -not $registration -or -not $installedVersion -or -not $packageVersion -or $packageVersion -gt $installedVersion
     if (-not $install) {
         Write-Detail "NDI Tools $installedVersion is current." Green
         Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
@@ -1266,7 +1325,7 @@ function Install-NdiTools {
     }
 
     Set-SuiteProgress -Percent ([Math]::Min(92, $script:ProgressPercent + 2)) -Status 'Installing NDI Tools'
-    $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-') -PassThru
+    $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-') -PassThru -WindowStyle Hidden
     while (-not $process.HasExited) {
         Update-SuiteProgressPulse
         Start-Sleep -Milliseconds 300
@@ -1279,6 +1338,9 @@ function Install-NdiTools {
     if (-not (Get-NdiRegistration)) {
         throw 'NDI Tools finished installing but was not detected in Programs and Features.'
     }
+    if (-not (Get-NdiDiscoveryExe)) {
+        throw 'NDI Tools finished installing but its Discovery Service executable is still missing.'
+    }
     Write-Detail 'NDI Tools installed or updated.' Green
 }
 
@@ -1289,6 +1351,7 @@ function Configure-NdiServer {
     if (-not $exe) {
         throw 'NDI Discovery Service.exe was not found in the NDI Tools installation.'
     }
+    Stop-ManagedTask $script:NdiTaskName
 
     $ndiConfigDir = Join-Path $env:ProgramData 'NDI'
     New-Item -ItemType Directory -Path $ndiConfigDir -Force | Out-Null
@@ -1334,8 +1397,8 @@ function Install-FirewallRules {
     param($Config)
     Write-Step 'Opening the required Windows and WSL firewall ports'
     Get-NetFirewallRule -Group $script:FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-    $tcpPorts = @([string]$Config.WebPort, '30000-30300', '5960-7961')
-    $udpPorts = @([string]$Config.LinkPort, [string]([int]$Config.LinkPort + 1), '30000-30300', '5353', '5960-7961')
+    $tcpPorts = @([string]$Config.WebPort, '30000-30300', '5960-10000')
+    $udpPorts = @([string]$Config.LinkPort, [string]([int]$Config.LinkPort + 1), '30000-30300', '5353', '5960-10000')
     New-NetFirewallRule -DisplayName 'KiloLink Suite TCP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort $tcpPorts | Out-Null
     New-NetFirewallRule -DisplayName 'KiloLink Suite UDP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol UDP -LocalPort $udpPorts | Out-Null
     New-NetFirewallRule -DisplayName 'NDI Discovery Server TCP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort ([string]$Config.NdiDiscoveryPort) | Out-Null
@@ -1353,7 +1416,8 @@ function Install-FirewallRules {
 function Install-Shortcuts {
     param($Config)
     Write-Step 'Creating KiloLink browser shortcuts'
-    $url = "http://$($Config.PublicIp):$($Config.WebPort)/"
+    # Keep local shortcuts stable when DHCP or adapter configuration changes.
+    $url = "http://127.0.0.1:$($Config.WebPort)/"
     $nl = [Environment]::NewLine
     $content = (@('[InternetShortcut]', "URL=$url", "IconFile=$env:SystemRoot\System32\SHELL32.dll", 'IconIndex=14') -join $nl) + $nl
     $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
@@ -1365,24 +1429,60 @@ function Install-Shortcuts {
     Write-Detail "Shortcut target: $url" Green
 }
 
+function Stop-ManagedTask {
+    param([string]$TaskName, [int]$TimeoutSeconds = 20)
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $task -or $task.State -ne 'Running') { return }
+    Stop-ScheduledTask -TaskName $TaskName
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if (-not $task -or $task.State -ne 'Running') { return }
+        Wait-SuiteProgressInterval -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    throw "The scheduled task '$TaskName' did not stop. Its configuration has not been replaced."
+}
+
+function Get-KiloWatchdogCommand {
+    $linux = @'
+set -euo pipefail
+while true; do
+    systemctl start docker
+    systemctl start avahi-daemon
+    docker update --restart always '__CONTAINER__' >/dev/null
+    docker start '__CONTAINER__' >/dev/null
+    docker inspect -f '{{.State.Running}}' '__CONTAINER__' | grep -qx true
+    sleep 30
+done
+'@
+    return $linux.Replace('__CONTAINER__', $script:ContainerName).Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
 function Install-StartupTask {
     param($Config)
     Write-Step 'Installing the KiloLink startup and watchdog task'
+    Stop-ManagedTask $script:StartupTaskName
     New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
     $template = @'
 $ErrorActionPreference = 'Continue'
 $Distro = '__DISTRO__'
-$Container = '__CONTAINER__'
 $LogPath = '__LOG__'
 Start-Transcript -Path $LogPath -Append | Out-Null
 Write-Host ('KiloLink watchdog ' + [DateTime]::Now.ToString('o'))
-$linux = "systemctl start docker; systemctl start avahi-daemon; docker update --restart always '$Container' >/dev/null 2>&1 || true; docker start '$Container' >/dev/null 2>&1 || true; docker ps --filter name='$Container'; exec sleep infinity"
-& wsl.exe -d $Distro -u root --cd / -- bash -lc $linux
-Stop-Transcript | Out-Null
+$linux = '__LINUX_BASE64__'
+$code = 1
+try {
+    & wsl.exe -d $Distro -u root --cd / -- bash -lc "printf '%s' '$linux' | base64 -d | bash"
+    $code = $LASTEXITCODE
+} finally {
+    Stop-Transcript | Out-Null
+}
+exit $code
 '@
-    $helper = $template.Replace('__DISTRO__', [string]$Config.DistroName)
-    $helper = $helper.Replace('__CONTAINER__', $script:ContainerName)
-    $helper = $helper.Replace('__LOG__', (Join-Path $script:StateRoot 'startup.log'))
+    $helper = $template.Replace('__DISTRO__', ([string]$Config.DistroName).Replace("'", "''"))
+    $linuxBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-KiloWatchdogCommand)))
+    $helper = $helper.Replace('__LINUX_BASE64__', $linuxBase64)
+    $helper = $helper.Replace('__LOG__', (Join-Path $script:StateRoot 'startup.log').Replace("'", "''"))
     $helper | Set-Content -LiteralPath $script:StartupScriptPath -Encoding UTF8
     $taskArguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $script:StartupScriptPath + '"'
     $action = New-ScheduledTaskAction -Execute powershell.exe -Argument $taskArguments
@@ -1391,7 +1491,7 @@ Stop-Transcript | Out-Null
     $logon = New-ScheduledTaskTrigger -AtLogOn
     $logon.Delay = 'PT30S'
     $watchdog = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew -StartWhenAvailable
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     try {
         $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType S4U -RunLevel Highest
@@ -1404,33 +1504,72 @@ Stop-Transcript | Out-Null
     Start-ScheduledTask -TaskName $script:StartupTaskName
 }
 
-function Test-SuiteHealth {
+function Test-NdiServerReady {
     param($Config)
-    Write-Step 'Verifying installed components'
-    $taskDeadline = (Get-Date).AddSeconds(20)
-    do {
-        $startupTask = Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue
-        if ($startupTask -and $startupTask.State -eq 'Running') { break }
-        Start-Sleep -Seconds 1
-    } while ((Get-Date) -lt $taskDeadline)
-    if (-not $startupTask -or $startupTask.State -ne 'Running') {
-        throw 'The KiloLink WSL keepalive task did not remain running.'
+    $service = Get-NdiDiscoveryService
+    $serviceProcessId = 0
+    if ($service) {
+        if ($service.Status -ne 'Running') { return $false }
+        $serviceInfo = Get-CimInstance Win32_Service -Filter ("Name='{0}'" -f $service.Name.Replace("'", "''"))
+        if (-not $serviceInfo) { return $false }
+        $serviceProcessId = [int]$serviceInfo.ProcessId
+        if ($serviceProcessId -le 0) { return $false }
+    } else {
+        $task = Get-ScheduledTask -TaskName $script:NdiTaskName -ErrorAction SilentlyContinue
+        if (-not $task -or $task.State -ne 'Running') { return $false }
     }
-    $statusOutput = Invoke-Wsl $Config.DistroName "docker inspect -f '{{.State.Status}}' '$script:ContainerName'" -IgnoreExitCode -Capture
-    $status = @($statusOutput | Select-Object -Last 1)[0]
-    if ($status -ne 'running') {
-        throw "KiloLink container state is '$status' instead of 'running'."
+    $exe = Get-NdiDiscoveryExe
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $Config.NdiDiscoveryPort -ErrorAction SilentlyContinue)
+    foreach ($listener in $listeners) {
+        if ($listener.LocalAddress -notin @('0.0.0.0', '::')) { continue }
+        if ($service) {
+            if ([int]$listener.OwningProcess -eq $serviceProcessId) { return $true }
+        } else {
+            $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+            if ($exe -and $process -and [string]::Equals($process.Path, $exe, [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
     }
-    if (-not (Get-NdiDiscoveryService) -and -not (Get-ScheduledTask -TaskName $script:NdiTaskName -ErrorAction SilentlyContinue)) {
-        throw 'NDI Discovery Server has no service or startup task.'
-    }
+    return $false
+}
+
+function Test-SuiteHealth {
+    param($Config, [int]$TimeoutSeconds = 120)
+    Write-Step 'Verifying installed components and waiting for service readiness'
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $url = "http://$($Config.PublicIp):$($Config.WebPort)/"
-    try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $url -Method Head -TimeoutSec 15
-        Write-Detail "KiloLink web response: HTTP $($response.StatusCode)" Green
-    } catch {
-        Write-Warning "KiloLink is running, but the web check failed: $($_.Exception.Message)"
-    }
+    do {
+        $failures = New-Object Collections.Generic.List[string]
+        $startupTask = Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue
+        if (-not $startupTask -or $startupTask.State -ne 'Running') {
+            $failures.Add('The KiloLink WSL watchdog is not running.')
+        }
+        try {
+            $statusOutput = @(Invoke-Wsl $Config.DistroName "docker inspect -f '{{.State.Status}}' '$script:ContainerName'" -Capture)
+            $status = [string]($statusOutput | Select-Object -Last 1)
+            if ($status -ne 'running') { $failures.Add("KiloLink container state is '$status'.") }
+        } catch { $failures.Add("Could not check KiloLink: $($_.Exception.Message)") }
+        try {
+            if (-not (Test-NdiServerReady $Config)) {
+                $failures.Add("NDI Discovery Server is not running and listening on TCP port $($Config.NdiDiscoveryPort).")
+            }
+        } catch { $failures.Add("Could not check NDI Discovery Server: $($_.Exception.Message)") }
+        try {
+            $remainingSeconds = [Math]::Max(1, [Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds))
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $url -Method Get -TimeoutSec ([Math]::Min(5, $remainingSeconds))
+            if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 400) {
+                throw "HTTP $($response.StatusCode)"
+            }
+        } catch { $failures.Add("KiloLink web check failed at ${url}: $($_.Exception.Message)") }
+        if ($failures.Count -eq 0) {
+            Write-Detail "KiloLink web response: HTTP $($response.StatusCode); NDI Discovery Server is listening." Green
+            return
+        }
+        if ((Get-Date) -ge $deadline) { break }
+        Wait-SuiteProgressInterval -Milliseconds 2000
+    } while ($true)
+    throw ("Service readiness checks failed after $TimeoutSeconds seconds. " + ($failures -join ' '))
 }
 
 function Show-SuiteSummary {
@@ -1459,20 +1598,23 @@ function Repair-Suite {
         [switch]$UseSavedConfiguration,
         [switch]$LicenseAccepted
     )
+    Set-OperationOutcome 'Running' 'Installing or repairing the suite.'
     $old = Get-SavedConfig
     if ($UseSavedConfiguration) {
         if (-not $old) {
             throw 'A saved configuration is required for unattended repair.'
         }
         $config = ($old | ConvertTo-Json -Depth 5) | ConvertFrom-Json
+        Sync-PrimaryLanAddress $config
     } else {
         $config = Read-SuiteConfig -UseSaved
     }
-    Save-Config $config
     if (-not $LicenseAccepted -and -not (Confirm-LicenseAcceptance)) {
         Write-Host 'Operation cancelled.' -ForegroundColor Yellow
+        Set-OperationOutcome 'Cancelled' 'Installation was cancelled before changes were applied.'
         return
     }
+    Save-Config $config
     $showProgress = $Action -in @('Menu', 'Resume')
     $succeeded = $false
     if ($showProgress) { Start-SuiteProgress -Activity 'Installing KiloLink Server Pro and NDI' -Status 'Preparing the saved configuration' }
@@ -1487,11 +1629,7 @@ function Repair-Suite {
         Set-SuiteProgress -Percent 30 -Status 'Preparing systemd, Docker Engine, and Avahi'
         Ensure-Docker $distro
         Set-SuiteProgress -Percent 48 -Status 'Installing or validating KiloLink Server Pro'
-        if ($old -and (Test-KiloContainer $distro)) {
-            Sync-KiloConfig $old $config
-        } else {
-            Install-KiloLink $config
-        }
+        Sync-KiloConfig $config
         Set-SuiteProgress -Percent 60 -Status 'Installing or validating NDI Tools'
         Install-NdiTools
         Set-SuiteProgress -Percent 70 -Status 'Configuring NDI Discovery Server'
@@ -1514,6 +1652,7 @@ function Repair-Suite {
     if ($succeeded) {
         Clear-ResumeContinuation
         Show-SuiteSummary $config
+        Set-OperationOutcome 'Completed' 'Installation completed and service readiness checks passed.'
     }
 }
 
@@ -1549,8 +1688,7 @@ function Resume-Suite {
 function Update-KiloLink {
     param($Config)
     if (-not (Test-KiloContainer $Config.DistroName)) {
-        Write-Detail 'KiloLink is missing. Choose Repair / Reconfigure.' Yellow
-        return
+        throw 'KiloLink is missing. Choose Repair / Reconfigure.'
     }
     Write-Step 'Checking the current KiloLink image'
     $template = @'
@@ -1576,10 +1714,10 @@ fi
 }
 
 function Update-Suite {
+    Set-OperationOutcome 'Running' 'Updating the suite.'
     $config = Get-SavedConfig
     if (-not $config) {
-        Write-Host 'No saved configuration exists. Choose Repair / Reconfigure.' -ForegroundColor Yellow
-        return
+        throw 'No saved configuration exists. Choose Repair / Reconfigure.'
     }
     $showProgress = $Action -eq 'Menu'
     $succeeded = $false
@@ -1590,21 +1728,14 @@ function Update-Suite {
         Set-SuiteProgress -Percent 16 -Status 'Starting the dedicated Ubuntu services'
         $distro = Get-UbuntuDistro ([string]$config.DistroName)
         if (-not $distro) {
-            Write-Host 'Ubuntu is missing. Choose Repair / Reconfigure.' -ForegroundColor Yellow
-            return
+            throw 'Ubuntu is missing. Choose Repair / Reconfigure.'
         }
         $config.DistroName = $distro
-        Invoke-Wsl $distro 'systemctl start docker; systemctl start avahi-daemon'
-        Set-SuiteProgress -Percent 23 -Status 'Checking the primary DHCP address'
-        $oldConfig = ($config | ConvertTo-Json -Depth 5) | ConvertFrom-Json
-        $currentAdapter = @(Get-LanCandidates | Where-Object {
-            $_.Alias -eq $config.PrimaryInterfaceAlias -and $_.Dhcp
-        } | Select-Object -First 1)[0]
-        if ($currentAdapter -and $currentAdapter.Address -ne $config.PublicIp) {
-            Write-Detail "DHCP changed $($config.PrimaryInterfaceAlias) from $($config.PublicIp) to $($currentAdapter.Address)." Yellow
-            $config.PublicIp = $currentAdapter.Address
-            Sync-KiloConfig $oldConfig $config
-        }
+        Invoke-Wsl $distro 'systemctl start docker && systemctl start avahi-daemon'
+        Set-SuiteProgress -Percent 23 -Status 'Checking the selected server address and container settings'
+        Sync-PrimaryLanAddress $config
+        if (-not (Test-KiloContainer $distro)) { throw 'KiloLink is missing. Choose Repair / Reconfigure.' }
+        Sync-KiloConfig $config
         Set-SuiteProgress -Percent 30 -Status 'Updating Ubuntu and Docker packages'
         Write-Step 'Updating Ubuntu and Docker packages'
         $linuxUpdate = @'
@@ -1636,7 +1767,10 @@ systemctl enable --now avahi-daemon
     } finally {
         if ($showProgress) { Stop-SuiteProgress }
     }
-    if ($succeeded) { Show-SuiteSummary $config 'Suite update is complete' }
+    if ($succeeded) {
+        Show-SuiteSummary $config 'Suite update is complete'
+        Set-OperationOutcome 'Completed' 'Update completed and service readiness checks passed.'
+    }
 }
 
 function Invoke-UninstallCommand {
@@ -1689,6 +1823,7 @@ function Remove-LegacyPortProxies {
 }
 
 function Uninstall-Suite {
+    Set-OperationOutcome 'Running' 'Uninstalling the suite.'
     Write-Heading 'Uninstall KiloLink Suite'
     Write-Host 'This removes KiloLink and its persisted data, NDI Tools/Discovery Server,' -ForegroundColor Yellow
     Write-Host 'scheduled tasks, installer firewall rules, and browser shortcuts.' -ForegroundColor Yellow
@@ -1696,6 +1831,7 @@ function Uninstall-Suite {
     Write-Host 'WSL, unrelated distributions, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
     if ((Read-InstallerInput 'Type UNINSTALL to continue') -cne 'UNINSTALL') {
         Write-Host 'Uninstall cancelled.' -ForegroundColor Yellow
+        Set-OperationOutcome 'Cancelled' 'Uninstall was cancelled. No components were removed.'
         return
     }
 
@@ -1706,6 +1842,8 @@ function Uninstall-Suite {
     $config = Get-SavedConfig
     $preferred = if ($config) { [string](Get-PropertyValue $config 'DistroName' '') } else { '' }
     $distro = Get-UbuntuDistro $preferred
+    Stop-ManagedTask $script:StartupTaskName
+    Stop-ManagedTask $script:NdiTaskName
     Remove-ResumeTask
     Unregister-ScheduledTask -TaskName $script:StartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $script:NdiTaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -1770,6 +1908,7 @@ function Uninstall-Suite {
         if ($showProgress) { Stop-SuiteProgress }
     }
     Write-Host 'Uninstall complete. WSL and unrelated distributions were retained.' -ForegroundColor Green
+    Set-OperationOutcome 'Completed' 'Uninstall completed.'
 }
 
 function Show-State {
@@ -1803,6 +1942,7 @@ function Show-Menu {
                     default { Write-Host 'Invalid selection.' -ForegroundColor Red }
                 }
             } catch {
+                Set-OperationOutcome 'Failed' $_.Exception.Message
                 Write-Host "Operation failed: $($_.Exception.Message)" -ForegroundColor Red
                 Write-Host "State and logs are under $script:StateRoot" -ForegroundColor Yellow
             }
@@ -1818,6 +1958,7 @@ function Show-Menu {
                     default { Write-Host 'Invalid selection.' -ForegroundColor Red }
                 }
             } catch {
+                Set-OperationOutcome 'Failed' $_.Exception.Message
                 Write-Host "Installation failed: $($_.Exception.Message)" -ForegroundColor Red
                 Write-Host 'Rerun the script and choose Repair / Reconfigure after correcting the problem.' -ForegroundColor Yellow
             }
@@ -1864,6 +2005,7 @@ try {
     }
 } catch {
     $backgroundExitCode = 1
+    Set-OperationOutcome 'Failed' $_.Exception.Message
     Write-Host "Operation failed: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "State and logs are under $script:StateRoot" -ForegroundColor Yellow
 } finally {
@@ -1878,3 +2020,4 @@ if ($backgroundExitCode -ne 0) {
     }
     exit $backgroundExitCode
 }
+exit (Get-InstallerExitCode)
