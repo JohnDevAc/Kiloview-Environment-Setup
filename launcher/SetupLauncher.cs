@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("John Lightfoot")]
 [assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 John Lightfoot")]
-[assembly: AssemblyVersion("1.3.1.0")]
-[assembly: AssemblyFileVersion("1.3.1.0")]
+[assembly: AssemblyVersion("1.3.2.0")]
+[assembly: AssemblyFileVersion("1.3.2.0")]
 
 namespace KiloLink.Setup
 {
@@ -335,6 +335,8 @@ namespace KiloLink.Setup
         private string preferredInterfaceAlias;
         private string preferredIpAddress;
         private bool progressViewVisible;
+        private string operationOutcome = "Idle";
+        private string operationMessage = "No deployment operation was performed.";
 
         [DllImport("user32.dll")]
         private static extern uint GetDpiForWindow(IntPtr windowHandle);
@@ -1149,9 +1151,14 @@ namespace KiloLink.Setup
             {
                 script.AppendLine("  Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses -ErrorAction Stop");
             }
-            script.AppendLine("  Start-Sleep -Milliseconds 800");
-            script.AppendLine("  $configured = Get-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -IPAddress " + PowerShellLiteral(address) + " -ErrorAction SilentlyContinue");
-            script.AppendLine("  if (-not $configured) { throw 'Windows did not retain the requested static IPv4 address.' }");
+            script.AppendLine("  $addressDeadline = (Get-Date).AddSeconds(30)");
+            script.AppendLine("  do {");
+            script.AppendLine("    $configured = Get-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -IPAddress " + PowerShellLiteral(address) + " -ErrorAction SilentlyContinue");
+            script.AppendLine("    if ($configured -and $configured.AddressState -eq 'Duplicate') { throw 'The requested IPv4 address is already in use on this network. Choose a unique address.' }");
+            script.AppendLine("    if ($configured -and $configured.AddressState -eq 'Preferred') { break }");
+            script.AppendLine("    Start-Sleep -Milliseconds 250");
+            script.AppendLine("  } while ((Get-Date) -lt $addressDeadline)");
+            script.AppendLine("  if (-not $configured -or $configured.AddressState -ne 'Preferred') { throw 'The static IPv4 address did not become usable within 30 seconds. Check the adapter connection and address.' }");
             script.AppendLine("  Write-Output ('Configured {0} on {1}' -f $configured.IPAddress, $adapter.Name)");
             script.AppendLine("} catch {");
             script.AppendLine("  $configurationFailure = $_");
@@ -1648,7 +1655,6 @@ namespace KiloLink.Setup
 
                 installerProcess = new Process();
                 installerProcess.StartInfo = startInfo;
-                installerProcess.EnableRaisingEvents = true;
                 installerProcess.OutputDataReceived += InstallerOutputReceived;
                 installerProcess.ErrorDataReceived += InstallerErrorReceived;
                 installerProcess.Exited += InstallerProcessExited;
@@ -1664,6 +1670,9 @@ namespace KiloLink.Setup
                 progressStatusLabel.Text = autoResume
                     ? "Windows and WSL state are being verified."
                     : "Detecting installed components and available actions.";
+                // Subscribe to process completion only after both output readers
+                // are active, so the final outcome can be drained before rendering.
+                installerProcess.EnableRaisingEvents = true;
             }
             catch (Exception exception)
             {
@@ -1722,6 +1731,24 @@ namespace KiloLink.Setup
                 {
                     Dictionary<string, object> payload = eventSerializer.Deserialize<Dictionary<string, object>>(json);
                     string type = GetEventText(payload, "type");
+                    if (String.Equals(type, "outcome", StringComparison.OrdinalIgnoreCase))
+                    {
+                        operationOutcome = GetEventText(payload, "outcome");
+                        operationMessage = GetEventText(payload, "message");
+                        if (String.Equals(operationOutcome, "Running", StringComparison.OrdinalIgnoreCase))
+                        {
+                            activityLabel.Text = "Setup working";
+                            activityLabel.ForeColor = SetupTheme.Text;
+                            progressStatusLabel.Text = operationMessage;
+                            pulseTimer.Start();
+                        }
+                        else
+                        {
+                            pulseTimer.Stop();
+                            ApplyInstallerOutcome(0);
+                        }
+                        return;
+                    }
                     if (String.Equals(type, "progress", StringComparison.OrdinalIgnoreCase)
                         || String.Equals(type, "pulse", StringComparison.OrdinalIgnoreCase))
                     {
@@ -1823,10 +1850,57 @@ namespace KiloLink.Setup
             }
         }
 
+        private void ApplyInstallerOutcome(int exitCode)
+        {
+            bool failed = (exitCode != 0 && exitCode != 3010)
+                || String.Equals(operationOutcome, "Failed", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(operationOutcome, "Running", StringComparison.OrdinalIgnoreCase);
+            if (failed)
+            {
+                Environment.ExitCode = exitCode == 0 ? 1 : exitCode;
+                activityLabel.Text = "Setup needs attention";
+                activityLabel.ForeColor = SetupTheme.Error;
+                progressStatusLabel.Text = String.Equals(operationOutcome, "Failed", StringComparison.OrdinalIgnoreCase)
+                    ? operationMessage
+                    : "Setup exited before completing. Open the full log for details.";
+            }
+            else if (exitCode == 3010 || String.Equals(operationOutcome, "RestartRequired", StringComparison.OrdinalIgnoreCase))
+            {
+                Environment.ExitCode = 3010;
+                activityLabel.Text = "Restart required";
+                activityLabel.ForeColor = SetupTheme.Blue;
+                progressStatusLabel.Text = "Restart Windows and sign back in to continue setup.";
+            }
+            else if (String.Equals(operationOutcome, "Completed", StringComparison.OrdinalIgnoreCase))
+            {
+                Environment.ExitCode = 0;
+                progressBar.Value = 100;
+                activityLabel.Text = "Setup finished";
+                activityLabel.ForeColor = SetupTheme.Success;
+                progressStatusLabel.Text = operationMessage;
+            }
+            else
+            {
+                Environment.ExitCode = 0;
+                activityLabel.Text = String.Equals(operationOutcome, "Cancelled", StringComparison.OrdinalIgnoreCase)
+                    ? "Operation cancelled"
+                    : "Setup closed";
+                activityLabel.ForeColor = SetupTheme.Muted;
+                progressStatusLabel.Text = operationMessage;
+            }
+        }
+
         private void InstallerProcessExited(object sender, EventArgs eventArgs)
         {
+            Process completedProcess = (Process)sender;
             int exitCode;
-            try { exitCode = installerProcess.ExitCode; }
+            try
+            {
+                // Wait for asynchronous readers to enqueue the last outcome event
+                // before the completion callback is queued on the UI thread.
+                completedProcess.WaitForExit();
+                exitCode = completedProcess.ExitCode;
+            }
             catch { exitCode = 1; }
 
             if (IsDisposed || !IsHandleCreated)
@@ -1844,31 +1918,20 @@ namespace KiloLink.Setup
                     promptLabel.Text = "No installer input is pending.";
                     logButton.Enabled = File.Exists(logPath);
 
-                    if (exitCode == 0)
+                    ApplyInstallerOutcome(exitCode);
+                    AppendOutput(activityLabel.Text + ": " + progressStatusLabel.Text);
+                    if (Environment.ExitCode != 0 && Environment.ExitCode != 3010)
                     {
-                        progressBar.Value = 100;
-                        activityLabel.Text = "Setup finished";
-                        activityLabel.ForeColor = SetupTheme.Success;
-                        progressStatusLabel.Text = "The deployment operation completed successfully.";
-                        AppendOutput("Setup finished successfully.");
-                    }
-                    else
-                    {
-                        Environment.ExitCode = exitCode;
-                        activityLabel.Text = "Setup needs attention";
-                        activityLabel.ForeColor = SetupTheme.Error;
-                        progressStatusLabel.Text = "The deployment engine exited with code " + exitCode + ".";
-                        AppendOutput("Setup exited with code " + exitCode + ". Open the full log for details.");
                         MessageBox.Show(
                             "The installer exited before completing.\r\n\r\n"
-                            + "Exit code: " + exitCode + "\r\n"
+                            + progressStatusLabel.Text + "\r\n"
                             + "Diagnostic log: " + logPath,
                             "Kiloview Environment Setup",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Warning);
                     }
 
-                    installerProcess.Dispose();
+                    completedProcess.Dispose();
                     installerProcess = null;
                 });
             }
