@@ -42,6 +42,7 @@ $compilerArguments = @(
     ('/win32icon:"{0}"' -f $icon),
     ('/resource:"{0}",KiloLink.Setup.Install-KiloLinkSuite.ps1' -f $installer),
     ('/resource:"{0}",KiloLink.Setup.setup-icon.png' -f $iconArtwork),
+    ('/resource:"{0}",KiloLink.Setup.setup.ico' -f $icon),
     ('/resource:"{0}",KiloLink.Setup.LICENSE' -f $license),
     ('/resource:"{0}",KiloLink.Setup.THIRD_PARTY_NOTICES.md' -f $thirdPartyNotices),
     '/reference:System.dll',

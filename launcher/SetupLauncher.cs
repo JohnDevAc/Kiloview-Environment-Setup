@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("John Lightfoot")]
 [assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 John Lightfoot")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.0.1.0")]
+[assembly: AssemblyFileVersion("2.0.1.0")]
 
 namespace KiloLink.Setup
 {
@@ -33,6 +33,7 @@ namespace KiloLink.Setup
         internal const string LicenseResourceName = "KiloLink.Setup.LICENSE";
         internal const string ThirdPartyNoticesResourceName = "KiloLink.Setup.THIRD_PARTY_NOTICES.md";
         internal const string ArtworkResourceName = "KiloLink.Setup.setup-icon.png";
+        internal const string IconResourceName = "KiloLink.Setup.setup.ico";
         internal const string EventPrefix = "@@KILOVIEW_EVENT@@";
         internal static string InitialAction = String.Empty;
 
@@ -145,6 +146,18 @@ namespace KiloLink.Setup
             return "\"" + value.Replace("\"", "\\\"") + "\"";
         }
 
+        internal static Icon LoadIcon()
+        {
+            using (Stream resource = Assembly.GetExecutingAssembly().GetManifestResourceStream(IconResourceName))
+            {
+                if (resource == null) { throw new InvalidOperationException("The embedded application icon is missing."); }
+                using (Icon source = new Icon(resource, new Size(32, 32)))
+                {
+                    return (Icon)source.Clone();
+                }
+            }
+        }
+
         private static bool IsAdministrator()
         {
             WindowsIdentity identity = WindowsIdentity.GetCurrent();
@@ -155,16 +168,20 @@ namespace KiloLink.Setup
 
     internal static class SetupTheme
     {
-        internal static readonly Color Navy = Color.FromArgb(5, 20, 49);
-        internal static readonly Color NavyLight = Color.FromArgb(18, 47, 92);
-        internal static readonly Color Cyan = Color.FromArgb(0, 214, 238);
-        internal static readonly Color Blue = Color.FromArgb(22, 115, 220);
-        internal static readonly Color Surface = Color.FromArgb(244, 248, 252);
-        internal static readonly Color Track = Color.FromArgb(216, 230, 241);
-        internal static readonly Color Text = Color.FromArgb(18, 38, 64);
-        internal static readonly Color Muted = Color.FromArgb(83, 105, 129);
-        internal static readonly Color Success = Color.FromArgb(92, 190, 68);
-        internal static readonly Color Error = Color.FromArgb(205, 61, 61);
+        internal static readonly Color Header = Color.FromArgb(87, 26, 28);
+        internal static readonly Color Papaya = Color.FromArgb(255, 148, 63);
+        internal static readonly Color Accent = Color.FromArgb(185, 54, 39);
+        internal static readonly Color AccentHover = Color.FromArgb(158, 39, 29);
+        internal static readonly Color Surface = Color.FromArgb(255, 248, 242);
+        internal static readonly Color Paper = Color.FromArgb(255, 252, 248);
+        internal static readonly Color Track = Color.FromArgb(237, 211, 192);
+        internal static readonly Color Border = Color.FromArgb(216, 186, 169);
+        internal static readonly Color Text = Color.FromArgb(51, 31, 27);
+        internal static readonly Color Muted = Color.FromArgb(121, 93, 84);
+        internal static readonly Color ConsoleSurface = Color.FromArgb(50, 27, 24);
+        internal static readonly Color InverseText = Color.FromArgb(255, 240, 227);
+        internal static readonly Color Success = Color.FromArgb(47, 107, 71);
+        internal static readonly Color Error = Color.FromArgb(159, 29, 43);
     }
 
     internal sealed class InstallerProgressBar : Control
@@ -216,8 +233,8 @@ namespace KiloLink.Setup
                     RectangleF fillBounds = new RectangleF(bounds.X, bounds.Y, Math.Max(2F, fillWidth), bounds.Height);
                     using (LinearGradientBrush fillBrush = new LinearGradientBrush(
                         fillBounds,
-                        SetupTheme.Cyan,
-                        SetupTheme.Blue,
+                        SetupTheme.Accent,
+                        SetupTheme.Papaya,
                         LinearGradientMode.Horizontal))
                     {
                         graphics.FillRectangle(fillBrush, fillBounds);
@@ -237,14 +254,23 @@ namespace KiloLink.Setup
             }
 
             string percentage = currentValue + "%";
+            float dpiScale = graphics.DpiX / 96F;
+            int badgeWidth = Math.Min(Width, (int)Math.Ceiling(48F * dpiScale));
+            int badgeHeight = Math.Min(Height - 2, (int)Math.Ceiling(22F * dpiScale));
+            Rectangle percentageBounds = new Rectangle((Width - badgeWidth) / 2, (Height - badgeHeight) / 2, badgeWidth, badgeHeight);
+            using (GraphicsPath badge = RoundedRectangle(percentageBounds, Math.Min(7F * dpiScale, badgeHeight / 2F)))
+            using (SolidBrush badgeBrush = new SolidBrush(SetupTheme.Paper))
+            {
+                graphics.FillPath(badgeBrush, badge);
+            }
             using (Font percentageFont = new Font("Segoe UI Semibold", 9F))
             {
                 TextRenderer.DrawText(
                     graphics,
                     percentage,
                     percentageFont,
-                    Rectangle.Round(bounds),
-                    currentValue >= 45 ? Color.White : SetupTheme.Text,
+                    percentageBounds,
+                    SetupTheme.Text,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             }
         }
@@ -376,14 +402,14 @@ namespace KiloLink.Setup
             BackColor = SetupTheme.Surface;
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
-            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            Icon = SetupLauncher.LoadIcon();
             FormClosing += SetupFormClosing;
 
             Panel headerPanel = new Panel();
             headerPanel.Dock = DockStyle.Top;
             headerPanel.Size = new Size(WelcomeLogicalClientSize.Width, 118);
             headerPanel.Height = 118;
-            headerPanel.BackColor = SetupTheme.Navy;
+            headerPanel.BackColor = SetupTheme.Header;
 
             PictureBox artwork = new PictureBox();
             artwork.Location = new Point(20, 15);
@@ -395,22 +421,22 @@ namespace KiloLink.Setup
             Label title = new Label();
             title.Text = "Kiloview Environment Setup";
             title.Font = new Font("Segoe UI Semibold", 19F);
-            title.ForeColor = Color.White;
+            title.ForeColor = SetupTheme.InverseText;
             title.AutoSize = true;
             title.Location = new Point(122, 27);
 
             Label subtitle = new Label();
             subtitle.Text = "KiloLink Server Pro + NDI environment";
             subtitle.Font = new Font("Segoe UI", 10F);
-            subtitle.ForeColor = SetupTheme.Cyan;
+            subtitle.ForeColor = SetupTheme.Papaya;
             subtitle.AutoSize = true;
             subtitle.Location = new Point(125, 68);
 
             singleFileBadge = new Label();
             singleFileBadge.Text = "SINGLE-FILE SETUP";
             singleFileBadge.Font = new Font("Segoe UI Semibold", 8F);
-            singleFileBadge.ForeColor = Color.White;
-            singleFileBadge.BackColor = SetupTheme.NavyLight;
+            singleFileBadge.ForeColor = SetupTheme.Header;
+            singleFileBadge.BackColor = SetupTheme.Papaya;
             singleFileBadge.AutoSize = true;
             singleFileBadge.Padding = new Padding(9, 5, 9, 5);
             singleFileBadge.Location = new Point(526, 39);
@@ -420,6 +446,7 @@ namespace KiloLink.Setup
             headerPanel.Controls.Add(title);
             headerPanel.Controls.Add(subtitle);
             headerPanel.Controls.Add(singleFileBadge);
+            headerPanel.Controls.Add(new Panel { Dock = DockStyle.Bottom, Height = 4, BackColor = SetupTheme.Papaya });
 
             networkPanel = new Panel();
             networkPanel.Dock = DockStyle.Fill;
@@ -501,7 +528,7 @@ namespace KiloLink.Setup
             networkStatusLabel = new Label();
             networkStatusLabel.Text = "Select the adapter that will carry KiloLink and NDI traffic.";
             networkStatusLabel.Font = new Font("Segoe UI Semibold", 9F);
-            networkStatusLabel.ForeColor = SetupTheme.Blue;
+            networkStatusLabel.ForeColor = SetupTheme.Accent;
             networkStatusLabel.AutoEllipsis = true;
             networkStatusLabel.Location = new Point(34, 426);
             networkStatusLabel.Size = new Size(694, 22);
@@ -564,7 +591,7 @@ namespace KiloLink.Setup
             Label outputTitle = new Label();
             outputTitle.Text = "INSTALLER ACTIVITY";
             outputTitle.Font = new Font("Segoe UI Semibold", 8F);
-            outputTitle.ForeColor = SetupTheme.Blue;
+            outputTitle.ForeColor = SetupTheme.Accent;
             outputTitle.AutoSize = true;
             outputTitle.Location = new Point(31, 130);
 
@@ -573,8 +600,8 @@ namespace KiloLink.Setup
             outputBox.Size = new Size(800, 234);
             outputBox.ReadOnly = true;
             outputBox.BorderStyle = BorderStyle.None;
-            outputBox.BackColor = SetupTheme.Navy;
-            outputBox.ForeColor = Color.FromArgb(222, 239, 249);
+            outputBox.BackColor = SetupTheme.ConsoleSurface;
+            outputBox.ForeColor = SetupTheme.InverseText;
             outputBox.Font = new Font("Consolas", 9F);
             outputBox.DetectUrls = false;
 
@@ -642,10 +669,17 @@ namespace KiloLink.Setup
             button.FlatStyle = FlatStyle.Flat;
             button.Cursor = Cursors.Hand;
             button.Font = new Font("Segoe UI Semibold", 9F);
-            button.BackColor = primary ? SetupTheme.Blue : Color.White;
+            button.BackColor = primary ? SetupTheme.Accent : SetupTheme.Paper;
             button.ForeColor = primary ? Color.White : SetupTheme.Text;
-            button.FlatAppearance.BorderColor = primary ? SetupTheme.Blue : Color.FromArgb(179, 201, 218);
+            button.FlatAppearance.BorderColor = primary ? SetupTheme.Accent : SetupTheme.Border;
             button.FlatAppearance.BorderSize = 1;
+            button.FlatAppearance.MouseOverBackColor = primary ? SetupTheme.AccentHover : SetupTheme.Track;
+            button.FlatAppearance.MouseDownBackColor = primary ? SetupTheme.Header : SetupTheme.Border;
+            button.EnabledChanged += delegate
+            {
+                button.BackColor = button.Enabled ? (primary ? SetupTheme.Accent : SetupTheme.Paper) : SetupTheme.Track;
+                button.FlatAppearance.BorderColor = button.Enabled && primary ? SetupTheme.Accent : SetupTheme.Border;
+            };
             button.UseVisualStyleBackColor = false;
             return button;
         }
@@ -655,7 +689,7 @@ namespace KiloLink.Setup
             Label label = new Label();
             label.Text = text;
             label.Font = new Font("Segoe UI Semibold", 8F);
-            label.ForeColor = SetupTheme.Blue;
+            label.ForeColor = SetupTheme.Accent;
             label.AutoSize = true;
             label.Location = new Point(x, y);
             return label;
@@ -863,7 +897,7 @@ namespace KiloLink.Setup
             }
             networkAdapterBox.SelectedIndex = selectedIndex;
             networkStatusLabel.Text = "Review the values, then apply a static address to the selected adapter.";
-            networkStatusLabel.ForeColor = SetupTheme.Blue;
+            networkStatusLabel.ForeColor = SetupTheme.Accent;
         }
 
         private void NetworkAdapterSelectionChanged(object sender, EventArgs eventArgs)
@@ -1270,7 +1304,7 @@ namespace KiloLink.Setup
             networkConfigurationInProgress = true;
             SetNetworkControlsEnabled(false);
             networkStatusLabel.Text = "Applying the static IPv4 configuration...";
-            networkStatusLabel.ForeColor = SetupTheme.Blue;
+            networkStatusLabel.ForeColor = SetupTheme.Accent;
 
             string adapterAlias = choice.Alias;
             string script = BuildStaticNetworkScript(
@@ -1736,7 +1770,7 @@ namespace KiloLink.Setup
             {
                 Environment.ExitCode = 3010;
                 activityLabel.Text = "Restart required";
-                activityLabel.ForeColor = SetupTheme.Blue;
+                activityLabel.ForeColor = SetupTheme.Accent;
                 progressStatusLabel.Text = "Restart Windows and sign back in to continue setup.";
             }
             else if (String.Equals(operationOutcome, "Completed", StringComparison.OrdinalIgnoreCase))
