@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("John Lightfoot")]
 [assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 John Lightfoot")]
-[assembly: AssemblyVersion("2.1.0.0")]
-[assembly: AssemblyFileVersion("2.1.0.0")]
+[assembly: AssemblyVersion("2.1.1.0")]
+[assembly: AssemblyFileVersion("2.1.1.0")]
 
 namespace KiloLink.Setup
 {
@@ -92,6 +92,7 @@ namespace KiloLink.Setup
 
         internal static void ExtractInstaller(string destination)
         {
+            File.WriteAllText(Path.Combine(Path.GetDirectoryName(destination), "QuietInstaller.cs"), ReadEmbeddedText("KiloLink.Setup.QuietInstaller.cs"));
             Assembly assembly = Assembly.GetExecutingAssembly();
             using (Stream resource = assembly.GetManifestResourceStream(InstallerResourceName))
             {
@@ -178,7 +179,6 @@ namespace KiloLink.Setup
         internal static readonly Color Border = Color.FromArgb(216, 186, 169);
         internal static readonly Color Text = Color.FromArgb(51, 31, 27);
         internal static readonly Color Muted = Color.FromArgb(121, 93, 84);
-        internal static readonly Color ConsoleSurface = Color.FromArgb(50, 27, 24);
         internal static readonly Color InverseText = Color.FromArgb(255, 240, 227);
         internal static readonly Color Success = Color.FromArgb(47, 107, 71);
         internal static readonly Color Error = Color.FromArgb(159, 29, 43);
@@ -254,25 +254,23 @@ namespace KiloLink.Setup
             }
 
             string percentage = currentValue + "%";
-            float dpiScale = graphics.DpiX / 96F;
-            int badgeWidth = Math.Min(Width, (int)Math.Ceiling(48F * dpiScale));
-            int badgeHeight = Math.Min(Height - 2, (int)Math.Ceiling(22F * dpiScale));
+            Size textSize = TextRenderer.MeasureText(percentage, Font);
+            float dpiScale = Math.Max(1F, Font.SizeInPoints / 9F);
+            int badgeWidth = Math.Min(Width, textSize.Width + (int)Math.Ceiling(12F * dpiScale));
+            int badgeHeight = Math.Min(Height - 2, textSize.Height + (int)Math.Ceiling(4F * dpiScale));
             Rectangle percentageBounds = new Rectangle((Width - badgeWidth) / 2, (Height - badgeHeight) / 2, badgeWidth, badgeHeight);
             using (GraphicsPath badge = RoundedRectangle(percentageBounds, Math.Min(7F * dpiScale, badgeHeight / 2F)))
             using (SolidBrush badgeBrush = new SolidBrush(SetupTheme.Paper))
             {
                 graphics.FillPath(badgeBrush, badge);
             }
-            using (Font percentageFont = new Font("Segoe UI Semibold", 9F))
-            {
                 TextRenderer.DrawText(
                     graphics,
                     percentage,
-                    percentageFont,
+                    Font,
                     percentageBounds,
                     SetupTheme.Text,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            }
         }
 
         private static GraphicsPath RoundedRectangle(RectangleF rectangle, float radius)
@@ -331,11 +329,6 @@ namespace KiloLink.Setup
 
         private const int WmDpiChanged = 0x02E0;
         private const int NetworkConfigurationTimeoutMilliseconds = 120000;
-        private static readonly Size NetworkLogicalClientSize = new Size(760, 620);
-        private static readonly Size WelcomeLogicalClientSize = new Size(800, 650);
-        private static readonly Size ProgressLogicalClientSize = new Size(860, 680);
-        private static readonly Size NetworkLogicalContentSize = new Size(740, 500);
-        private static readonly Size ProgressLogicalContentSize = new Size(850, 550);
 
         private readonly Panel networkPanel;
         private readonly Label singleFileBadge;
@@ -359,7 +352,7 @@ namespace KiloLink.Setup
         private readonly InstallerProgressBar progressBar;
         private readonly Label activityLabel;
         private readonly Label progressStatusLabel;
-        private readonly RichTextBox outputBox;
+        private readonly StringBuilder diagnosticOutput = new StringBuilder();
         private readonly Timer pulseTimer;
         private readonly JavaScriptSerializer eventSerializer;
         private Process installerProcess;
@@ -398,17 +391,17 @@ namespace KiloLink.Setup
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = true;
-            ClientSize = WelcomeLogicalClientSize;
+            ClientSize = new Size(680, 390);
             Font = new Font("Segoe UI", 9F);
             BackColor = SetupTheme.Surface;
-            AutoScaleDimensions = new SizeF(96F, 96F);
-            AutoScaleMode = AutoScaleMode.Dpi;
+            // The measured layout scales both typography and geometry in one pass.
+            AutoScaleMode = AutoScaleMode.None;
             Icon = SetupLauncher.LoadIcon();
             FormClosing += SetupFormClosing;
 
             Panel headerPanel = new Panel();
             headerPanel.Dock = DockStyle.Top;
-            headerPanel.Size = new Size(WelcomeLogicalClientSize.Width, 118);
+            headerPanel.Size = new Size(680, 96);
             headerPanel.Height = 118;
             headerPanel.BackColor = SetupTheme.Header;
 
@@ -421,14 +414,14 @@ namespace KiloLink.Setup
 
             Label title = new Label();
             title.Text = "Kiloview Environment Setup";
-            title.Font = new Font("Segoe UI Semibold", 19F);
+            title.Font = new Font("Segoe UI Semibold", 17F);
             title.ForeColor = SetupTheme.InverseText;
             title.AutoSize = true;
             title.Location = new Point(122, 27);
 
             Label subtitle = new Label();
             subtitle.Text = "Server and client setup for KiloLink + NDI";
-            subtitle.Font = new Font("Segoe UI", 10F);
+            subtitle.Font = new Font("Segoe UI", 9F);
             subtitle.ForeColor = SetupTheme.Papaya;
             subtitle.AutoSize = true;
             subtitle.Location = new Point(125, 68);
@@ -583,32 +576,15 @@ namespace KiloLink.Setup
             progressBar.Size = new Size(800, 34);
 
             progressStatusLabel = new Label();
-            progressStatusLabel.Text = "Starting the deployment engine...";
+            progressStatusLabel.Text = "Preparing the selected components...";
             progressStatusLabel.ForeColor = SetupTheme.Muted;
             progressStatusLabel.AutoEllipsis = true;
             progressStatusLabel.Location = new Point(32, 99);
             progressStatusLabel.Size = new Size(796, 22);
 
-            Label outputTitle = new Label();
-            outputTitle.Text = "INSTALLER ACTIVITY";
-            outputTitle.Font = new Font("Segoe UI Semibold", 8F);
-            outputTitle.ForeColor = SetupTheme.Accent;
-            outputTitle.AutoSize = true;
-            outputTitle.Location = new Point(31, 130);
-
-            outputBox = new RichTextBox();
-            outputBox.Location = new Point(30, 153);
-            outputBox.Size = new Size(800, 234);
-            outputBox.ReadOnly = true;
-            outputBox.BorderStyle = BorderStyle.None;
-            outputBox.BackColor = SetupTheme.ConsoleSurface;
-            outputBox.ForeColor = SetupTheme.InverseText;
-            outputBox.Font = new Font("Consolas", 9F);
-            outputBox.DetectUrls = false;
-
             InitializeResultControls();
 
-            Button progressLogButton = CreateButton("Open full log", false);
+            Button progressLogButton = CreateButton("Save diagnostics", false);
             progressLogButton.Location = new Point(30, 492);
             progressLogButton.Size = new Size(135, 38);
             progressLogButton.Click += LogButtonClick;
@@ -619,7 +595,7 @@ namespace KiloLink.Setup
             progressLicencesButton.Click += LicencesButtonClick;
 
             Label privacyLabel = new Label();
-            privacyLabel.Text = "Detailed diagnostics are saved automatically.";
+            privacyLabel.Text = "Diagnostics are saved automatically.";
             privacyLabel.ForeColor = SetupTheme.Muted;
             privacyLabel.AutoSize = true;
             privacyLabel.Location = new Point(309, 505);
@@ -627,8 +603,6 @@ namespace KiloLink.Setup
             progressPanel.Controls.Add(activityLabel);
             progressPanel.Controls.Add(progressBar);
             progressPanel.Controls.Add(progressStatusLabel);
-            progressPanel.Controls.Add(outputTitle);
-            progressPanel.Controls.Add(outputBox);
 
             progressPanel.Controls.Add(progressLogButton);
             progressPanel.Controls.Add(progressLicencesButton);
@@ -638,6 +612,7 @@ namespace KiloLink.Setup
             Controls.Add(welcomePanel);
             Controls.Add(progressPanel);
             Controls.Add(headerPanel);
+            InitializeAdaptiveLayout(headerPanel, artwork, title, subtitle);
             AcceptButton = roleNextButton;
 
             pulseTimer = new Timer();
@@ -1151,7 +1126,7 @@ namespace KiloLink.Setup
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = powershellPath;
-            startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+            startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand "
                 + Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
             startInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
             startInfo.UseShellExecute = false;
@@ -1407,6 +1382,7 @@ namespace KiloLink.Setup
 
         private void SetupFormShown(object sender, EventArgs eventArgs)
         {
+            ApplyDisplayScale(CurrentDpiScale());
             ApplyViewClientSize(false);
         }
 
@@ -1445,56 +1421,13 @@ namespace KiloLink.Setup
 
         private void ApplyViewClientSize(bool centerOnCurrentScreen)
         {
-            Size logicalSize;
-            if (currentView == LauncherView.Network)
-            {
-                logicalSize = NetworkLogicalClientSize;
-            }
-            else if (currentView == LauncherView.Progress)
-            {
-                logicalSize = ProgressLogicalClientSize;
-            }
-            else
-            {
-                logicalSize = WelcomeLogicalClientSize;
-            }
-            Size requestedClientSize = ScaleLogicalSize(logicalSize);
-
-            Screen screen = Screen.FromControl(this);
-            Rectangle workingArea = screen.WorkingArea;
-            Size nonClientSize = new Size(
-                Math.Max(0, Width - ClientSize.Width),
-                Math.Max(0, Height - ClientSize.Height));
-            int margin = Math.Max(8, (int)Math.Ceiling(16F * CurrentDpiScale()));
-            int maximumClientWidth = Math.Max(
-                1,
-                workingArea.Width - nonClientSize.Width - (margin * 2));
-            int maximumClientHeight = Math.Max(
-                1,
-                workingArea.Height - nonClientSize.Height - (margin * 2));
-
-            ClientSize = new Size(
-                Math.Min(requestedClientSize.Width, maximumClientWidth),
-                Math.Min(requestedClientSize.Height, maximumClientHeight));
-            singleFileBadge.Visible = ClientSize.Width >= ScaleLogicalSize(new Size(760, 1)).Width;
-
-            networkPanel.AutoScrollMinSize = ScaleLogicalSize(NetworkLogicalContentSize);
-            progressPanel.AutoScrollMinSize = ScaleLogicalSize(ProgressLogicalContentSize);
-            welcomePanel.AutoScrollMinSize = ScaleLogicalSize(new Size(780, 510));
-            settingsPanel.AutoScrollMinSize = ScaleLogicalSize(new Size(780, 510));
-            reviewPanel.AutoScrollMinSize = ScaleLogicalSize(new Size(780, 510));
-
-            if (centerOnCurrentScreen)
-            {
-                Location = new Point(
-                    workingArea.Left + Math.Max(0, (workingArea.Width - Width) / 2),
-                    workingArea.Top + Math.Max(0, (workingArea.Height - Height) / 2));
-            }
+            FitCurrentPage(centerOnCurrentScreen);
         }
 
         protected override void WndProc(ref Message message)
         {
             bool dpiChanged = message.Msg == WmDpiChanged;
+            float requestedScale = dpiChanged ? (message.WParam.ToInt64() & 0xffff) / 96F : displayScale;
             base.WndProc(ref message);
 
             if (dpiChanged && IsHandleCreated && !IsDisposed)
@@ -1505,6 +1438,7 @@ namespace KiloLink.Setup
                     {
                         if (!IsDisposed)
                         {
+                            ApplyDisplayScale(requestedScale);
                             ApplyViewClientSize(false);
                         }
                     });
@@ -1579,7 +1513,7 @@ namespace KiloLink.Setup
 
                 ProcessStartInfo startInfo = new ProcessStartInfo();
                 startInfo.FileName = powershellPath;
-                startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
+                startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "
                     + SetupLauncher.Quote(installerPath)
                     + BuildOperationArguments()
                     + " -LauncherMode -LogPath "
@@ -1837,16 +1771,9 @@ namespace KiloLink.Setup
 
         private void AppendOutput(string line)
         {
-            if (String.IsNullOrEmpty(line))
-            {
-                outputBox.AppendText(Environment.NewLine);
-            }
-            else
-            {
-                outputBox.AppendText(line + Environment.NewLine);
-            }
-            outputBox.SelectionStart = outputBox.TextLength;
-            outputBox.ScrollToCaret();
+            // Raw process output is diagnostic data, never part of the Windows UI.
+            diagnosticOutput.AppendLine(line ?? String.Empty);
+            if (diagnosticOutput.Length > 1024 * 1024) { diagnosticOutput.Remove(0, diagnosticOutput.Length - 1024 * 1024); }
         }
 
         private void SetupFormClosing(object sender, FormClosingEventArgs eventArgs)
@@ -1886,16 +1813,21 @@ namespace KiloLink.Setup
         {
             try
             {
-                if (!File.Exists(logPath))
+                if (!File.Exists(logPath) && diagnosticOutput.Length == 0)
                 {
                     MessageBox.Show("No diagnostic log has been created yet.", Text);
                     return;
                 }
-                Process.Start(new ProcessStartInfo("notepad.exe", SetupLauncher.Quote(logPath)) { UseShellExecute = true });
+                using (SaveFileDialog save = new SaveFileDialog { Title = "Save setup diagnostics", FileName = "Kiloview-setup-diagnostics.txt", Filter = "Text files (*.txt)|*.txt", AddExtension = true })
+                {
+                    if (save.ShowDialog(this) != DialogResult.OK) { return; }
+                    string transcript = File.Exists(logPath) ? File.ReadAllText(logPath) : String.Empty;
+                    File.WriteAllText(save.FileName, transcript + Environment.NewLine + diagnosticOutput.ToString(), new UTF8Encoding(true));
+                }
             }
             catch (Exception exception)
             {
-                MessageBox.Show("Could not open the diagnostic log.\r\n\r\n" + exception.Message, Text);
+                MessageBox.Show("Could not save diagnostics.\r\n\r\n" + exception.Message, Text);
             }
         }
 

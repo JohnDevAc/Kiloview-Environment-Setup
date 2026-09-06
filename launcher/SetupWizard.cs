@@ -107,7 +107,7 @@ namespace KiloLink.Setup
                 Location = new Point(34, 377), Size = new Size(716, 42) };
             welcomePanel.Controls.Add(welcomeStatusLabel);
             startButton = PageButton(welcomePanel, "Next", 34, 436, 180, true, StartButtonClick);
-            logButton = PageButton(welcomePanel, "Diagnostic log", 224, 436, 176, false, LogButtonClick);
+            logButton = PageButton(welcomePanel, "Save diagnostics", 224, 436, 176, false, LogButtonClick);
             PageButton(welcomePanel, "Licences", 410, 436, 160, false, LicencesButtonClick);
             closeButton = PageButton(welcomePanel, "Back", 580, 436, 170, false, delegate { ShowHome(); });
 
@@ -159,7 +159,7 @@ namespace KiloLink.Setup
                 returnButton.Enabled = false;
                 finishButton.Enabled = false;
                 restartButton.Visible = false;
-                outputBox.Clear();
+                diagnosticOutput.Clear();
                 ShowProgressView();
                 StartInstaller();
             });

@@ -230,13 +230,14 @@ function Ensure-Administrator {
     if ($Action -ne 'Menu') { $elevationArguments += " -Action $Action" }
     if ($AcceptLicenses) { $elevationArguments += ' -AcceptLicenses' }
     if ($AutoRestart) { $elevationArguments += ' -AutoRestart' }
-    if ($LauncherMode) { $elevationArguments += ' -LauncherMode' }
+    if ($LauncherMode) { $elevationArguments = '-WindowStyle Hidden ' + $elevationArguments + ' -LauncherMode' }
     if ($LogPath) { $elevationArguments += " -LogPath `"$LogPath`"" }
     if ($ConfigurationPath) { $elevationArguments += " -ConfigurationPath `"$ConfigurationPath`"" }
     if ($ConfirmRemoval) { $elevationArguments += ' -ConfirmRemoval' }
     if ($PreferredInterfaceAlias) { $elevationArguments += " -PreferredInterfaceAlias `"$PreferredInterfaceAlias`"" }
     if ($PreferredIpAddress) { $elevationArguments += " -PreferredIpAddress `"$PreferredIpAddress`"" }
-    Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs | Out-Null
+    if ($LauncherMode) { Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs -WindowStyle Hidden | Out-Null }
+    else { Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs | Out-Null }
     exit 0
 }
 
@@ -327,7 +328,7 @@ function Register-MaintenanceEntry {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
     New-Item -Path $key -Force | Out-Null
     $values = @{
-        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.0'
+        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.1'
         Publisher = 'John Lightfoot'; DisplayIcon = $script:PersistentLauncherPath
         InstallLocation = $script:StateRoot
         UninstallString = ('"{0}" --uninstall' -f $script:PersistentLauncherPath)
@@ -509,7 +510,9 @@ function Register-ResumeContinuation {
         if (-not [string]::Equals([IO.Path]::GetFullPath($PSCommandPath), [IO.Path]::GetFullPath($resumeScript), [StringComparison]::OrdinalIgnoreCase)) {
             Copy-Item -LiteralPath $PSCommandPath -Destination $resumeScript -Force
         }
-        $arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$resumeScript`" -Action Resume -AcceptLicenses -LauncherMode -LogPath `"$(Join-Path $script:StateRoot 'setup-launcher.log')`""
+        $quietSource = Join-Path $PSScriptRoot 'launcher\QuietInstaller.cs'
+        if (Test-Path -LiteralPath $quietSource) { Copy-Item -LiteralPath $quietSource -Destination (Join-Path (Split-Path -Parent $resumeScript) 'QuietInstaller.cs') -Force }
+        $arguments = "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$resumeScript`" -Action Resume -AcceptLicenses -LauncherMode -LogPath `"$(Join-Path $script:StateRoot 'setup-launcher.log')`""
         $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
     }
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
@@ -1398,6 +1401,16 @@ function Get-CurrentNdiToolsUrl {
     return $candidates[0]
 }
 
+function Start-QuietInstaller {
+    param([string]$FilePath, [string[]]$ArgumentList)
+    if (-not ('KiloLink.Setup.QuietInstaller' -as [type])) {
+        $source = Join-Path $PSScriptRoot 'QuietInstaller.cs'
+        if (-not (Test-Path -LiteralPath $source)) { $source = Join-Path $PSScriptRoot 'launcher\QuietInstaller.cs' }
+        Add-Type -Path $source
+    }
+    return [KiloLink.Setup.QuietInstaller]::Start($FilePath, ($ArgumentList -join ' '))
+}
+
 function Install-NdiTools {
     param([switch]$UpdateOnly, [switch]$ClientOnly)
     $script:NdiRestartRequired = $false
@@ -1437,17 +1450,18 @@ function Install-NdiTools {
     }
 
     Set-SuiteProgress -Percent ([Math]::Min(92, $script:ProgressPercent + 2)) -Status 'Installing NDI Tools'
-    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-')
+    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NORESTARTAPPLICATIONS', '/SP-')
     if ($ClientOnly) { $arguments += '/RESTARTEXITCODE=3010' }
-    $process = Start-Process -FilePath $installer -ArgumentList $arguments -PassThru -WindowStyle Hidden
-    while (-not $process.HasExited) {
-        Update-SuiteProgressPulse
-        Start-Sleep -Milliseconds 300
-        $process.Refresh()
-    }
-    if ($process.ExitCode -notin @(0, 3010)) {
-        throw "NDI Tools installer failed with exit code $($process.ExitCode)."
-    }
+    $process = Start-QuietInstaller -FilePath $installer -ArgumentList $arguments
+    try {
+        while (-not $process.HasExited) {
+            Update-SuiteProgressPulse
+            Start-Sleep -Milliseconds 300
+            $process.Refresh()
+        }
+        $exitCode = $process.ExitCode
+        if ($exitCode -notin @(0, 3010)) { throw "NDI Tools installer failed with exit code $exitCode." }
+    } finally { $process.Dispose() }
     Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
     if (-not (Get-NdiRegistration)) {
         throw 'NDI Tools finished installing but was not detected in Programs and Features.'
@@ -1455,13 +1469,49 @@ function Install-NdiTools {
     if (-not $ClientOnly -and -not (Get-NdiDiscoveryExe)) {
         throw 'NDI Tools finished installing but its Discovery Service executable is still missing.'
     }
-    $script:NdiRestartRequired = $process.ExitCode -eq 3010
+    $script:NdiRestartRequired = $exitCode -eq 3010
     Write-Detail 'NDI Tools installed or updated.' Green
 }
 
+function Get-PcAgentPublicRelease {
+    # GitHub's public latest-release redirect and the publisher's checksum asset
+    # remain available when the unauthenticated API quota is exhausted (HTTP 403).
+    $base = 'https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/'
+    $page = Invoke-WebRequest -UseBasicParsing -Uri ($base + 'latest') -TimeoutSec 60
+    $response = $page.BaseResponse
+    $uri = Get-PropertyValue $response 'ResponseUri' $null # Windows PowerShell 5.1
+    if (-not $uri) {
+        $request = Get-PropertyValue $response 'RequestMessage' $null
+        if ($request) { $uri = Get-PropertyValue $request 'RequestUri' $null } # PowerShell 7
+    }
+    if (-not $uri -or $uri.AbsoluteUri -cnotmatch ('^' + [regex]::Escape($base) + 'tag/v(\d+\.\d+\.\d+)$')) {
+        throw 'The PC Agent public production release could not be verified.'
+    }
+    $version = [version]$Matches[1]
+    $name = 'NDI-Configurator-PC-Agent-win-x64.zip'
+    $url = $base + 'download/v' + $version + '/' + $name
+    $checksum = Invoke-WebRequest -UseBasicParsing -Uri ($url + '.sha256') -TimeoutSec 60
+    $content = if ($checksum.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($checksum.Content) } else { [string]$checksum.Content }
+    if ($content.Length -gt 4096 -or $content -cnotmatch ('\A([a-fA-F0-9]{64})[ \t]+\*?' + [regex]::Escape($name) + '\s*\z')) {
+        throw 'The PC Agent release checksum is missing or invalid.'
+    }
+    $hash = $Matches[1]
+    $asset = Invoke-WebRequest -UseBasicParsing -Uri $url -Method Head -TimeoutSec 60
+    $size = 0L
+    if (-not [long]::TryParse([string]$asset.Headers['Content-Length'], [ref]$size) -or $size -le 0 -or $size -gt 512MB) {
+        throw 'The PC Agent release download size is invalid.'
+    }
+    return [pscustomobject]@{ Version = $version; Url = $url; Size = $size; Hash = $hash }
+}
+
 function Get-PcAgentRelease {
-    $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/JohnDevAc/Kiloview-PC-Onboarding/releases/latest' -TimeoutSec 60 -Headers @{
-        'User-Agent' = 'Kiloview-Environment-Setup'; Accept = 'application/vnd.github+json'
+    try {
+        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/JohnDevAc/Kiloview-PC-Onboarding/releases/latest' -TimeoutSec 60 -Headers @{
+            'User-Agent' = 'Kiloview-Environment-Setup'; Accept = 'application/vnd.github+json'
+        }
+    } catch {
+        Write-InstallerLog ('PC Agent API lookup failed; checking the public release and checksum: ' + $_.Exception.Message)
+        return Get-PcAgentPublicRelease
     }
     if ($release.draft -or $release.prerelease -or $release.target_commitish -ne 'main' -or
         $release.tag_name -notmatch '^v(\d+\.\d+\.\d+)$') { throw 'The PC Agent production release could not be verified.' }
@@ -1776,7 +1826,7 @@ exit $code
     $helper = $helper.Replace('__LINUX_BASE64__', $linuxBase64)
     $helper = $helper.Replace('__LOG__', (Join-Path $script:StateRoot 'startup.log').Replace("'", "''"))
     $helper | Set-Content -LiteralPath $script:StartupScriptPath -Encoding UTF8
-    $taskArguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $script:StartupScriptPath + '"'
+    $taskArguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $script:StartupScriptPath + '"'
     $action = New-ScheduledTaskAction -Execute powershell.exe -Argument $taskArguments
     $boot = New-ScheduledTaskTrigger -AtStartup
     $boot.Delay = 'PT30S'
