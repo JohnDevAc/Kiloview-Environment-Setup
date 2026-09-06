@@ -1,6 +1,6 @@
 # Kiloview Environment Setup
 
-Kiloview Environment Setup is a menu-driven Windows 11 installer for:
+Kiloview Environment Setup is a single-file Windows 11 installer with a native Windows Forms interface for:
 
 - Kiloview KiloLink Server Pro
 - NDI Tools
@@ -10,27 +10,35 @@ Kiloview Environment Setup is a menu-driven Windows 11 installer for:
 
 ## Run
 
-For the simplest installation, download `Kiloview-Environment-Setup.exe`,
-double-click it and approve the Windows Administrator prompt. The first screen
-lists the PC's physical Ethernet and Wi-Fi adapters and pre-fills the current
-IPv4, prefix, gateway, and DNS values. Select the adapter that will carry
-KiloLink and NDI traffic, review the values, and choose **Apply static IP and
-continue**. Applying the address can briefly interrupt that adapter's network
-connection.
+Download `Kiloview-Environment-Setup.exe`, double-click it and approve the
+Windows Administrator prompt. All setup choices use native Windows controls;
+there are no embedded PowerShell menus or text responses to type.
 
-Setup waits for Windows to confirm that the address is usable. A duplicate
-address or a 30-second readiness timeout triggers an attempt to restore the
-previous network settings and prevents setup from proceeding with that address.
+1. Choose **Install**, **Repair / reconfigure**, **Check for and install
+   updates**, or **Uninstall**. Existing and partial installations are detected
+   from saved configuration, the dedicated WSL registration and NDI Tools.
+2. For install, repair or update, select a physical Ethernet or Wi-Fi adapter.
+   Review the prefilled IPv4 address, prefix length, gateway and DNS servers.
+   Apply a static address, or use **Skip for now** for an existing stable address
+   or DHCP reservation. Applying the address can briefly interrupt networking.
+3. Set the KiloLink web port, even device-link port pair and NDI Discovery port.
+   Repair and update prefill saved values. When saved settings are missing,
+   review the displayed port defaults; repair preserves any detected existing
+   KiloLink data mount and vendor image.
+4. Review the settings and vendor licence links, tick the acceptance checkbox,
+   then choose **Install**, **Apply repair** or **Install updates**.
+5. Follow the native progress view and read-only activity log. At completion,
+   open KiloLink, return to setup, or finish. When Windows needs a restart,
+   choose **Restart Windows** or **Restart later**.
 
-A **Skip for now** option is available for PCs that already have a stable
-address or DHCP reservation. It displays a server-reliability warning before
-continuing because a changing address can make KiloLink and NDI endpoints
-unreachable.
+Uninstall goes straight to a removal review, without requiring a working
+network adapter. Its confirmation checkbox explicitly acknowledges deletion
+of KiloLink application data before **Uninstall** is enabled.
 
-After networking is confirmed, select **Start setup** and follow the choices
-shown in the application. The deployment engine runs without a separate
-PowerShell window. Granular progress, current activity, interactive prompts,
-and installer output remain in the same Windows UI.
+Static-address setup waits for Windows to confirm that the address is usable.
+A duplicate address or a 30-second readiness timeout triggers an attempt to
+restore the previous network settings and prevents proceeding with that address.
+Only one copy of the installer can be open at a time.
 
 The executable contains the deployment script, application artwork, licence,
 and third-party notices, so no other downloaded project files are required.
@@ -65,7 +73,7 @@ launcher source, run:
 ```
 
 The build embeds the current PowerShell script into the executable. Launcher
-source and its Administrator manifest are under `launcher`. The Windows icon
+source (`SetupLauncher.cs` and `SetupWizard.cs`) and its Administrator manifest are under `launcher`. The Windows icon
 source and multi-resolution `.ico` file are under `assets` and are embedded by
 the same build. The MIT licence and third-party notices are also embedded and
 can be viewed from the launcher's **Licences** button.
@@ -83,7 +91,10 @@ These checks do not install software, change network settings, or register
 scheduled tasks. A complete installation and reboot should also be tested on
 a disposable Windows 11 machine before release.
 
-Interactive operations use the application's granular progress view. Detailed
+The application uses a hidden PowerShell deployment engine for system operations.
+It runs one explicit action with a validated JSON configuration and closed
+standard input; the Windows UI never starts the legacy script menu. Native
+operations use the application's granular progress view. Detailed
 WSL, APT, Docker, and installer output is shown in the activity panel and
 written to `C:\ProgramData\KiloLink\installer.log`.
 
@@ -102,7 +113,7 @@ KiloLink, and NDI. The continuation task and state are removed after success.
 
 Repair compares the requested settings with the actual Docker container, so an
 interrupted attempt does not prevent a later repair from applying them. Cancelling
-the license prompt preserves the previous saved configuration. Repair also
+the review screen preserves the previous saved configuration. Repair also
 reinstalls NDI Tools when its Discovery Service executable is missing.
 
 The watchdog checks Docker, Avahi, and the container every 30 seconds. Failures
@@ -113,8 +124,7 @@ Installation and update finish successfully only after the watchdog and
 container are running, NDI owns a listening socket on the configured port, and
 the KiloLink web interface responds. Readiness checks retry for up to two minutes.
 The launcher distinguishes successful completion, cancellation, failure, and a
-pending restart. Exiting the menu after a failure retains an error result until
-a subsequent operation completes successfully.
+pending restart. A failed operation remains visible with its diagnostic log; returning to setup allows a retry.
 
 KiloLink and Docker are installed in a dedicated WSL distribution named
 `KiloLink-Ubuntu`. Existing Ubuntu distributions, packages, and APT sources are
@@ -125,14 +135,23 @@ the host-network, Avahi/DBus mounts, persistent data, privileges, and restart
 policy used by Kiloview's installer. This avoids depending on its changing
 interactive prompt sequence.
 
-## Menu
+## Repair, updates and removal
 
-Once a complete or partial installation is detected, the menu offers:
+Rerun the same EXE at any time to repair, reconfigure, update or uninstall.
+Once an installation, repair or update begins, setup also creates a **Kiloview
+Environment Setup** Start menu shortcut and registers an uninstall entry in
+Windows **Installed apps**. Maintenance is registered for the installing
+Windows account because WSL distributions belong to that account. Use that
+same account for subsequent maintenance and reboot continuation.
 
-1. Check for and install updates
-2. Repair / reconfigure
-3. Uninstall
-4. Exit
+Repair restores missing components and reconciles the actual container with
+the requested settings. Updates check NDI Tools, Ubuntu/Docker packages and
+the official KiloLink container image. Both preserve existing KiloLink data.
+
+Uninstall removes the suite and its maintenance entry. It retains the reusable
+setup EXE and diagnostic logs in `C:\ProgramData\KiloLink`, WSL, unrelated
+Linux distributions, the shared `.wslconfig` file and Windows IP settings.
+The retained installer can be used for a fresh installation.
 
 ### Background repair and update
 
@@ -143,11 +162,9 @@ menu prompts from an elevated PowerShell session:
 
 Use `-AcceptLicenses` only after reviewing and accepting the vendor agreements.
 Unattended repair schedules its continuation but does not restart Windows unless
-`-AutoRestart` is also supplied. Interactive Setup asks before restarting, and
-an already-resumed installation automatically performs any additional required
-restart within its three-attempt safety limit.
+`-AutoRestart` is also supplied. The native installer asks before every restart, including additional restarts during continuation. The three-attempt safety limit is retained. A resumed update continues the update operation.
 For a non-interactive update check, use `-Action Update` with an optional
-`-LogPath`. Uninstall remains interactive-only to protect application data.
+`-LogPath`. The Windows UI requires explicit removal confirmation. Advanced script automation can use `-Action Uninstall -ConfirmRemoval`; this permanently deletes the suite's application data.
 
 Process exit codes are `0` for normal completion or cancellation, `1` for a
 failure, and `3010` when setup needs a Windows restart to continue. A zero exit
@@ -178,7 +195,7 @@ the shared `.wslconfig` file so unrelated Linux data is not destroyed.
 
 ## Multi-NIC behavior
 
-The launcher's first screen lists physical Ethernet and Wi-Fi adapters. Docker,
+After choosing an operation, the network screen lists physical Ethernet and Wi-Fi adapters. Docker,
 WSL, Hyper-V, tunnel, VPN, and loopback adapters are excluded. Connected wired
 adapters are listed first. The selected adapter and address are passed into the
 deployment engine so the same adapter does not need to be selected again.
@@ -215,8 +232,7 @@ The NDI firewall range includes Kiloview's documented TCP/UDP streaming ports
 7960-10000 in both the Windows and WSL Hyper-V firewall rules. See
 [Kiloview's port requirements](https://www.kiloview.com/en/support-doc/docs/home/?a=index&aid=846568314808303616&g=Doc&id=7&m=Article).
 
-Windows 11 22H2 or later and internet access are required. The script asks for
-explicit acceptance of the vendor license terms before installation.
+Windows 11 22H2 or later and internet access are required. The Windows review screen requires explicit acceptance of the vendor licence terms before installation, repair or update. Downloads still require internet access; third-party installers are not bundled in the EXE.
 
 ## Licence and third-party software
 
@@ -244,3 +260,22 @@ Ubuntu. For a Hyper-V VM, fully stop the VM and run this on the host before
 starting it again:
 
     Set-VMProcessor -VMName '<VM name>' -ExposeVirtualizationExtensions $true
+
+## Native wizard verification
+
+`tests/Installer.Regression.ps1` exercises configuration validation, cancellation,
+native action routing, licence and removal gates, maintenance registration,
+reboot continuation, service recovery and exact embedded-script agreement.
+Tests use temporary state and mocked system changes; they do not deploy the
+suite or modify the computer's adapters, services, registry or scheduled tasks.
+
+To render the compiled controls for layout review without starting deployment:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Render-Wizard.ps1
+```
+
+The automated checks do not exercise a complete live install, repair, update,
+uninstall or Windows reboot/resume cycle. Validate those operations on a
+disposable Windows 11 machine before production use. The build is unsigned
+and may show an unknown-publisher warning.

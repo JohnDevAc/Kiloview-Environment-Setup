@@ -7,6 +7,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $source = Join-Path $root 'launcher\SetupLauncher.cs'
+$wizardSource = Join-Path $root 'launcher\SetupWizard.cs'
 $manifest = Join-Path $root 'launcher\Setup.exe.manifest'
 $installer = Join-Path $root 'Install-KiloLinkSuite.ps1'
 $icon = Join-Path $root 'assets\setup.ico'
@@ -25,7 +26,7 @@ if (-not $compiler) {
     throw 'The Windows .NET Framework C# compiler was not found.'
 }
 
-foreach ($requiredFile in @($source, $manifest, $installer, $icon, $iconArtwork, $license, $thirdPartyNotices)) {
+foreach ($requiredFile in @($source, $wizardSource, $manifest, $installer, $icon, $iconArtwork, $license, $thirdPartyNotices)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
         throw "Required build input is missing: $requiredFile"
     }
@@ -48,7 +49,8 @@ $compilerArguments = @(
     '/reference:System.Windows.Forms.dll',
     '/reference:System.Web.Extensions.dll',
     ('/out:"{0}"' -f $output),
-    ('"{0}"' -f $source)
+    ('"{0}"' -f $source),
+    ('"{0}"' -f $wizardSource)
 )
 
 & $compiler @compilerArguments

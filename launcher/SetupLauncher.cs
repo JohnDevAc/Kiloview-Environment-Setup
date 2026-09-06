@@ -1,4 +1,4 @@
-// Copyright (c) 2026 John Lightfoot
+﻿// Copyright (c) 2026 John Lightfoot
 // SPDX-License-Identifier: MIT
 
 using System;
@@ -18,12 +18,12 @@ using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Kiloview Environment Setup")]
-[assembly: AssemblyDescription("Launcher for KiloLink Server Pro and NDI Environment Setup")]
+[assembly: AssemblyDescription("Windows installer and maintenance for KiloLink Server Pro and NDI")]
 [assembly: AssemblyCompany("John Lightfoot")]
 [assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 John Lightfoot")]
-[assembly: AssemblyVersion("1.3.2.0")]
-[assembly: AssemblyFileVersion("1.3.2.0")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
 
 namespace KiloLink.Setup
 {
@@ -34,6 +34,7 @@ namespace KiloLink.Setup
         internal const string ThirdPartyNoticesResourceName = "KiloLink.Setup.THIRD_PARTY_NOTICES.md";
         internal const string ArtworkResourceName = "KiloLink.Setup.setup-icon.png";
         internal const string EventPrefix = "@@KILOVIEW_EVENT@@";
+        internal static string InitialAction = String.Empty;
 
         [STAThread]
         private static int Main(string[] arguments)
@@ -47,13 +48,15 @@ namespace KiloLink.Setup
                     {
                         autoResume = true;
                     }
+                    if (String.Equals(argument, "--repair", StringComparison.OrdinalIgnoreCase)) { InitialAction = "Repair"; }
+                    if (String.Equals(argument, "--uninstall", StringComparison.OrdinalIgnoreCase)) { InitialAction = "Uninstall"; }
                 }
 
                 if (!IsAdministrator())
                 {
                     ProcessStartInfo elevation = new ProcessStartInfo();
                     elevation.FileName = Assembly.GetExecutingAssembly().Location;
-                    elevation.Arguments = autoResume ? "--resume" : String.Empty;
+                    elevation.Arguments = autoResume ? "--resume" : (InitialAction == "Repair" ? "--repair" : InitialAction == "Uninstall" ? "--uninstall" : String.Empty);
                     elevation.Verb = "runas";
                     elevation.UseShellExecute = true;
                     Process.Start(elevation);
@@ -62,7 +65,17 @@ namespace KiloLink.Setup
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new SetupForm(autoResume));
+                bool ownsMutex;
+                using (System.Threading.Mutex instance = new System.Threading.Mutex(true, @"Global\KiloviewEnvironmentSetup", out ownsMutex))
+                {
+                    if (!ownsMutex)
+                    {
+                        MessageBox.Show("Kiloview Environment Setup is already open. Use the existing setup window.", "Setup already running");
+                        return 1;
+                    }
+                    try { Application.Run(new SetupForm(autoResume)); }
+                    finally { instance.ReleaseMutex(); }
+                }
                 return Environment.ExitCode;
             }
             catch (Exception exception)
@@ -278,24 +291,27 @@ namespace KiloLink.Setup
         }
     }
 
-    internal sealed class SetupForm : Form
+    internal sealed partial class SetupForm : Form
     {
         private enum LauncherView
         {
             Network,
             Welcome,
+            Settings,
+            Review,
             Progress
         }
 
         private const int WmDpiChanged = 0x02E0;
         private const int NetworkConfigurationTimeoutMilliseconds = 120000;
         private static readonly Size NetworkLogicalClientSize = new Size(760, 620);
-        private static readonly Size WelcomeLogicalClientSize = new Size(680, 370);
+        private static readonly Size WelcomeLogicalClientSize = new Size(800, 650);
         private static readonly Size ProgressLogicalClientSize = new Size(860, 680);
         private static readonly Size NetworkLogicalContentSize = new Size(740, 500);
         private static readonly Size ProgressLogicalContentSize = new Size(850, 550);
 
         private readonly Panel networkPanel;
+        private readonly Label singleFileBadge;
         private readonly ComboBox networkAdapterBox;
         private readonly TextBox ipAddressBox;
         private readonly TextBox prefixLengthBox;
@@ -307,20 +323,16 @@ namespace KiloLink.Setup
         private readonly Button skipNetworkButton;
         private readonly Label networkAdapterDetailsLabel;
         private readonly Label networkStatusLabel;
-        private readonly Button startButton;
-        private readonly Button logButton;
-        private readonly Button closeButton;
-        private readonly Label welcomeStatusLabel;
-        private readonly Panel welcomePanel;
+        private Button startButton;
+        private Button logButton;
+        private Button closeButton;
+        private Label welcomeStatusLabel;
+        private Panel welcomePanel;
         private readonly Panel progressPanel;
         private readonly InstallerProgressBar progressBar;
         private readonly Label activityLabel;
         private readonly Label progressStatusLabel;
         private readonly RichTextBox outputBox;
-        private readonly Panel promptPanel;
-        private readonly Label promptLabel;
-        private readonly TextBox responseBox;
-        private readonly Button responseButton;
         private readonly Timer pulseTimer;
         private readonly JavaScriptSerializer eventSerializer;
         private Process installerProcess;
@@ -329,7 +341,7 @@ namespace KiloLink.Setup
         private readonly string legacyPersistentLauncherPath;
         private readonly string installerPath;
         private readonly string logPath;
-        private readonly bool autoResume;
+        private bool autoResume;
         private LauncherView currentView;
         private bool networkConfigurationInProgress;
         private string preferredInterfaceAlias;
@@ -352,14 +364,14 @@ namespace KiloLink.Setup
             legacyPersistentLauncherPath = Path.Combine(launcherDirectory, "KiloLink-Environment-Setup.exe");
             installerPath = Path.Combine(launcherDirectory, "Install-KiloLinkSuite.ps1");
             logPath = Path.Combine(programData, "KiloLink", "setup-launcher.log");
-            currentView = autoResume ? LauncherView.Welcome : LauncherView.Network;
+            currentView = LauncherView.Welcome;
 
             Text = "Kiloview Environment Setup";
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = true;
-            ClientSize = autoResume ? WelcomeLogicalClientSize : NetworkLogicalClientSize;
+            ClientSize = WelcomeLogicalClientSize;
             Font = new Font("Segoe UI", 9F);
             BackColor = SetupTheme.Surface;
             AutoScaleDimensions = new SizeF(96F, 96F);
@@ -394,7 +406,7 @@ namespace KiloLink.Setup
             subtitle.AutoSize = true;
             subtitle.Location = new Point(125, 68);
 
-            Label singleFileBadge = new Label();
+            singleFileBadge = new Label();
             singleFileBadge.Text = "SINGLE-FILE SETUP";
             singleFileBadge.Font = new Font("Segoe UI Semibold", 8F);
             singleFileBadge.ForeColor = Color.White;
@@ -413,7 +425,7 @@ namespace KiloLink.Setup
             networkPanel.Dock = DockStyle.Fill;
             networkPanel.BackColor = SetupTheme.Surface;
             networkPanel.AutoScroll = true;
-            networkPanel.Visible = !autoResume;
+            networkPanel.Visible = false;
 
             Label networkTitle = new Label();
             networkTitle.Text = "Set a static IP address";
@@ -481,10 +493,10 @@ namespace KiloLink.Setup
             skipNetworkButton.Size = new Size(200, 44);
             skipNetworkButton.Click += SkipNetworkButtonClick;
 
-            Button networkCloseButton = CreateButton("Close", false);
+            Button networkCloseButton = CreateButton("Back", false);
             networkCloseButton.Location = new Point(556, 365);
             networkCloseButton.Size = new Size(172, 44);
-            networkCloseButton.Click += delegate { Close(); };
+            networkCloseButton.Click += delegate { ShowHome(); };
 
             networkStatusLabel = new Label();
             networkStatusLabel.Text = "Select the adapter that will carry KiloLink and NDI traffic.";
@@ -523,73 +535,7 @@ namespace KiloLink.Setup
             networkPanel.Controls.Add(networkStatusLabel);
             networkPanel.Controls.Add(serverWarningLabel);
 
-            welcomePanel = new Panel();
-            welcomePanel.Dock = DockStyle.Fill;
-            welcomePanel.BackColor = SetupTheme.Surface;
-            welcomePanel.AutoScroll = true;
-            welcomePanel.Visible = autoResume;
-
-            Label description = new Label();
-            description.Text = "Guided Windows 11 deployment with restart-safe setup, repair, updates,\r\nand diagnostics in one application.";
-            description.Font = new Font("Segoe UI", 10F);
-            description.ForeColor = SetupTheme.Text;
-            description.AutoSize = true;
-            description.Location = new Point(31, 27);
-
-            Label helper = new Label();
-            helper.Text = "Administrator approval is required. Deployment status remains in this window.";
-            helper.ForeColor = SetupTheme.Muted;
-            helper.AutoSize = true;
-            helper.Location = new Point(33, 77);
-
-            startButton = CreateButton(autoResume ? "Resume setup" : "Start setup", true);
-            startButton.Click += StartButtonClick;
-
-            logButton = CreateButton("Diagnostic log", false);
-            logButton.Enabled = File.Exists(logPath);
-            logButton.Click += LogButtonClick;
-
-            Button licencesButton = CreateButton("Licences", false);
-            licencesButton.Click += LicencesButtonClick;
-
-            closeButton = CreateButton("Close", false);
-            closeButton.Click += delegate { Close(); };
-
-            TableLayoutPanel buttonPanel = new TableLayoutPanel();
-            buttonPanel.Location = new Point(31, 111);
-            buttonPanel.Size = new Size(618, 48);
-            buttonPanel.ColumnCount = 4;
-            buttonPanel.RowCount = 1;
-            buttonPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 29F));
-            buttonPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31F));
-            buttonPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
-            buttonPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
-            buttonPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            AddButtonToTable(buttonPanel, startButton, 0, 0, 5);
-            AddButtonToTable(buttonPanel, logButton, 1, 5, 5);
-            AddButtonToTable(buttonPanel, licencesButton, 2, 5, 5);
-            AddButtonToTable(buttonPanel, closeButton, 3, 5, 0);
-
-            welcomeStatusLabel = new Label();
-            welcomeStatusLabel.Text = autoResume
-                ? "Windows restart detected. Setup is ready to resume."
-                : "Ready to begin.";
-            welcomeStatusLabel.Font = new Font("Segoe UI Semibold", 9F);
-            welcomeStatusLabel.ForeColor = SetupTheme.Blue;
-            welcomeStatusLabel.AutoSize = true;
-            welcomeStatusLabel.Location = new Point(33, 181);
-
-            Label copyrightLabel = new Label();
-            copyrightLabel.Text = "Copyright \u00A9 2026 John Lightfoot  \u2022  MIT licensed application";
-            copyrightLabel.ForeColor = SetupTheme.Muted;
-            copyrightLabel.AutoSize = true;
-            copyrightLabel.Location = new Point(33, 215);
-
-            welcomePanel.Controls.Add(description);
-            welcomePanel.Controls.Add(helper);
-            welcomePanel.Controls.Add(buttonPanel);
-            welcomePanel.Controls.Add(welcomeStatusLabel);
-            welcomePanel.Controls.Add(copyrightLabel);
+            InitializeWizard();
 
             progressPanel = new Panel();
             progressPanel.Dock = DockStyle.Fill;
@@ -632,34 +578,7 @@ namespace KiloLink.Setup
             outputBox.Font = new Font("Consolas", 9F);
             outputBox.DetectUrls = false;
 
-            promptPanel = new Panel();
-            promptPanel.Location = new Point(30, 399);
-            promptPanel.Size = new Size(800, 80);
-            promptPanel.BackColor = Color.FromArgb(226, 247, 250);
-
-            promptLabel = new Label();
-            promptLabel.Text = "Waiting for the installer to request input...";
-            promptLabel.Font = new Font("Segoe UI Semibold", 9F);
-            promptLabel.ForeColor = SetupTheme.Text;
-            promptLabel.AutoEllipsis = true;
-            promptLabel.Location = new Point(15, 10);
-            promptLabel.Size = new Size(770, 20);
-
-            responseBox = new TextBox();
-            responseBox.Location = new Point(16, 39);
-            responseBox.Size = new Size(635, 24);
-            responseBox.Enabled = false;
-            responseBox.KeyDown += ResponseBoxKeyDown;
-
-            responseButton = CreateButton("Continue", true);
-            responseButton.Location = new Point(666, 35);
-            responseButton.Size = new Size(118, 32);
-            responseButton.Enabled = false;
-            responseButton.Click += ResponseButtonClick;
-
-            promptPanel.Controls.Add(promptLabel);
-            promptPanel.Controls.Add(responseBox);
-            promptPanel.Controls.Add(responseButton);
+            InitializeResultControls();
 
             Button progressLogButton = CreateButton("Open full log", false);
             progressLogButton.Location = new Point(30, 492);
@@ -672,7 +591,7 @@ namespace KiloLink.Setup
             progressLicencesButton.Click += LicencesButtonClick;
 
             Label privacyLabel = new Label();
-            privacyLabel.Text = "The deployment engine runs hidden; status and prompts remain in this window.";
+            privacyLabel.Text = "Detailed diagnostics are saved automatically.";
             privacyLabel.ForeColor = SetupTheme.Muted;
             privacyLabel.AutoSize = true;
             privacyLabel.Location = new Point(309, 505);
@@ -682,7 +601,7 @@ namespace KiloLink.Setup
             progressPanel.Controls.Add(progressStatusLabel);
             progressPanel.Controls.Add(outputTitle);
             progressPanel.Controls.Add(outputBox);
-            progressPanel.Controls.Add(promptPanel);
+
             progressPanel.Controls.Add(progressLogButton);
             progressPanel.Controls.Add(progressLicencesButton);
             progressPanel.Controls.Add(privacyLabel);
@@ -691,7 +610,7 @@ namespace KiloLink.Setup
             Controls.Add(welcomePanel);
             Controls.Add(progressPanel);
             Controls.Add(headerPanel);
-            AcceptButton = autoResume ? startButton : applyNetworkButton;
+            AcceptButton = startButton;
 
             pulseTimer = new Timer();
             pulseTimer.Interval = 90;
@@ -711,7 +630,7 @@ namespace KiloLink.Setup
             {
                 Shown += delegate
                 {
-                    BeginInvoke((MethodInvoker)LoadNetworkAdapters);
+                    BeginInvoke((MethodInvoker)LoadSavedSettings);
                 };
             }
         }
@@ -906,7 +825,7 @@ namespace KiloLink.Setup
             }
 
             NetworkAdapterChoice previous = networkAdapterBox.SelectedItem as NetworkAdapterChoice;
-            string previousAlias = previous == null ? String.Empty : previous.Alias;
+            string previousAlias = previous == null ? preferredInterfaceAlias : previous.Alias;
             List<NetworkAdapterChoice> choices = GetNetworkAdapterChoices();
 
             networkAdapterBox.BeginUpdate();
@@ -1411,6 +1330,13 @@ namespace KiloLink.Setup
         private void SkipNetworkButtonClick(object sender, EventArgs eventArgs)
         {
             NetworkAdapterChoice choice = networkAdapterBox.SelectedItem as NetworkAdapterChoice;
+            string usableAddress;
+            if (choice == null || !choice.Connected || !TryParseIpv4(choice.Address, true, out usableAddress))
+            {
+                networkStatusLabel.Text = "Select a connected physical adapter with a usable IPv4 address, then continue.";
+                networkStatusLabel.ForeColor = SetupTheme.Error;
+                return;
+            }
             string selected = choice == null
                 ? "No adapter is currently selected."
                 : "Selected adapter: " + choice.Alias
@@ -1441,14 +1367,7 @@ namespace KiloLink.Setup
 
         private void ShowWelcomeView(string status)
         {
-            currentView = LauncherView.Welcome;
-            networkPanel.Visible = false;
-            progressPanel.Visible = false;
-            welcomePanel.Visible = true;
-            welcomeStatusLabel.Text = status;
-            welcomeStatusLabel.ForeColor = SetupTheme.Blue;
-            AcceptButton = startButton;
-            ApplyViewClientSize(true);
+            ShowSettings(status);
         }
 
         private static void AddButtonToTable(TableLayoutPanel table, Button button, int column, int left, int right)
@@ -1529,9 +1448,13 @@ namespace KiloLink.Setup
             ClientSize = new Size(
                 Math.Min(requestedClientSize.Width, maximumClientWidth),
                 Math.Min(requestedClientSize.Height, maximumClientHeight));
+            singleFileBadge.Visible = ClientSize.Width >= ScaleLogicalSize(new Size(760, 1)).Width;
 
             networkPanel.AutoScrollMinSize = ScaleLogicalSize(NetworkLogicalContentSize);
             progressPanel.AutoScrollMinSize = ScaleLogicalSize(ProgressLogicalContentSize);
+            welcomePanel.AutoScrollMinSize = ScaleLogicalSize(new Size(780, 510));
+            settingsPanel.AutoScrollMinSize = ScaleLogicalSize(new Size(780, 510));
+            reviewPanel.AutoScrollMinSize = ScaleLogicalSize(new Size(780, 510));
 
             if (centerOnCurrentScreen)
             {
@@ -1576,9 +1499,11 @@ namespace KiloLink.Setup
             currentView = LauncherView.Progress;
             networkPanel.Visible = false;
             welcomePanel.Visible = false;
+            settingsPanel.Visible = false;
+            reviewPanel.Visible = false;
             progressPanel.Visible = true;
             ApplyViewClientSize(true);
-            AcceptButton = responseButton;
+            AcceptButton = null;
             pulseTimer.Start();
             AppendOutput("Kiloview Environment Setup started.");
             AppendOutput("The deployment engine is running without a separate console window.");
@@ -1586,8 +1511,7 @@ namespace KiloLink.Setup
 
         private void StartButtonClick(object sender, EventArgs eventArgs)
         {
-            ShowProgressView();
-            StartInstaller();
+            BeginSelectedAction();
         }
 
         private void StartInstaller()
@@ -1628,19 +1552,9 @@ namespace KiloLink.Setup
                 startInfo.FileName = powershellPath;
                 startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
                     + SetupLauncher.Quote(installerPath)
-                    + (autoResume ? " -Action Resume -AcceptLicenses" : String.Empty)
+                    + BuildOperationArguments()
                     + " -LauncherMode -LogPath "
                     + SetupLauncher.Quote(logPath);
-                if (!autoResume && !String.IsNullOrWhiteSpace(preferredInterfaceAlias))
-                {
-                    startInfo.Arguments += " -PreferredInterfaceAlias "
-                        + SetupLauncher.Quote(preferredInterfaceAlias);
-                }
-                if (!autoResume && !String.IsNullOrWhiteSpace(preferredIpAddress))
-                {
-                    startInfo.Arguments += " -PreferredIpAddress "
-                        + SetupLauncher.Quote(preferredIpAddress);
-                }
                 // WSL inherits the Windows process directory before applying its
                 // own --cd option. ProgramData's protected launcher directory can
                 // produce a noisy access-denied chdir warning, so start from the
@@ -1663,13 +1577,13 @@ namespace KiloLink.Setup
                     throw new InvalidOperationException("Windows did not start the deployment engine.");
                 }
 
-                installerProcess.StandardInput.AutoFlush = true;
+                installerProcess.StandardInput.Close();
                 installerProcess.BeginOutputReadLine();
                 installerProcess.BeginErrorReadLine();
-                activityLabel.Text = autoResume ? "Resuming setup" : "Inspecting this computer";
+                activityLabel.Text = autoResume ? "Resuming setup" : selectedAction + " in progress";
                 progressStatusLabel.Text = autoResume
                     ? "Windows and WSL state are being verified."
-                    : "Detecting installed components and available actions.";
+                    : "Applying the settings you reviewed.";
                 // Subscribe to process completion only after both output readers
                 // are active, so the final outcome can be drained before rendering.
                 installerProcess.EnableRaisingEvents = true;
@@ -1677,6 +1591,7 @@ namespace KiloLink.Setup
             catch (Exception exception)
             {
                 Environment.ExitCode = 1;
+                FinishWizardOperation(1);
                 pulseTimer.Stop();
                 activityLabel.Text = "Setup could not start";
                 activityLabel.ForeColor = SetupTheme.Error;
@@ -1771,9 +1686,9 @@ namespace KiloLink.Setup
                         return;
                     }
 
-                    if (String.Equals(type, "prompt", StringComparison.OrdinalIgnoreCase))
+                    if (String.Equals(type, "summary", StringComparison.OrdinalIgnoreCase))
                     {
-                        ShowPrompt(GetEventText(payload, "prompt"));
+                        ShowResultSummary(payload);
                         return;
                     }
 
@@ -1801,53 +1716,6 @@ namespace KiloLink.Setup
                 return Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture);
             }
             return String.Empty;
-        }
-
-        private void ShowPrompt(string prompt)
-        {
-            promptLabel.Text = String.IsNullOrWhiteSpace(prompt) ? "Installer input required" : prompt;
-            progressStatusLabel.Text = "Waiting for your response.";
-            responseBox.Text = String.Empty;
-            responseBox.Enabled = true;
-            responseButton.Enabled = true;
-            responseBox.Focus();
-        }
-
-        private void ResponseBoxKeyDown(object sender, KeyEventArgs eventArgs)
-        {
-            if (eventArgs.KeyCode == Keys.Enter && responseButton.Enabled)
-            {
-                eventArgs.SuppressKeyPress = true;
-                SubmitResponse();
-            }
-        }
-
-        private void ResponseButtonClick(object sender, EventArgs eventArgs)
-        {
-            SubmitResponse();
-        }
-
-        private void SubmitResponse()
-        {
-            try
-            {
-                if (installerProcess == null || installerProcess.HasExited)
-                {
-                    throw new InvalidOperationException("The installer is no longer waiting for input.");
-                }
-
-                installerProcess.StandardInput.WriteLine(responseBox.Text);
-                AppendOutput("> Response submitted");
-                responseBox.Text = String.Empty;
-                responseBox.Enabled = false;
-                responseButton.Enabled = false;
-                promptLabel.Text = "Installer working...";
-                progressStatusLabel.Text = "Continuing setup.";
-            }
-            catch (Exception exception)
-            {
-                MessageBox.Show("Could not submit the response.\r\n\r\n" + exception.Message, Text);
-            }
         }
 
         private void ApplyInstallerOutcome(int exitCode)
@@ -1913,9 +1781,7 @@ namespace KiloLink.Setup
                 BeginInvoke((MethodInvoker)delegate
                 {
                     pulseTimer.Stop();
-                    responseBox.Enabled = false;
-                    responseButton.Enabled = false;
-                    promptLabel.Text = "No installer input is pending.";
+                    FinishWizardOperation(exitCode);
                     logButton.Enabled = File.Exists(logPath);
 
                     ApplyInstallerOutcome(exitCode);
@@ -1974,7 +1840,7 @@ namespace KiloLink.Setup
                     {
                         eventArgs.Cancel = true;
                         MessageBox.Show(
-                            "Setup is still running and may require input in this window.\r\n\r\n"
+                            "Setup is still applying changes to this computer.\r\n\r\n"
                             + "Wait for the operation to finish before closing it.",
                             Text,
                             MessageBoxButtons.OK,

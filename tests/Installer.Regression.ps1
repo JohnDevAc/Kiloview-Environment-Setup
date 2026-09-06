@@ -20,11 +20,15 @@ function Assert-True($Condition, [string]$Message) {
 }
 function Assert-Throws([scriptblock]$Body, [string]$Pattern) {
     $failure = $null
-    try { & $Body | Out-Null } catch { $failure = $_.Exception.Message }
+    try { & $Body | Out-Null } catch {
+        $exception = $_.Exception
+        while ($exception.InnerException) { $exception = $exception.InnerException }
+        $failure = $exception.Message
+    }
     Assert-True ($failure -and $failure -match $Pattern) "Expected failure matching '$Pattern'; received '$failure'."
 }
 function New-Config {
-    [pscustomobject]@{PrimaryInterfaceAlias='Ethernet';PublicIp='192.0.2.10';WebPort=80;LinkPort=50000;NdiDiscoveryPort=5959;DistroName='KiloLink-Ubuntu';LinuxDataPath='/opt/kilolink-server';KiloLinkImage='kiloview/klnk-pro:latest'}
+    [pscustomobject]@{SchemaVersion=1;PrimaryInterfaceAlias='Ethernet';PublicIp='192.0.2.10';WebPort=80;LinkPort=50000;NdiDiscoveryPort=5959;DistroName='KiloLink-Ubuntu';LinuxDataPath='/opt/kilolink-server';KiloLinkImage='kiloview/klnk-pro:latest'}
 }
 
 $tokens = $null
@@ -56,6 +60,8 @@ $baseMocks = {
     function Set-SuiteProgress { }
     function Stop-SuiteProgress { }
     function Write-LauncherEvent { }
+    function Register-MaintenanceEntry { }
+    function Remove-MaintenanceEntry { }
     function Invoke-Native { throw 'Unexpected native command in test' }
     function Invoke-Wsl { throw 'Unexpected WSL command in test' }
     function Invoke-WslScript { throw 'Unexpected WSL script in test' }
@@ -66,6 +72,7 @@ $baseMocks = {
     function Stop-ScheduledTask { throw 'Unexpected task stop in test' }
     function Get-ScheduledTask { $null }
     function Get-LanCandidates { [pscustomobject]@{Alias='Ethernet';Address='192.0.2.10';Dhcp=$false} }
+    function Get-WslDistroNames { @() }
 }
 $repairMocks = {
     function Ensure-WslFeatures { $true }
@@ -96,6 +103,8 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
             $LauncherMode = $false
             $PreferredInterfaceAlias = ''
             $PreferredIpAddress = ''
+            $ConfigurationPath = ''
+            $ConfirmRemoval = $false
             $script:StateRoot = Join-Path $testRoot ([guid]::NewGuid().ToString('N'))
             $script:ConfigPath = Join-Path $script:StateRoot 'installer-config.json'
             $script:StartupScriptPath = Join-Path $script:StateRoot 'watchdog.ps1'
@@ -111,6 +120,165 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 }
 
 try {
+    Test-Case 'Native request validates typed settings without saving them' {
+        $requestFile = Join-Path $testRoot 'valid-request.json'
+        $request = New-Config
+        $request.WebPort = 8080
+        $request | ConvertTo-Json | Set-Content -LiteralPath $requestFile
+        $config = Get-RequestedSuiteConfig $requestFile
+        Assert-True ($config.WebPort -eq 8080 -and $config.LinkPort -eq 50000) 'Requested ports were lost.'
+        Assert-True (-not (Test-Path -LiteralPath $script:ConfigPath)) 'Reviewing a request changed saved settings.'
+    }
+    Test-Case 'Native request rejects invalid ports, addresses, and stale adapters' {
+        $requestFile = Join-Path $testRoot 'invalid-request.json'
+        foreach ($case in @(
+            @('WebPort',0,'Invalid WebPort'), @('WebPort',65536,'Invalid WebPort'),
+            @('LinkPort',50001,'must be even'), @('LinkPort',65535,'must be even'),
+            @('NdiDiscoveryPort',80,'different TCP ports'), @('PublicIp','127.0.0.1','usable IPv4'),
+            @('PublicIp','224.0.0.1','usable IPv4'), @('PublicIp','169.254.1.1','usable IPv4'),
+            @('PublicIp','192.0.2.10;whoami','usable IPv4'), @('PublicIp','192.0.2.11','no longer available'),
+            @('PrimaryInterfaceAlias','Missing','no longer available'), @('SchemaVersion',2,'Unsupported')
+        )) {
+            $request = New-Config
+            $request.($case[0]) = $case[1]
+            $request | ConvertTo-Json | Set-Content -LiteralPath $requestFile
+            Assert-Throws { Get-RequestedSuiteConfig $requestFile } $case[2]
+        }
+    }
+    Test-Case 'Native request preserves saved data location and vendor image' {
+        $old = New-Config
+        $old.LinuxDataPath = '/root/kilolink-server'
+        $old.KiloLinkImage = 'kiloview/klnk-pro:v1.2'
+        Save-Config $old
+        $request = New-Config
+        $request.LinuxDataPath = '/opt/another-path'
+        $request.KiloLinkImage = 'untrusted/image:latest'
+        $requestFile = Join-Path $testRoot 'preserve-request.json'
+        $request | ConvertTo-Json | Set-Content -LiteralPath $requestFile
+        $config = Get-RequestedSuiteConfig $requestFile
+        Assert-True ($config.LinuxDataPath -eq '/root/kilolink-server' -and $config.KiloLinkImage -eq 'kiloview/klnk-pro:v1.2') 'The UI request replaced infrastructure settings.'
+    }
+    Test-Case 'Repair imports the existing data mount when saved settings are missing' {
+        function Get-WslDistroNames { 'KiloLink-Ubuntu' }
+        function Test-KiloContainer { $true }
+        function Get-LegacyKiloConfig { $old = New-Config; $old.LinuxDataPath = '/root/kilolink-server'; $old }
+        $requestFile = Join-Path $testRoot 'legacy-request.json'
+        New-Config | ConvertTo-Json | Set-Content -LiteralPath $requestFile
+        $config = Get-RequestedSuiteConfig $requestFile
+        Assert-True ($config.LinuxDataPath -eq '/root/kilolink-server') 'Repair replaced the existing data mount.'
+        function Get-LegacyKiloConfig { $null }
+        Assert-Throws { Get-RequestedSuiteConfig $requestFile } 'preserve its data'
+    }
+    Test-Case 'Launcher mode fails immediately if an engine prompt is reached' {
+        $LauncherMode = $true
+        Assert-Throws { Read-InstallerInput 'Unexpected menu' } 'Windows interface'
+    }
+    Test-Case 'Maintenance registration points Windows to native actions for the WSL owner' {
+        $node = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Register-MaintenanceEntry'},$false)
+        . ([scriptblock]::Create($node.Extent.Text))
+        $LauncherMode = $true
+        $script:PersistentLauncherPath = Join-Path $testRoot 'maintenance-fixture.exe'
+        Set-Content -LiteralPath $script:PersistentLauncherPath -Value 'fixture'
+        $script:RegistryValues = @{}
+        $script:ShortcutSaved = $false
+        function New-Item { }
+        function New-ItemProperty {
+            param($Path,$Name,$Value,$PropertyType,[switch]$Force)
+            Assert-True ($Path -like 'HKCU:*') 'Maintenance was registered for users who cannot access the WSL distribution.'
+            $script:RegistryValues[$Name] = $Value
+        }
+        $script:FakeShortcut = [pscustomobject]@{TargetPath=''}
+        $script:FakeShortcut | Add-Member ScriptMethod Save { $script:ShortcutSaved = $true }
+        $script:FakeShell = [pscustomobject]@{}
+        $script:FakeShell | Add-Member ScriptMethod CreateShortcut { param($Path) $script:FakeShortcut }
+        function New-Object { param($ComObject) if ($ComObject -ne 'WScript.Shell') { throw 'Unexpected COM object' }; $script:FakeShell }
+        Register-MaintenanceEntry
+        Assert-True ($script:RegistryValues.UninstallString -eq ('"{0}" --uninstall' -f $script:PersistentLauncherPath)) 'Windows uninstall is not routed to native confirmation.'
+        Assert-True ($script:RegistryValues.ModifyPath -eq ('"{0}" --repair' -f $script:PersistentLauncherPath)) 'Windows repair entry is incorrect.'
+        Assert-True ($script:ShortcutSaved -and $script:FakeShortcut.TargetPath -eq $script:PersistentLauncherPath) 'The maintenance shortcut was not saved.'
+    }
+    Test-Case 'Native install completes one operation without menu input' {
+        . $repairMocks
+        $LauncherMode = $true
+        $Action = 'Install'
+        function Read-InstallerInput { throw 'Unexpected text prompt' }
+        Repair-Suite -RequestedConfiguration (New-Config) -LicenseAccepted
+        Assert-True ($script:OperationOutcome -eq 'Completed') 'Direct install did not complete.'
+        Assert-True ((Get-SavedConfig).PublicIp -eq '192.0.2.10') 'Configuration was not persisted for restart.'
+    }
+    Test-Case 'Confirmed native uninstall removes managed components and retains reusable setup' {
+        $Action = 'Uninstall'
+        $LauncherMode = $true
+        Save-Config (New-Config)
+        $script:RemovedPaths = [Collections.Generic.List[string]]::new()
+        $script:NativeArguments = ''
+        function Get-UbuntuDistro { 'KiloLink-Ubuntu' }
+        function Get-WslDistroNames { 'KiloLink-Ubuntu' }
+        function Test-KiloContainer { $false }
+        function Get-NdiRegistration { $null }
+        function Get-NdiDiscoveryService { $null }
+        function Stop-ManagedTask { }
+        function Remove-ResumeTask { }
+        function Unregister-ScheduledTask { }
+        function Get-NetFirewallRule { @() }
+        function Get-NetFirewallHyperVRule { @() }
+        function Remove-LegacyPortProxies { }
+        function Remove-Item { param($LiteralPath,[switch]$Force,[switch]$Recurse,$ErrorAction) $script:RemovedPaths.Add($LiteralPath) }
+        function Invoke-Native { param($FilePath,$Arguments) $script:NativeArguments = $FilePath + ' ' + ($Arguments -join ' ') }
+        function Read-InstallerInput { throw 'Unexpected text prompt' }
+        Uninstall-Suite -Confirmed
+        Assert-True ($script:OperationOutcome -eq 'Completed') 'Native uninstall did not complete.'
+        Assert-True ($script:NativeArguments -eq 'wsl.exe --unregister KiloLink-Ubuntu') 'Uninstall did not target the dedicated distribution.'
+        Assert-True ($script:RemovedPaths -contains $script:ConfigPath) 'Uninstall retained the active suite configuration.'
+        Assert-True ($script:RemovedPaths -notcontains $script:StateRoot -and $script:RemovedPaths -notcontains $script:PersistentLauncherPath) 'Uninstall tried to delete its running reusable launcher.'
+    }
+    Test-Case 'Requested settings are not saved when licence acceptance is cancelled' {
+        $old = New-Config
+        Save-Config $old
+        $request = New-Config
+        $request.WebPort = 8080
+        function Confirm-LicenseAcceptance { $false }
+        Repair-Suite -RequestedConfiguration $request
+        Assert-True ((Get-SavedConfig).WebPort -eq 80) 'Cancelled request overwrote previous settings.'
+    }
+    Test-Case 'Native update applies requested settings without prompts' {
+        . $repairMocks
+        $Action = 'Update'
+        $LauncherMode = $true
+        Save-Config (New-Config)
+        $request = New-Config
+        $request.WebPort = 8080
+        $ConfigurationPath = Join-Path $testRoot 'update-request.json'
+        $request | ConvertTo-Json | Set-Content -LiteralPath $ConfigurationPath
+        function Get-UbuntuDistro { 'KiloLink-Ubuntu' }
+        function Update-KiloLink { }
+        function Invoke-WslScript { }
+        function Read-InstallerInput { throw 'Unexpected text prompt' }
+        Update-Suite
+        Assert-True ((Get-SavedConfig).WebPort -eq 8080 -and $script:OperationOutcome -eq 'Completed') 'Update did not apply the requested web port.'
+    }
+    Test-Case 'Restarted update resumes updating and clears continuation after success' {
+        Save-Config (New-Config)
+        function Get-ResumeState { [pscustomobject]@{Action='Update'} }
+        function Remove-ResumeTask { }
+        function Wait-ResumeNetwork { }
+        function Repair-Suite { throw 'Update was incorrectly converted to repair' }
+        function Update-Suite { Set-OperationOutcome 'Completed' 'Updated'; $script:Updated = $true }
+        function Clear-ResumeContinuation { $script:Cleared = $true }
+        $script:Updated = $false
+        $script:Cleared = $false
+        Resume-Suite
+        Assert-True ($script:Updated -and $script:Cleared) 'The requested update was not resumed and cleared.'
+    }
+    Test-Case 'Native restart continuation waits for the user to restart' {
+        $Action = 'Resume'
+        $LauncherMode = $true
+        $AutoRestart = $false
+        function Register-ResumeContinuation { }
+        function Read-InstallerInput { throw 'Unexpected text prompt' }
+        Request-RestartAndResume 'Fixture restart'
+        Assert-True ($script:OperationOutcome -eq 'RestartRequired') 'Native restart did not report the required outcome.'
+    }
     Test-Case 'Cancelled repair preserves the previous configuration' {
         $config = New-Config
         Save-Config $config
@@ -350,7 +518,7 @@ function Update-Suite { throw 'Fixture update failure' }
         $source = [IO.File]::ReadAllText($installerPath)
         $fixturePath = Join-Path $testRoot 'entry-fixture.ps1'
         [IO.File]::WriteAllText($fixturePath,$source.Insert($entryOffset,$fixtureMocks),[Text.Encoding]::UTF8)
-        $output = & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixturePath -LauncherMode
+        $output = & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixturePath -LauncherMode -Action Update -AcceptLicenses
         $code = $LASTEXITCODE
         Assert-True ($code -eq 1) "The real entry point returned $code after failure."
         $events = @($output | Where-Object { $_ -like '@@KILOVIEW_EVENT@@*' } | ForEach-Object { $_.Substring('@@KILOVIEW_EVENT@@'.Length) | ConvertFrom-Json })
@@ -387,6 +555,54 @@ function Update-Suite { throw 'Fixture update failure' }
     $staticFlags = [Reflection.BindingFlags]'NonPublic,Static'
     $instanceFlags = [Reflection.BindingFlags]'NonPublic,Instance'
     $networkScript = $formType.GetMethod('BuildStaticNetworkScript',$staticFlags).Invoke($null,@('Ethernet','192.0.2.20',24,'192.0.2.1','192.0.2.1',''))
+    Test-Case 'Native uninstall reaches review without requiring network configuration' {
+        $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
+        try {
+            $formType.GetField('uninstallChoice',$instanceFlags).GetValue($form).Checked = $true
+            [void]$formType.GetMethod('BeginSelectedAction',$instanceFlags).Invoke($form,@())
+            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Review') 'Uninstall was blocked by the network page.'
+            $execute = $formType.GetField('executeButton',$instanceFlags).GetValue($form)
+            Assert-True (-not $execute.Enabled) 'Data removal is enabled before confirmation.'
+            $arguments = $formType.GetMethod('BuildOperationArguments',$instanceFlags)
+            Assert-Throws { $arguments.Invoke($form,@()) } 'Confirm permanent data removal'
+            $formType.GetField('acceptanceBox',$instanceFlags).GetValue($form).Checked = $true
+            Assert-True ($execute.Enabled -and $arguments.Invoke($form,@()) -eq ' -Action Uninstall -ConfirmRemoval') 'Native confirmation did not select the uninstall action.'
+        } finally { $form.Dispose() }
+    }
+    Test-Case 'Native service controls reject odd link ports and conflicting TCP listeners' {
+        $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
+        try {
+            $formType.GetField('preferredInterfaceAlias',$instanceFlags).SetValue($form,'Ethernet')
+            $formType.GetField('preferredIpAddress',$instanceFlags).SetValue($form,'192.0.2.10')
+            $validate = $formType.GetMethod('ValidateServiceSettings',$instanceFlags)
+            Assert-True ($null -eq $validate.Invoke($form,@())) 'Default ports were rejected.'
+            $formType.GetField('linkPortBox',$instanceFlags).GetValue($form).Value = 50001
+            Assert-True ($validate.Invoke($form,@()) -match 'must be even') 'An odd link port was allowed.'
+            $formType.GetField('linkPortBox',$instanceFlags).GetValue($form).Value = 50000
+            $formType.GetField('ndiPortBox',$instanceFlags).GetValue($form).Value = 80
+            Assert-True ($validate.Invoke($form,@()) -match 'different TCP ports') 'Two listeners on one TCP port were allowed.'
+        } finally { $form.Dispose() }
+    }
+    Test-Case 'Native review requires acceptance and serializes all configurable values' {
+        $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
+        try {
+            $formType.GetField('launcherDirectory',$instanceFlags).SetValue($form,$testRoot)
+            $formType.GetField('preferredInterfaceAlias',$instanceFlags).SetValue($form,'Ethernet "AV"')
+            $formType.GetField('preferredIpAddress',$instanceFlags).SetValue($form,'192.0.2.10')
+            $formType.GetField('webPortBox',$instanceFlags).GetValue($form).Value = 8080
+            [void]$formType.GetMethod('ReviewSelectedAction',$instanceFlags).Invoke($form,@())
+            $arguments = $formType.GetMethod('BuildOperationArguments',$instanceFlags)
+            Assert-Throws { $arguments.Invoke($form,@()) } 'licence acceptance'
+            $formType.GetField('acceptanceBox',$instanceFlags).GetValue($form).Checked = $true
+            $value = $arguments.Invoke($form,@())
+            Assert-True ($value -like ' -Action Install -AcceptLicenses -ConfigurationPath *') 'The worker still launches an interactive menu.'
+            $request = $formType.GetField('requestPath',$instanceFlags).GetValue($form)
+            $json = Get-Content -Raw -LiteralPath $request | ConvertFrom-Json
+            Assert-True ($json.PrimaryInterfaceAlias -eq 'Ethernet "AV"' -and $json.WebPort -eq 8080 -and $json.LinkPort -eq 50000 -and $json.NdiDiscoveryPort -eq 5959 -and $json.PublicIp -eq '192.0.2.10') 'Request serialization lost or changed a setting.'
+            [void]$formType.GetMethod('FinishWizardOperation',$instanceFlags).Invoke($form,@(0))
+            Assert-True (-not (Test-Path -LiteralPath $request)) 'The completed request was not cleaned up.'
+        } finally { $form.Dispose() }
+    }
     $networkMocks = {
         $script:NetworkApplied = $false
         $script:Rollback = $false
