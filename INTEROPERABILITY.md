@@ -1,5 +1,13 @@
 # Suite deployment behavior
 
+## QA follow-up — 6 September 2026
+
+The schema-1 component receipt now records `serverOwnerSid`. Server setup/update/repair/resume/uninstall require that owner's signed-in administrator desktop, because WSL distributions belong to a Windows account. Client setup preserves an existing server owner. Legacy ownership may be migrated from the KiloLink startup task principal; ambiguous ownership fails before any removal. Use the original owner's desktop, or recover missing ownership evidence from the original installation's backup before retrying.
+
+A `discovery-ownership.json` snapshot preserves the previous Discovery service identity, startup mode, delayed Automatic flag and running state, task XML/state, and exact configuration bytes. Repeated repair preserves the original snapshot. Removing server ownership restores it, or disables a newly managed Discovery service so reboot cannot restart it. Shared NDI Tools and independently installed Agent remain installed. Client-only removal makes no server, WSL or Discovery changes.
+
+Interrupted removal retains verified ownership until completion and records completed Discovery restoration so retries cannot undo it. The setup executable was rebuilt from the corrected script; 92 isolated regression checks pass, including account boundaries, service restoration, client-only behavior and download gating. Windows restart/UAC and vendor runtime acceptance remain controlled-machine checks, not build steps.
+
 Client installs NDI Tools and PC Agent; it does not require local WSL, KiloLink or Discovery. Server installs/manages the selected server components. A host may have both roles. The schema-1 receipt at `%ProgramData%\\KiloLink\\installation-components.json` records selected roles separately from server settings; Toolkit checks actual component state against it.
 
 Server setup runs from the signed-in administrator account that will own WSL/startup. Alternate administrator credentials for a different desktop are rejected before server changes. Client completion checks the original desktop user's Agent profile, matching companion Setup's account ownership.
@@ -27,4 +35,3 @@ Server removal stops managed Discovery startup and removes server ownership, its
 Rebuild the embedded executable with `Build-Setup.ps1`, then run `tests/Installer.Regression.ps1`. Tests use mocks/fixtures and do not install vendor software. Controlled-machine acceptance remains required for WSL feature installation, different-account elevation and reboot/resume.
 
 WSL behavior is based on Microsoft's [command reference](https://learn.microsoft.com/en-us/windows/wsl/basic-commands) and [distribution catalog](https://raw.githubusercontent.com/microsoft/WSL/master/distributions/DistributionInfo.json).
-

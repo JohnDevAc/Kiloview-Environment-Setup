@@ -8,6 +8,7 @@ to exercise the generated watchdog against fake service commands.
 param([string]$BashPath = "$env:ProgramFiles\Git\bin\bash.exe")
 
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression
 $root = Split-Path -Parent $PSScriptRoot
 $testRoot = Join-Path $env:TEMP ('kilolink-tests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
@@ -78,6 +79,15 @@ $baseMocks = {
     function Assert-ServerDownloads { }
     function Assert-ServerOwner { }
     function Assert-LinuxDownloads { }
+    function Get-NdiDiscoveryService { $null }
+    function Get-DiscoveryDelayedStart { $null }
+    function Restore-DiscoveryDelayedStart { }
+    function Get-DiscoveryConfigPath { Join-Path $script:StateRoot 'fixture-discovery.json' }
+    function Stop-Service { throw 'Unexpected service stop in test' }
+    function Start-Service { throw 'Unexpected service start in test' }
+    function Set-Service { throw 'Unexpected service configuration in test' }
+    function Remove-NetFirewallRule { throw 'Unexpected firewall removal in test' }
+    function Remove-NetFirewallHyperVRule { throw 'Unexpected Hyper-V firewall removal in test' }
 }
 $repairMocks = {
     function Ensure-WslFeatures { $true }
@@ -127,6 +137,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 }
 
 try {
+    . (Join-Path $PSScriptRoot 'Qa.Regression.ps1')
     Test-Case 'Client stages both packages before any installation and stops on unavailable downloads' {
         Invoke-Expression ($ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Prepare-ClientPackages' }, $true).Extent.Text)
         $AcceptLicenses = $true
@@ -291,6 +302,8 @@ try {
         function Unregister-ScheduledTask { }
         function Get-NetFirewallRule { @() }
         function Get-NetFirewallHyperVRule { @() }
+        function Remove-NetFirewallRule { }
+        function Remove-NetFirewallHyperVRule { }
         function Remove-LegacyPortProxies { }
         function Remove-Item { param($LiteralPath,[switch]$Force,[switch]$Recurse,$ErrorAction) $script:RemovedPaths.Add($LiteralPath) }
         function Invoke-Native { param($FilePath,$Arguments) $script:NativeArguments = $FilePath + ' ' + ($Arguments -join ' ') }
@@ -714,6 +727,8 @@ try {
     }
 
     Test-Case 'Firewall opens the complete streaming range in both firewalls' {
+        function Remove-NetFirewallRule { }
+        function Remove-NetFirewallHyperVRule { }
         $script:Rules = New-Object Collections.Generic.List[object]
         function Get-NetFirewallRule { }
         function Get-NetFirewallHyperVRule { }

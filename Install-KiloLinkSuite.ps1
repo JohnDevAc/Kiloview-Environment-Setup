@@ -1785,9 +1785,44 @@ function Get-InteractiveUserSid {
     return $current
 }
 
+function Get-CurrentUserSid { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+
+function Get-ServerOwnerSid {
+    $path = Join-Path $script:StateRoot 'installation-components.json'
+    $serverSelected = $false
+    if (Test-Path -LiteralPath $path) {
+        $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        if ($receipt.schemaVersion -ne 1) { throw 'The installation ownership receipt has an unsupported schema.' }
+        $serverSelected = @($receipt.roles) -contains 'server'
+        $owner = [string](Get-PropertyValue $receipt 'serverOwnerSid' '')
+        if ($serverSelected -and $owner) {
+            if ($owner -notmatch '^S-1-\d+(?:-\d+)+$') { throw 'The recorded server owner SID is invalid.' }
+            return $owner
+        }
+    }
+    # Migrate a legacy installation from its OS-owned startup task.
+    $task = Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue
+    if ($task) {
+        $owner = [string]$task.Principal.UserId
+        if ($owner -notmatch '^S-1-') {
+            $owner = ([Security.Principal.NTAccount]::new($owner)).Translate([Security.Principal.SecurityIdentifier]).Value
+        }
+        return $owner
+    }
+    if ($serverSelected -or (Test-Path -LiteralPath $script:ConfigPath)) {
+        throw 'Existing server ownership cannot be verified. Restore its original startup task or ownership receipt before server maintenance.'
+    }
+    return $null
+}
+
 function Assert-ServerOwner {
-    if ((Get-InteractiveUserSid) -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) {
+    $current = Get-CurrentUserSid
+    if ((Get-InteractiveUserSid) -ne $current) {
         throw 'Server setup must run from the signed-in administrator desktop because WSL and startup belong to that account. Sign into the intended server administrator account and retry. Client PCs can use remote server components.'
+    }
+    $owner = Get-ServerOwnerSid
+    if ($owner -and $owner -ne $current) {
+        throw "This server installation belongs to Windows account $owner. Sign into that account before repairing, updating or removing its server components."
     }
 }
 
@@ -1836,13 +1871,19 @@ timeout 60 apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=12 -o Acquire
 function Save-ComponentReceipt([string]$Role, [switch]$Remove) {
     $path = Join-Path $script:StateRoot 'installation-components.json'
     $roles = @()
+    $owner = $null
     if (Test-Path -LiteralPath $path) {
         $previous = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-        if ($previous.schemaVersion -eq 1) { $roles = @($previous.roles | Where-Object { $_ -in @('client', 'server') }) }
+        if ($previous.schemaVersion -eq 1) {
+            $roles = @($previous.roles | Where-Object { $_ -in @('client', 'server') })
+            $owner = Get-PropertyValue $previous 'serverOwnerSid' $null
+        }
     }
+    if ($Role -eq 'server' -and -not $Remove) { Assert-ServerOwner; $owner = Get-CurrentUserSid }
+    if ($Role -eq 'server' -and $Remove) { $owner = $null }
     New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
     $selected = if ($Remove) { @($roles | Where-Object { $_ -ne $Role }) } else { @(($roles + $Role) | Select-Object -Unique) }
-    $receipt = @{schemaVersion=1; roles=@($selected); updatedUtc=[datetime]::UtcNow.ToString('o')}
+    $receipt = @{schemaVersion=1; roles=@($selected); serverOwnerSid=$owner; updatedUtc=[datetime]::UtcNow.ToString('o')}
     $receipt | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath ($path + '.tmp') -Encoding UTF8
     Move-Item -LiteralPath ($path + '.tmp') -Destination $path -Force
 }
@@ -1879,8 +1920,102 @@ function Install-ClientTools {
     } finally { Stop-SuiteProgress }
 }
 
+function Get-DiscoveryConfigPath { Join-Path $env:ProgramData 'NDI\ndi-discovery-service.v1.json' }
+
+function Get-DiscoveryDelayedStart {
+    param([string]$Name)
+    $value = Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\' + $Name) -Name DelayedAutoStart -ErrorAction SilentlyContinue
+    if ($value) { [int]$value.DelayedAutoStart } else { $null }
+}
+
+function Restore-DiscoveryDelayedStart {
+    param([string]$Name, $Value)
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\' + $Name
+    if ($null -eq $Value) { Remove-ItemProperty -LiteralPath $key -Name DelayedAutoStart -ErrorAction SilentlyContinue }
+    else { Set-ItemProperty -LiteralPath $key -Name DelayedAutoStart -Type DWord -Value ([int]$Value) }
+}
+
+function Test-ServerOwnershipEvidence {
+    if ((Test-Path -LiteralPath (Join-Path $script:StateRoot 'discovery-ownership.json')) -or (Get-SavedConfig)) { return $true }
+    $path = Join-Path $script:StateRoot 'installation-components.json'
+    if (Test-Path -LiteralPath $path) {
+        $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        if ($receipt.schemaVersion -ne 1) { throw 'Unsupported component receipt. Server ownership cannot be verified.' }
+        if ('server' -in @($receipt.roles)) { return $true }
+    }
+    return [bool](Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue)
+}
+
+function Save-DiscoveryOwnership {
+    $path = Join-Path $script:StateRoot 'discovery-ownership.json'
+    if (Test-Path -LiteralPath $path) {
+        $previous = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        if ($previous.schemaVersion -ne 1) { throw 'Unsupported Discovery ownership receipt.' }
+        if (-not (Get-PropertyValue $previous 'restoreCompleted' $false)) { return }
+        Remove-Item -LiteralPath $path -Force
+    }
+    $service = Get-NdiDiscoveryService
+    $task = Get-ScheduledTask -TaskName $script:NdiTaskName -ErrorAction SilentlyContinue
+    $configPath = Get-DiscoveryConfigPath
+    $config = if (Test-Path -LiteralPath $configPath) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) } else { $null }
+    $receipt = @{
+        schemaVersion=1; priorServiceName=$(if ($service) { $service.Name } else { $null })
+        priorStartType=$(if ($service) { [string]$service.StartType } else { $null })
+        priorDelayedStart=$(if ($service) { Get-DiscoveryDelayedStart $service.Name } else { $null })
+        priorRunning=[bool]($service -and $service.Status -eq 'Running')
+        priorTaskXml=$(if ($task) { Export-ScheduledTask -TaskName $script:NdiTaskName } else { $null })
+        priorTaskRunning=[bool]($task -and $task.State -eq 'Running')
+        priorConfig=$config; managedServiceName=$null
+    }
+    New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
+    $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($path + '.tmp') -Encoding UTF8
+    Move-Item -LiteralPath ($path + '.tmp') -Destination $path -Force
+}
+
+function Restore-DiscoveryOwnership {
+    $path = Join-Path $script:StateRoot 'discovery-ownership.json'
+    $receipt = if (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } else { $null }
+    if (-not $receipt -and -not (Test-ServerOwnershipEvidence)) { return }
+    if ($receipt -and $receipt.schemaVersion -ne 1) { throw 'Unsupported Discovery ownership receipt. No Discovery settings were changed.' }
+    if ($receipt -and (Get-PropertyValue $receipt 'restoreCompleted' $false)) { return }
+    $service = Get-NdiDiscoveryService
+    if ($receipt -and $receipt.managedServiceName -and $service -and $service.Name -ne $receipt.managedServiceName) {
+        throw 'The Discovery service identity changed. Restore the recorded service before removing server ownership.'
+    }
+    $start = if ($receipt -and $service -and $receipt.priorServiceName -eq $service.Name) { $receipt.priorStartType } else { 'Disabled' }
+    if ($start -notin @('Automatic','Manual','Disabled')) { throw 'Invalid previous Discovery startup setting.' }
+    $priorConfig = if ($receipt -and $null -ne $receipt.priorConfig) { [Convert]::FromBase64String($receipt.priorConfig) } else { $null }
+    Stop-ManagedTask $script:NdiTaskName
+    Unregister-ScheduledTask -TaskName $script:NdiTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    if ($service) {
+        Stop-Service -Name $service.Name -Force -ErrorAction Stop
+        # A legacy receipt has no trustworthy prior setting: retain the runtime,
+        # disable its managed server service, and leave its configuration for repair.
+        Set-Service -Name $service.Name -StartupType $start
+        if ($receipt -and $receipt.priorServiceName -eq $service.Name -and $receipt.PSObject.Properties['priorDelayedStart']) {
+            Restore-DiscoveryDelayedStart $service.Name $receipt.priorDelayedStart
+        }
+    }
+    if ($receipt) {
+        $configPath = Get-DiscoveryConfigPath
+        if ($null -ne $receipt.priorConfig) {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $configPath) -Force | Out-Null
+            [IO.File]::WriteAllBytes($configPath, $priorConfig)
+        } else { Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue }
+        if ($receipt.priorTaskXml) {
+            Register-ScheduledTask -TaskName $script:NdiTaskName -Xml $receipt.priorTaskXml -Force | Out-Null
+            if ($receipt.priorTaskRunning) { Start-ScheduledTask -TaskName $script:NdiTaskName }
+        }
+        if ($service -and $receipt.priorServiceName -eq $service.Name -and $receipt.priorRunning) { Start-Service -Name $service.Name }
+        $receipt | Add-Member -NotePropertyName restoreCompleted -NotePropertyValue $true -Force
+        $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($path + '.tmp') -Encoding UTF8
+        Move-Item -LiteralPath ($path + '.tmp') -Destination $path -Force
+    }
+}
+
 function Configure-NdiServer {
     param($Config)
+    Save-DiscoveryOwnership
     Write-Step 'Configuring NDI Discovery Server on all physical adapters'
     $exe = Get-NdiDiscoveryExe
     if (-not $exe) {
@@ -1907,6 +2042,11 @@ function Configure-NdiServer {
     }
 
     if ($service) {
+        $ownershipPath = Join-Path $script:StateRoot 'discovery-ownership.json'
+        $ownership = Get-Content -LiteralPath $ownershipPath -Raw | ConvertFrom-Json
+        $ownership.managedServiceName = $service.Name
+        $ownership | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($ownershipPath + '.tmp') -Encoding UTF8
+        Move-Item -LiteralPath ($ownershipPath + '.tmp') -Destination $ownershipPath -Force
         Unregister-ScheduledTask -TaskName $script:NdiTaskName -Confirm:$false -ErrorAction SilentlyContinue
         Set-Service -Name $service.Name -StartupType Automatic
         if ($service.Status -eq 'Running') {
@@ -2158,6 +2298,7 @@ function Repair-Suite {
     }
     Assert-ServerDownloads $config
     Save-ComponentReceipt 'server'
+    Save-DiscoveryOwnership
     Save-Config $config
     Register-MaintenanceEntry
     $showProgress = $LauncherMode -or $Action -in @('Menu', 'Resume')
@@ -2217,6 +2358,7 @@ function Wait-ResumeNetwork {
 }
 
 function Resume-Suite {
+    Assert-ServerOwner
     $continuation = Get-ResumeState
     Remove-ResumeTask
     if (-not (Get-SavedConfig)) {
@@ -2274,6 +2416,8 @@ function Update-Suite {
     if ($ConfigurationPath) { $config = Get-RequestedSuiteConfig $ConfigurationPath }
     Assert-ServerDownloads $config
     Install-NdiTools -UpdateOnly -PrepareOnly
+    Save-ComponentReceipt 'server'
+    Save-DiscoveryOwnership
     Save-Config $config
     Register-MaintenanceEntry
     $showProgress = $LauncherMode -or $Action -eq 'Menu'
@@ -2382,9 +2526,14 @@ function Remove-LegacyPortProxies {
 
 function Uninstall-Suite {
     param([switch]$Confirmed)
+    Assert-ServerOwner
+    if (-not (Test-ServerOwnershipEvidence)) {
+        Set-OperationOutcome 'Completed' 'No Environment Server installation was found. Client components and shared NDI settings were retained.'
+        return
+    }
     Set-OperationOutcome 'Running' 'Uninstalling the suite.'
     Write-Heading 'Uninstall KiloLink Suite'
-    Write-Host 'This removes KiloLink and its persisted data, NDI Tools/Discovery Server,' -ForegroundColor Yellow
+    Write-Host 'This removes KiloLink and its persisted data and managed Discovery Server settings,' -ForegroundColor Yellow
     Write-Host 'scheduled tasks, installer firewall rules, and browser shortcuts.' -ForegroundColor Yellow
     Write-Host "The dedicated $($script:ManagedDistroName) distribution will be deleted." -ForegroundColor Yellow
     Write-Host 'NDI Tools, PC Agent, WSL, unrelated distributions, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
@@ -2394,6 +2543,10 @@ function Uninstall-Suite {
         return
     }
 
+    # Persist a verified legacy owner before removing its startup task. Keep the
+    # owner until every removal step succeeds so a partial uninstall is retryable.
+    Save-ComponentReceipt 'server'
+
     $showProgress = $LauncherMode -or $Action -eq 'Menu'
     if ($showProgress) { Start-SuiteProgress -Activity 'Uninstalling the KiloLink and NDI suite' -Status 'Preparing removal' }
     try {
@@ -2402,14 +2555,9 @@ function Uninstall-Suite {
     $preferred = if ($config) { [string](Get-PropertyValue $config 'DistroName' '') } else { '' }
     $distro = Get-UbuntuDistro $preferred
     Stop-ManagedTask $script:StartupTaskName
-    Stop-ManagedTask $script:NdiTaskName
     Remove-ResumeTask
     Unregister-ScheduledTask -TaskName $script:StartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName $script:NdiTaskName -Confirm:$false -ErrorAction SilentlyContinue
-    $ndiService = Get-NdiDiscoveryService
-    if ($ndiService) {
-        Stop-Service -Name $ndiService.Name -Force -ErrorAction SilentlyContinue
-    }
+    Restore-DiscoveryOwnership
 
     if ($distro -and (Test-KiloContainer $distro)) {
         Set-SuiteProgress -Percent 24 -Status 'Removing the KiloLink container and application data'
@@ -2430,7 +2578,6 @@ function Uninstall-Suite {
     # NDI Tools is shared by independently deployed clients and Arena. Removing
     # server ownership stops Discovery above; runtime removal remains in Windows Apps.
     Write-Detail 'Shared NDI Tools and PC Agent were retained. Remove them separately in Windows Apps if no longer required.'
-    Save-ComponentReceipt 'server' -Remove
 
     Set-SuiteProgress -Percent 70 -Status 'Removing firewall rules and shortcuts'
     Write-Step 'Removing firewall rules and shortcuts'
@@ -2459,6 +2606,8 @@ function Uninstall-Suite {
     foreach ($file in @($script:ConfigPath, $script:StartupScriptPath, $script:ResumeStatePath)) {
         Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
     }
+    Save-ComponentReceipt 'server' -Remove
+    Remove-Item -LiteralPath (Join-Path $script:StateRoot 'discovery-ownership.json') -Force -ErrorAction SilentlyContinue
     } finally {
         if ($showProgress) { Stop-SuiteProgress }
     }
