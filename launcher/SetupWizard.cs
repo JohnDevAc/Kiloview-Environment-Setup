@@ -1,4 +1,4 @@
-// Copyright (c) 2026 John Lightfoot
+﻿// Copyright (c) 2026 John Lightfoot
 // SPDX-License-Identifier: MIT
 using System;
 using System.Collections.Generic;
@@ -61,7 +61,9 @@ namespace KiloLink.Setup
         private RadioButton ActionChoice(string title, string description, int y)
         {
             RadioButton choice = new RadioButton { Text = title, Font = new Font("Segoe UI Semibold", 11F),
-                ForeColor = SetupTheme.Text, Location = new Point(34, y), Size = new Size(700, 28), AutoCheck = true };
+                ForeColor = SetupTheme.Text, Location = new Point(34, y), Size = new Size(700, 28), AutoCheck = true, FlatStyle = FlatStyle.Flat };
+            choice.FlatAppearance.CheckedBackColor = SetupTheme.Papaya;
+            choice.CheckedChanged += delegate { choice.ForeColor = choice.Checked ? SetupTheme.Accent : SetupTheme.Text; };
             Label detail = new Label { Text = description, ForeColor = SetupTheme.Muted,
                 Location = new Point(54, y + 30), Size = new Size(695, 24) };
             welcomePanel.Controls.Add(choice);
@@ -88,7 +90,7 @@ namespace KiloLink.Setup
             updateChoice = ActionChoice("Check for and install updates", "Update NDI Tools, Ubuntu, Docker and the KiloLink container image.", 245);
             uninstallChoice = ActionChoice("Uninstall", "Remove the suite, its dedicated Linux environment and KiloLink application data.", 311);
             installChoice.Checked = true;
-            welcomeStatusLabel = new Label { Text = "Reading saved settings...", ForeColor = SetupTheme.Blue,
+            welcomeStatusLabel = new Label { Text = "Reading saved settings...", ForeColor = SetupTheme.Accent,
                 Location = new Point(34, 377), Size = new Size(716, 42) };
             welcomePanel.Controls.Add(welcomeStatusLabel);
             startButton = PageButton(welcomePanel, "Next", 34, 436, 180, true, StartButtonClick);
@@ -97,7 +99,7 @@ namespace KiloLink.Setup
             closeButton = PageButton(welcomePanel, "Close", 580, 436, 170, false, delegate { Close(); });
 
             settingsPanel = CreatePage("Configure services", "Choose the ports used by this server. The device link uses an even UDP port and the next port.\r\nWindows and WSL firewall rules are configured automatically.");
-            settingsNetworkLabel = new Label { ForeColor = SetupTheme.Blue, Location = new Point(34, 114), Size = new Size(710, 38) };
+            settingsNetworkLabel = new Label { ForeColor = SetupTheme.Accent, Location = new Point(34, 114), Size = new Size(710, 38) };
             settingsPanel.Controls.Add(settingsNetworkLabel);
             webPortBox = PortField(settingsPanel, "KILOLINK WEB PORT (TCP)", "Browser access to KiloLink Server Pro. Default: 80.", 166, 80, 65535);
             linkPortBox = PortField(settingsPanel, "KILOLINK DEVICE LINK (UDP)", "Even port from 2 to 65534. Default pair: 50000–50001.", 246, 50000, 65534);
@@ -113,13 +115,14 @@ namespace KiloLink.Setup
             reviewPanel = CreatePage("Review changes", "Check these settings before applying changes to this computer.");
             reviewTitle = (Label)reviewPanel.Controls[0];
             reviewText = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BorderStyle = BorderStyle.FixedSingle,
-                BackColor = Color.White, ForeColor = SetupTheme.Text, Font = new Font("Segoe UI", 10F), Location = new Point(34, 108), Size = new Size(716, 219), TabStop = true };
+                BackColor = SetupTheme.Paper, ForeColor = SetupTheme.Text, Font = new Font("Segoe UI", 10F), Location = new Point(34, 108), Size = new Size(716, 219), TabStop = true };
             reviewPanel.Controls.Add(reviewText);
             LinkLabel ndiTerms = TermsLink("NDI Tools licence", "https://docs.ndi.video/all/using-ndi/ndi-tools/installing-ndi-tools/software-license-agreement", 34);
             LinkLabel kiloTerms = TermsLink("Kiloview licence in official installer", "https://www.kiloview.com/downloads/klnk-pro/install.sh", 230);
             reviewPanel.Controls.Add(ndiTerms);
             reviewPanel.Controls.Add(kiloTerms);
-            acceptanceBox = new CheckBox { Location = new Point(34, 373), Size = new Size(716, 54), ForeColor = SetupTheme.Text };
+            acceptanceBox = new CheckBox { Location = new Point(34, 373), Size = new Size(716, 54), ForeColor = SetupTheme.Text, FlatStyle = FlatStyle.Flat };
+            acceptanceBox.FlatAppearance.CheckedBackColor = SetupTheme.Papaya;
             acceptanceBox.CheckedChanged += delegate { executeButton.Enabled = acceptanceBox.Checked; };
             reviewPanel.Controls.Add(acceptanceBox);
             PageButton(reviewPanel, "Back", 34, 446, 180, false, delegate {
@@ -147,7 +150,7 @@ namespace KiloLink.Setup
 
         private LinkLabel TermsLink(string text, string url, int x)
         {
-            LinkLabel link = new LinkLabel { Text = text, AutoSize = true, Location = new Point(x, 344), LinkColor = SetupTheme.Blue };
+            LinkLabel link = new LinkLabel { Text = text, AutoSize = true, Location = new Point(x, 344), LinkColor = SetupTheme.Accent };
             link.LinkClicked += delegate { OpenWebAddress(url); };
             return link;
         }
@@ -198,7 +201,7 @@ namespace KiloLink.Setup
             welcomeStatusLabel.Text = error ?? (partial
                 ? "An existing or partial installation was found. Saved settings are prefilled; service readiness is checked during maintenance."
                 : "Ready for a new installation. Choose Next to configure the server network.");
-            welcomeStatusLabel.ForeColor = error == null ? SetupTheme.Blue : SetupTheme.Error;
+            welcomeStatusLabel.ForeColor = error == null ? SetupTheme.Accent : SetupTheme.Error;
             logButton.Enabled = File.Exists(logPath);
         }
 
@@ -352,7 +355,7 @@ namespace KiloLink.Setup
 
         private void InitializeResultControls()
         {
-            webLink = new LinkLabel { Text = "Open KiloLink", AutoSize = true, Location = new Point(32, 397), Visible = false, LinkColor = SetupTheme.Blue };
+            webLink = new LinkLabel { Text = "Open KiloLink", AutoSize = true, Location = new Point(32, 397), Visible = false, LinkColor = SetupTheme.Accent };
             webLink.LinkClicked += delegate { if (resultWebUrl != null) { OpenWebAddress(resultWebUrl); } };
             endpointLabel = new Label { Location = new Point(198, 394), Size = new Size(630, 43), ForeColor = SetupTheme.Text };
             progressPanel.Controls.Add(webLink);

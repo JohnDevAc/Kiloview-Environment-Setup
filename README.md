@@ -43,6 +43,11 @@ Only one copy of the installer can be open at a time.
 The executable contains the deployment script, application artwork, licence,
 and third-party notices, so no other downloaded project files are required.
 
+The red and papaya interface and hexagonal server icon give this installer
+its own visual identity. The same artwork is used in the EXE, window title
+bar, taskbar, installer header and Windows maintenance entry. Palette and
+icon build details are documented in [assets/README.md](assets/README.md).
+
 The launcher is per-monitor DPI aware. Its welcome and progress views scale for
 the active display, including mixed-DPI monitor changes. When the effective
 desktop area is smaller than the full progress layout, the activity view

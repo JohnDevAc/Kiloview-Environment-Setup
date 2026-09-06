@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # Copyright (c) 2026 John Lightfoot
 # SPDX-License-Identifier: MIT
 <#
@@ -327,7 +327,7 @@ function Register-MaintenanceEntry {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
     New-Item -Path $key -Force | Out-Null
     $values = @{
-        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.0.0'
+        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.0.1'
         Publisher = 'John Lightfoot'; DisplayIcon = $script:PersistentLauncherPath
         InstallLocation = $script:StateRoot
         UninstallString = ('"{0}" --uninstall' -f $script:PersistentLauncherPath)
