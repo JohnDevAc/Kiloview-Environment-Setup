@@ -1,5 +1,9 @@
 # Suite deployment behavior
 
+## Additional QA corrections — 6 September 2026
+
+Client setup preserves unsupported component receipts and unknown roles by refusing to overwrite them. A completed Discovery-restoration marker alone no longer recreates server ownership during removal. Configured Client evidence now validates the endpoint/adapter GUIDs, IPv4 host address and prefix, including rejection of loopback, link-local, multicast, network and broadcast addresses. The corrected executable passes 95 isolated regression checks.
+
 ## QA follow-up — 6 September 2026
 
 The schema-1 component receipt now records `serverOwnerSid`. Server setup/update/repair/resume/uninstall require that owner's signed-in administrator desktop, because WSL distributions belong to a Windows account. Client setup preserves an existing server owner. Legacy ownership may be migrated from the KiloLink startup task principal; ambiguous ownership fails before any removal. Use the original owner's desktop, or recover missing ownership evidence from the original installation's backup before retrying.

@@ -1,4 +1,34 @@
 # Runs only inside Installer.Regression.ps1's isolated fixture engine.
+Test-Case 'Client Agent evidence requires a complete usable saved identity' {
+    $valid = @{schemaVersion=1;endpointId=[guid]::NewGuid().ToString();adapterId=[guid]::NewGuid().ToString();address='192.0.2.20';prefixLength=24}
+    Assert-True (Test-PcAgentState ([pscustomobject]$valid)) 'Complete Agent state was rejected.'
+    foreach ($field in @('schemaVersion','endpointId','adapterId','address','prefixLength')) {
+        $bad = $valid.Clone(); $bad[$field]=$null
+        Assert-True (-not (Test-PcAgentState ([pscustomobject]$bad))) "Incomplete $field was accepted."
+    }
+    foreach ($address in @('0.0.0.0','127.0.0.1','169.254.1.2','224.0.0.1','192.0.2.0','192.0.2.255')) {
+        $bad = $valid.Clone(); $bad.address=$address
+        Assert-True (-not (Test-PcAgentState ([pscustomobject]$bad))) "Unusable $address was accepted."
+    }
+}
+Test-Case 'Unsupported component receipts are preserved by Client setup' {
+    New-Item -ItemType Directory -Force -Path $script:StateRoot | Out-Null
+    $path = Join-Path $script:StateRoot 'installation-components.json'
+    foreach ($json in @('{"schemaVersion":2,"roles":["server"],"serverOwnerSid":"S-1-5-21-100"}', '{"schemaVersion":1,"roles":["future-server"]}')) {
+        [IO.File]::WriteAllText($path, $json)
+        Assert-Throws { Save-ComponentReceipt 'client' } 'ownership was preserved'
+        Assert-True ([IO.File]::ReadAllText($path) -ceq $json) 'Unsupported receipt was overwritten.'
+    }
+}
+
+Test-Case 'Completed Discovery restoration residue does not imply server ownership' {
+    Save-ComponentReceipt 'client'
+    @{schemaVersion=1;restoreCompleted=$true} | ConvertTo-Json | Set-Content (Join-Path $script:StateRoot 'discovery-ownership.json')
+    function Get-UbuntuDistro { throw 'Unexpected client WSL inspection' }
+    function Stop-ManagedTask { throw 'Unexpected task mutation' }
+    Uninstall-Suite -Confirmed
+    Assert-True (-not (Test-ServerOwnershipEvidence)) 'Consumed Discovery residue recreated a server role.'
+}
 Test-Case 'Client-only removal makes no server or Discovery changes' {
     Save-ComponentReceipt 'client'
     function Get-NdiDiscoveryService { throw 'Unexpected shared service inspection' }

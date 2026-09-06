@@ -1637,13 +1637,27 @@ function Test-PcAgentConfigured {
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return $false }
     try {
         $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        return Test-PcAgentState $state
+    } catch { return $false }
+}
+
+function Test-PcAgentState($State) {
+    try {
         $address = $null
         $endpoint = [guid]::Empty
-        return ([int](Get-PropertyValue $state 'schemaVersion' 0) -eq 1 -and
-            [guid]::TryParse([string](Get-PropertyValue $state 'endpointId' ''), [ref]$endpoint) -and $endpoint -ne [guid]::Empty -and
-            -not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue $state 'adapterId' '')) -and
-            [Net.IPAddress]::TryParse([string](Get-PropertyValue $state 'address' ''), [ref]$address) -and
-            $address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork)
+        $adapter = [guid]::Empty
+        $prefix = [int](Get-PropertyValue $State 'prefixLength' 0)
+        if ([int](Get-PropertyValue $State 'schemaVersion' 0) -ne 1 -or
+            -not [guid]::TryParse([string](Get-PropertyValue $State 'endpointId' ''), [ref]$endpoint) -or $endpoint -eq [guid]::Empty -or
+            -not [guid]::TryParse([string](Get-PropertyValue $State 'adapterId' ''), [ref]$adapter) -or $adapter -eq [guid]::Empty -or
+            $prefix -lt 1 -or $prefix -gt 30 -or
+            -not [Net.IPAddress]::TryParse([string](Get-PropertyValue $State 'address' ''), [ref]$address) -or
+            $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or [Net.IPAddress]::IsLoopback($address)) { return $false }
+        $bytes = $address.GetAddressBytes()
+        if ($bytes[0] -eq 0 -or $bytes[0] -ge 224 -or ($bytes[0] -eq 169 -and $bytes[1] -eq 254)) { return $false }
+        [uint64]$number = ([uint64]$bytes[0] -shl 24) -bor ([uint64]$bytes[1] -shl 16) -bor ([uint64]$bytes[2] -shl 8) -bor $bytes[3]
+        [uint64]$hostMask = [math]::Pow(2, 32 - $prefix) - 1
+        return ($number -band $hostMask) -ne 0 -and ($number -band $hostMask) -ne $hostMask
     } catch { return $false }
 }
 
@@ -1874,10 +1888,12 @@ function Save-ComponentReceipt([string]$Role, [switch]$Remove) {
     $owner = $null
     if (Test-Path -LiteralPath $path) {
         $previous = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-        if ($previous.schemaVersion -eq 1) {
-            $roles = @($previous.roles | Where-Object { $_ -in @('client', 'server') })
-            $owner = Get-PropertyValue $previous 'serverOwnerSid' $null
+        if ($previous.schemaVersion -ne 1) { throw 'Unsupported component receipt. Existing deployment ownership was preserved.' }
+        if (@($previous.roles | Where-Object { $_ -notin @('client', 'server') }).Count -gt 0) {
+            throw 'Unknown component role. Existing deployment ownership was preserved.'
         }
+        $roles = @($previous.roles)
+        $owner = Get-PropertyValue $previous 'serverOwnerSid' $null
     }
     if ($Role -eq 'server' -and -not $Remove) { Assert-ServerOwner; $owner = Get-CurrentUserSid }
     if ($Role -eq 'server' -and $Remove) { $owner = $null }
@@ -1936,7 +1952,13 @@ function Restore-DiscoveryDelayedStart {
 }
 
 function Test-ServerOwnershipEvidence {
-    if ((Test-Path -LiteralPath (Join-Path $script:StateRoot 'discovery-ownership.json')) -or (Get-SavedConfig)) { return $true }
+    if (Get-SavedConfig) { return $true }
+    $discoveryPath = Join-Path $script:StateRoot 'discovery-ownership.json'
+    if (Test-Path -LiteralPath $discoveryPath) {
+        $discovery = Get-Content -LiteralPath $discoveryPath -Raw | ConvertFrom-Json
+        if ($discovery.schemaVersion -ne 1) { throw 'Unsupported Discovery ownership receipt.' }
+        if (-not (Get-PropertyValue $discovery 'restoreCompleted' $false)) { return $true }
+    }
     $path = Join-Path $script:StateRoot 'installation-components.json'
     if (Test-Path -LiteralPath $path) {
         $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
