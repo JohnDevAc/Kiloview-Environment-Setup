@@ -1,5 +1,7 @@
 # Kiloview Environment Setup
 
+See [current suite deployment behavior](INTEROPERABILITY.md) for role receipts, download gates, offline Client packages, port restrictions and shared-runtime removal.
+
 Kiloview Environment Setup is a single-file Windows installer with a native
 Windows Forms interface. Its first screen lets you choose **Server** or **Client**.
 

@@ -14,7 +14,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'InstallClient', 'Repair', 'Update', 'Uninstall', 'Resume')]
+    [ValidateSet('Menu', 'Install', 'InstallClient', 'Repair', 'Update', 'Uninstall', 'Resume', 'CheckDownloads')]
     [string]$Action = 'Menu',
     [switch]$AcceptLicenses,
     [switch]$AutoRestart,
@@ -23,7 +23,8 @@ param(
     [string]$PreferredInterfaceAlias,
     [string]$PreferredIpAddress,
     [string]$ConfigurationPath,
-    [switch]$ConfirmRemoval
+    [switch]$ConfirmRemoval,
+    [string]$PackageDirectory
 )
 
 Set-StrictMode -Version 2.0
@@ -61,6 +62,9 @@ $script:LauncherEventPrefix = '@@KILOVIEW_EVENT@@'
 $script:OperationOutcome = 'Idle'
 $script:OperationMessage = 'No deployment operation was performed.'
 $script:OperationFailed = $false
+$script:PreparedNdiInstaller = $null
+$script:PreparedPcAgentRoot = $null
+$script:PreparedPcAgentRelease = $null
 
 function Set-OperationOutcome {
     param(
@@ -233,6 +237,7 @@ function Ensure-Administrator {
     if ($LauncherMode) { $elevationArguments = '-WindowStyle Hidden ' + $elevationArguments + ' -LauncherMode' }
     if ($LogPath) { $elevationArguments += " -LogPath `"$LogPath`"" }
     if ($ConfigurationPath) { $elevationArguments += " -ConfigurationPath `"$ConfigurationPath`"" }
+    if ($PackageDirectory) { $elevationArguments += " -PackageDirectory `"$PackageDirectory`"" }
     if ($ConfirmRemoval) { $elevationArguments += ' -ConfirmRemoval' }
     if ($PreferredInterfaceAlias) { $elevationArguments += " -PreferredInterfaceAlias `"$PreferredInterfaceAlias`"" }
     if ($PreferredIpAddress) { $elevationArguments += " -PreferredIpAddress `"$PreferredIpAddress`"" }
@@ -293,6 +298,7 @@ function Get-RequestedSuiteConfig {
     if ($ports.WebPort -eq $ports.NdiDiscoveryPort) {
         throw 'KiloLink web and NDI Discovery must use different TCP ports.'
     }
+    Assert-SuitePorts ([pscustomobject]$ports)
     $adapter = @(Get-LanCandidates | Where-Object { $_.Alias -eq $alias -and $_.Address -eq $address })
     if ($adapter.Count -eq 0) { throw 'The selected adapter/address is no longer available. Refresh Network settings and retry.' }
     $saved = Get-SavedConfig
@@ -1027,15 +1033,15 @@ function Ensure-WslFeatures {
     }
     if (-not (Test-WslRuntime)) {
         Write-Step 'Installing the Windows Subsystem for Linux runtime'
-        Invoke-Native wsl.exe @('--install', '--no-distribution') -IgnoreExitCode
+        Invoke-Native wsl.exe @('--install', '--no-distribution', '--web-download')
         Set-SuiteProgress -Percent ([Math]::Min(14, $script:ProgressPercent + 2)) -Status 'Waiting for the WSL runtime to become ready'
         if (-not (Wait-WslRuntime -TimeoutSeconds 120)) {
             Request-RestartAndResume 'The WSL runtime was installed but has not become ready in the current Windows session.'
             return $false
         }
     }
-    Write-Step 'Updating and verifying the Windows Subsystem for Linux runtime'
-    Invoke-Native wsl.exe @('--update') -IgnoreExitCode
+    Write-Step 'Verifying the Windows Subsystem for Linux runtime'
+    if ($Action -eq 'Update') { Invoke-Native wsl.exe @('--update', '--web-download') }
     if (-not (Wait-WslRuntime -TimeoutSeconds 180)) {
         Request-RestartAndResume 'WSL did not report a healthy runtime after installation and update.'
         return $false
@@ -1113,7 +1119,7 @@ function Ensure-Ubuntu {
     $distro = Get-UbuntuDistro ([string]$Config.DistroName)
     if (-not $distro) {
         Write-Step "Installing dedicated Ubuntu WSL 2 distribution '$($script:ManagedDistroName)'"
-        Invoke-Native wsl.exe @('--install', 'Ubuntu', '--name', $script:ManagedDistroName, '--version', '2', '--no-launch')
+        Invoke-Native wsl.exe @('--install', 'Ubuntu', '--name', $script:ManagedDistroName, '--version', '2', '--no-launch', '--web-download')
         Set-SuiteProgress -Percent ([Math]::Min(27, $script:ProgressPercent + 2)) -Status 'Waiting for the dedicated Ubuntu distribution to register'
         if (-not (Wait-WslDistroRegistration -Distro $script:ManagedDistroName -TimeoutSeconds 180)) {
             Request-RestartAndResume "The $($script:ManagedDistroName) distribution was installed but has not registered in the current Windows session."
@@ -1318,9 +1324,19 @@ function Download-FileWithProgress {
         [int]$PercentSpan,
         [string]$Status
     )
+    if ($PackageDirectory) {
+        $name = if (([uri]$Uri).Host -eq 'downloads.ndi.tv') { 'NDI-Tools.exe' }
+            elseif ($Uri -like 'https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/download/*') { 'PC-Agent.zip' }
+            else { throw 'This package source has no supported offline package mapping.' }
+        $source = Join-Path ([IO.Path]::GetFullPath($PackageDirectory)) $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Required offline package is missing: $name" }
+        Copy-Item -LiteralPath $source -Destination $Destination -Force
+        return
+    }
+    Assert-PackageSource $Uri
     Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
     if (-not $script:ProgressActive -or -not (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue)) {
-        Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination
+        Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination -TimeoutSec 1800
         return
     }
 
@@ -1330,8 +1346,13 @@ function Download-FileWithProgress {
         if (-not $job.JobId) {
             throw 'BITS did not return a job identifier.'
         }
+        $transferDeadline = [datetime]::UtcNow.AddMinutes(30)
+        $lastTransfer = [datetime]::UtcNow
+        $lastBytes = 0
         while ($true) {
             $job = Get-BitsTransfer -JobId $job.JobId
+            if ($job.BytesTransferred -ne $lastBytes) { $lastBytes = $job.BytesTransferred; $lastTransfer = [datetime]::UtcNow }
+            if ([datetime]::UtcNow -gt $transferDeadline -or ([datetime]::UtcNow - $lastTransfer).TotalSeconds -gt 45) { throw 'The required package transfer timed out. Check the package source and retry.' }
             if ($job.JobState -eq 'Transferred') { break }
             if ($job.JobState -in @('Error', 'TransientError', 'Cancelled')) {
                 throw "BITS download entered state $($job.JobState): $($job.ErrorDescription)"
@@ -1356,7 +1377,7 @@ function Download-FileWithProgress {
         }
         Write-InstallerLog "BITS download failed; falling back to Invoke-WebRequest: $($_.Exception.Message)"
         Set-SuiteProgress -Percent $BasePercent -Status "$Status (fallback download)"
-        Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination
+        Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination -TimeoutSec 1800
     }
 }
 
@@ -1412,7 +1433,7 @@ function Start-QuietInstaller {
 }
 
 function Install-NdiTools {
-    param([switch]$UpdateOnly, [switch]$ClientOnly)
+    param([switch]$UpdateOnly, [switch]$ClientOnly, [switch]$PrepareOnly)
     $script:NdiRestartRequired = $false
     $registration = Get-NdiRegistration
     if ($UpdateOnly -and -not $registration) {
@@ -1426,18 +1447,24 @@ function Install-NdiTools {
     }
 
     Write-Step 'Checking the current NDI Tools package'
-    $downloadUrl = if ($ClientOnly) { Get-CurrentNdiToolsUrl } else { $script:NdiToolsUrl }
+    $downloadUrl = if ($script:PreparedNdiInstaller) { $null } elseif ($ClientOnly -and -not $PackageDirectory) { Get-CurrentNdiToolsUrl } else { $script:NdiToolsUrl }
     $downloadDir = Join-Path $env:TEMP 'KiloLinkSuite'
     $installer = Join-Path $downloadDir 'NDI-Tools.exe'
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
     $downloadSpan = if ($ClientOnly) { 35 } else { 8 }
-    Download-FileWithProgress -Uri $downloadUrl -Destination $installer -BasePercent $script:ProgressPercent -PercentSpan $downloadSpan -Status 'Downloading NDI Tools'
+    if ($script:PreparedNdiInstaller) { $installer = $script:PreparedNdiInstaller }
+    else { Download-FileWithProgress -Uri $downloadUrl -Destination $installer -BasePercent $script:ProgressPercent -PercentSpan $downloadSpan -Status 'Downloading NDI Tools' }
 
     Set-SuiteProgress -Percent ([Math]::Min(90, $script:ProgressPercent + 1)) -Status 'Verifying the NDI Tools signature'
     $signature = Get-InstallerSignatureWithProgress -Path $installer
     if ([string]$signature.Status -ne 'Valid') {
         throw "NDI installer signature validation failed: $($signature.Status)"
     }
+    if ([string]$signature.SignerCertificate.Subject -notmatch '(?i)(Vizrt|NDI|NewTek)') {
+        throw 'NDI installer publisher validation failed. Use the official NDI package.'
+    }
+    if ($PrepareOnly) { $script:PreparedNdiInstaller = $installer; return }
+    $script:PreparedNdiInstaller = $null
     $installedVersion = if ($registration) { Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' '')) } else { $null }
     $packageVersion = Convert-ToVersion ((Get-Item -LiteralPath $installer).VersionInfo.ProductVersion)
     $install = $componentsMissing -or -not $registration -or -not $installedVersion -or -not $packageVersion -or $packageVersion -gt $installedVersion
@@ -1506,10 +1533,12 @@ function Get-PcAgentPublicRelease {
 
 function Get-PcAgentRelease {
     try {
-        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/JohnDevAc/Kiloview-PC-Onboarding/releases/latest' -TimeoutSec 60 -Headers @{
+        if ($PackageDirectory) { $release = Get-Content -LiteralPath (Join-Path $PackageDirectory 'pc-agent-release.json') -Raw | ConvertFrom-Json }
+        else { $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/JohnDevAc/Kiloview-PC-Onboarding/releases/latest' -TimeoutSec 15 -Headers @{
             'User-Agent' = 'Kiloview-Environment-Setup'; Accept = 'application/vnd.github+json'
-        }
+        } }
     } catch {
+        if ($PackageDirectory) { throw "Offline PC Agent release metadata could not be read. Supply pc-agent-release.json from the production release. $($_.Exception.Message)" }
         Write-InstallerLog ('PC Agent API lookup failed; checking the public release and checksum: ' + $_.Exception.Message)
         return Get-PcAgentPublicRelease
     }
@@ -1566,6 +1595,29 @@ function Expand-PcAgentPackage {
     } finally { $zip.Dispose() }
 }
 
+function Compare-PcAgentVersion([string]$Left, [string]$Right) {
+    if (-not $Left) { return -1 }
+    if (-not $Right) { return 1 }
+    $a = $Left.Split('+')[0].Split('-', 2)
+    $b = $Right.Split('+')[0].Split('-', 2)
+    $av = [version]$a[0]; $bv = [version]$b[0]
+    $order = ([version]::new($av.Major,$av.Minor,[Math]::Max(0,$av.Build),[Math]::Max(0,$av.Revision))).CompareTo(
+        [version]::new($bv.Major,$bv.Minor,[Math]::Max(0,$bv.Build),[Math]::Max(0,$bv.Revision)))
+    if ($order) { return $order }
+    if ($a.Count -eq 1) { if ($b.Count -eq 1) { return 0 }; return 1 }
+    if ($b.Count -eq 1) { return -1 }
+    $ap = $a[1].Split('.'); $bp = $b[1].Split('.')
+    for ($i = 0; $i -lt [Math]::Max($ap.Count,$bp.Count); $i++) {
+        if ($i -ge $ap.Count) { return -1 }
+        if ($i -ge $bp.Count) { return 1 }
+        [long]$an = 0; [long]$bn = 0
+        $na = [long]::TryParse($ap[$i],[ref]$an); $nb = [long]::TryParse($bp[$i],[ref]$bn)
+        $order = if ($na -and $nb) { $an.CompareTo($bn) } elseif ($na) { -1 } elseif ($nb) { 1 } else { [StringComparer]::Ordinal.Compare($ap[$i],$bp[$i]) }
+        if ($order) { return $order }
+    }
+    return 0
+}
+
 function Get-PcAgentBinaryVersion {
     param([string]$Path, [string]$Product)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
@@ -1573,16 +1625,22 @@ function Get-PcAgentBinaryVersion {
     if ($info.ProductName -ne $Product) { return $null }
     $version = Convert-ToVersion $info.ProductVersion
     if (-not $version) { return $null }
-    return [version]::new($version.Major, $version.Minor, [Math]::Max(0, $version.Build))
+    $suffix = ([string]$info.ProductVersion).Split('+')[0].Split('-', 2)
+    return ([version]::new($version.Major, $version.Minor, [Math]::Max(0, $version.Build))).ToString() + $(if ($suffix.Count -gt 1) { '-' + $suffix[1] } else { '' })
 }
 
 function Test-PcAgentConfigured {
-    $statePath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'NDI Configurator\PC Agent\agent-state.json'
+    $sid = Get-InteractiveUserSid
+    $profile = Get-ItemProperty -LiteralPath ("Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\" + $sid) -Name ProfileImagePath
+    $local = Join-Path ([Environment]::ExpandEnvironmentVariables($profile.ProfileImagePath)) 'AppData\Local'
+    $statePath = Join-Path $local 'NDI Configurator\PC Agent\agent-state.json'
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return $false }
     try {
         $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
         $address = $null
+        $endpoint = [guid]::Empty
         return ([int](Get-PropertyValue $state 'schemaVersion' 0) -eq 1 -and
+            [guid]::TryParse([string](Get-PropertyValue $state 'endpointId' ''), [ref]$endpoint) -and $endpoint -ne [guid]::Empty -and
             -not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue $state 'adapterId' '')) -and
             [Net.IPAddress]::TryParse([string](Get-PropertyValue $state 'address' ''), [ref]$address) -and
             $address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork)
@@ -1606,15 +1664,17 @@ function Invoke-PcAgentSetup {
 }
 
 function Install-PcAgent {
+    param([switch]$PrepareOnly)
     if (-not [Environment]::Is64BitOperatingSystem) { throw 'NDI Configurator PC Agent requires 64-bit Windows.' }
     Set-SuiteProgress -Percent 50 -Status 'Checking the PC Agent production release'
-    $release = Get-PcAgentRelease
+    $release = if ($script:PreparedPcAgentRelease) { $script:PreparedPcAgentRelease } else { Get-PcAgentRelease }
     $installRoot = Join-Path $env:ProgramFiles 'NDI Configurator\PC Agent'
     $installedSetup = Join-Path $installRoot 'NDI Configurator PC Agent Setup.exe'
     $installedAgent = Join-Path $installRoot 'NDI Configurator PC Agent.exe'
     $setupVersion = Get-PcAgentBinaryVersion $installedSetup 'NDI Configurator PC Agent'
     $agentVersion = Get-PcAgentBinaryVersion $installedAgent 'NDI Configurator PC Agent'
-    if ($setupVersion -and $agentVersion -and $setupVersion -ge $release.Version -and $agentVersion -ge $release.Version) {
+    if ($setupVersion -and $agentVersion -and (Compare-PcAgentVersion $setupVersion $agentVersion) -eq 0 -and (Compare-PcAgentVersion $agentVersion $release.Version) -ge 0) {
+        if ($PrepareOnly) { $script:PreparedPcAgentRelease = $release; return $true }
         if (Test-PcAgentConfigured) {
             Write-Detail "PC Agent $agentVersion is already installed and configured." Green
             return $true
@@ -1622,33 +1682,41 @@ function Install-PcAgent {
         return Invoke-PcAgentSetup $installedSetup
     }
     # Never overwrite one half of a newer independent installation with an older release.
-    if (($setupVersion -and $setupVersion -gt $release.Version) -or ($agentVersion -and $agentVersion -gt $release.Version)) {
+    if (($setupVersion -and (Compare-PcAgentVersion $setupVersion $release.Version) -gt 0) -or ($agentVersion -and (Compare-PcAgentVersion $agentVersion $release.Version) -gt 0)) {
         throw 'A newer PC Agent installation is incomplete. Repair it using its own matching release package.'
     }
     $cacheRoot = [IO.Path]::GetFullPath((Join-Path $env:TEMP 'KiloLinkSuite'))
-    $packageRoot = Join-Path $cacheRoot ('PC-Agent-' + [guid]::NewGuid().ToString('N'))
+    $packageRoot = if ($script:PreparedPcAgentRoot) { $script:PreparedPcAgentRoot } else { Join-Path $cacheRoot ('PC-Agent-' + [guid]::NewGuid().ToString('N')) }
+    $prepared = $false
     New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
     try {
         $archive = Join-Path $packageRoot 'PC-Agent.zip'
-        Download-FileWithProgress -Uri $release.Url -Destination $archive -BasePercent 52 -PercentSpan 30 -Status 'Downloading NDI Configurator PC Agent'
+        if (-not $script:PreparedPcAgentRoot) { Download-FileWithProgress -Uri $release.Url -Destination $archive -BasePercent 52 -PercentSpan 30 -Status 'Downloading NDI Configurator PC Agent' }
         if ((Get-Item -LiteralPath $archive).Length -ne $release.Size -or
             (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $release.Hash) {
             throw 'The PC Agent package size or SHA-256 did not match its production release.'
         }
-        $payload = Join-Path $packageRoot 'Payload'
+        # Re-extract from the reverified archive before launch; do not trust staged loose files.
+        $payload = Join-Path $packageRoot ('Payload-' + [guid]::NewGuid().ToString('N'))
         Expand-PcAgentPackage -Archive $archive -Destination $payload
         $setup = Join-Path $payload 'NDI Configurator PC Agent Setup.exe'
         $agent = Join-Path $payload 'Agent\NDI Configurator PC Agent.exe'
-        if ((Get-PcAgentBinaryVersion $setup 'NDI Configurator PC Agent') -ne $release.Version -or
-            (Get-PcAgentBinaryVersion $agent 'NDI Configurator PC Agent') -ne $release.Version -or
+        if ((Compare-PcAgentVersion (Get-PcAgentBinaryVersion $setup 'NDI Configurator PC Agent') $release.Version) -ne 0 -or
+            (Compare-PcAgentVersion (Get-PcAgentBinaryVersion $agent 'NDI Configurator PC Agent') $release.Version) -ne 0 -or
             -not (Test-Path -LiteralPath (Join-Path $payload 'LICENSE.md') -PathType Leaf)) {
             throw 'The PC Agent package is incomplete or its product/version does not match the release.'
+        }
+        if ($PrepareOnly) {
+            $script:PreparedPcAgentRoot = $packageRoot
+            $script:PreparedPcAgentRelease = $release
+            $prepared = $true
+            return $true
         }
         $completed = Invoke-PcAgentSetup $setup
         if (-not $completed) { return $false }
         $setupVersion = Get-PcAgentBinaryVersion $installedSetup 'NDI Configurator PC Agent'
         $agentVersion = Get-PcAgentBinaryVersion $installedAgent 'NDI Configurator PC Agent'
-        if (-not $setupVersion -or -not $agentVersion -or $setupVersion -lt $release.Version -or $agentVersion -lt $release.Version) {
+        if (-not $setupVersion -or -not $agentVersion -or (Compare-PcAgentVersion $setupVersion $agentVersion) -ne 0 -or (Compare-PcAgentVersion $agentVersion $release.Version) -lt 0) {
             throw 'PC Agent setup closed before the expected application files were installed.'
         }
         return $true
@@ -1657,8 +1725,131 @@ function Install-PcAgent {
         if (-not $resolvedPackage.StartsWith($cacheRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
             throw 'PC Agent cleanup path is outside the download cache.'
         }
-        Remove-Item -LiteralPath $resolvedPackage -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not $prepared) {
+            Remove-Item -LiteralPath $resolvedPackage -Recurse -Force -ErrorAction SilentlyContinue
+            $script:PreparedPcAgentRoot = $null
+            $script:PreparedPcAgentRelease = $null
+        }
     }
+}
+
+function Assert-PackageSource([string]$Uri) {
+    try {
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -Method Head -TimeoutSec 12
+            $contentType = $response.Headers['Content-Type']
+        } catch {
+            $status = Get-PropertyValue (Get-PropertyValue $_.Exception 'Response' $null) 'StatusCode' 0
+            if ([int]$status -notin @(405, 501)) { throw }
+            $request = [Net.HttpWebRequest]::CreateHttp($Uri)
+            $request.Method = 'GET'
+            $request.Timeout = 12000
+            $request.ReadWriteTimeout = 12000
+            $request.AddRange(0, 0)
+            # Inspect headers only, including when a source ignores Range.
+            $probe = $request.GetResponse()
+            try { $contentType = $probe.ContentType } finally { $probe.Close() }
+        }
+        if ($contentType -match 'text/html') { throw 'The source returned a web page instead of a package.' }
+    } catch {
+        throw "Required download unavailable from $(([uri]$Uri).Host). Check internet access, proxy and package-source access, then retry. $($_.Exception.Message)"
+    }
+}
+
+function Prepare-ClientPackages {
+    Set-SuiteProgress -Percent 2 -Status 'Checking and acquiring both required client packages before installation'
+    [void](Install-PcAgent -PrepareOnly)
+    try { Install-NdiTools -ClientOnly -PrepareOnly }
+    catch {
+        if ($script:PreparedPcAgentRoot) {
+            $cache = [IO.Path]::GetFullPath((Join-Path $env:TEMP 'KiloLinkSuite')) + '\'
+            $preparedPath = [IO.Path]::GetFullPath($script:PreparedPcAgentRoot)
+            if (-not $preparedPath.StartsWith($cache, [StringComparison]::OrdinalIgnoreCase)) { throw 'Prepared package path is outside the cache.' }
+            Remove-Item -LiteralPath $preparedPath -Recurse -Force -ErrorAction SilentlyContinue
+            $script:PreparedPcAgentRoot = $null
+        }
+        throw
+    }
+}
+
+function Get-InteractiveUserSid {
+    $current = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $owners = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { $_.SessionId -eq $session } | ForEach-Object {
+        $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid
+        if ($owner.ReturnValue -ne 0 -or -not $owner.Sid) { throw 'The desktop owner could not be verified.' }
+        $owner.Sid
+    } | Select-Object -Unique)
+    if ($owners.Count -gt 1) { throw 'Multiple desktop owners were found; sign into the intended account before setup.' }
+    if ($owners.Count -eq 1) { return $owners[0] }
+    return $current
+}
+
+function Assert-ServerOwner {
+    if ((Get-InteractiveUserSid) -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) {
+        throw 'Server setup must run from the signed-in administrator desktop because WSL and startup belong to that account. Sign into the intended server administrator account and retry. Client PCs can use remote server components.'
+    }
+}
+
+function Assert-ServerDownloads($Config, [switch]$SourcesOnly) {
+    Assert-ServerOwner
+    Assert-SuitePorts $Config
+    Set-SuiteProgress -Percent 2 -Status 'Checking required server package sources'
+    # An existing healthy local runtime does not need an online currency check during repair.
+    if ($Action -eq 'Update' -or -not (Test-WslRuntime)) {
+        try {
+            $wslRelease = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/WSL/releases/latest' -TimeoutSec 12 -Headers @{'User-Agent'='Kiloview-Environment-Setup'}
+            $wslAsset = @($wslRelease.assets | Where-Object { $_.name -match '\.x64\.msi$' }) | Select-Object -First 1
+            if (-not $wslAsset) { throw 'The WSL runtime package could not be resolved.' }
+            Assert-PackageSource $wslAsset.browser_download_url
+        } catch { throw "Windows/WSL prerequisites cannot be downloaded. Check internet access and retry before changing Windows features. $($_.Exception.Message)" }
+    }
+    if ($SourcesOnly) {
+        if (-not (Get-NdiRegistration) -or -not (Get-NdiDiscoveryExe)) { Assert-PackageSource $script:NdiToolsUrl }
+    } else { Install-NdiTools -PrepareOnly }
+    if (-not (Get-UbuntuDistro ([string]$Config.DistroName))) {
+        try {
+            $catalog = Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/microsoft/WSL/master/distributions/DistributionInfo.json' -TimeoutSec 12
+            $ubuntu = @($catalog.ModernDistributions.Ubuntu | Where-Object { $_.Name -eq 'Ubuntu' }) | Select-Object -First 1
+            if (-not $ubuntu -or ([uri]$ubuntu.Amd64Url.Url).Scheme -ne 'https') { throw 'The Ubuntu download could not be resolved.' }
+            Assert-PackageSource $ubuntu.Amd64Url.Url
+        } catch { throw "Ubuntu cannot be downloaded. Check its required source before changing Windows features. $($_.Exception.Message)" }
+    }
+}
+
+function Assert-LinuxDownloads([string]$Distro) {
+    # Run inside the same distribution/network context used by apt and Docker.
+    $probe = @'
+set -eu
+if command -v curl >/dev/null; then
+  curl --connect-timeout 8 --max-time 15 -fsSI https://download.docker.com/linux/ubuntu/gpg >/dev/null
+  code=$(curl --connect-timeout 8 --max-time 15 -sS -o /dev/null -w '%{http_code}' https://registry-1.docker.io/v2/)
+  test "$code" = 200 || test "$code" = 401
+fi
+# Only refresh package metadata here; never install or upgrade as a probe.
+timeout 60 apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=12 -o Acquire::https::Timeout=12 update --error-on=any >/dev/null
+'@
+    try { Invoke-WslScript $Distro $probe }
+    catch { throw "Required Linux package sources are unavailable inside WSL. Windows internet access alone is insufficient. Existing application services were retained; retry when sources are reachable. $($_.Exception.Message)" }
+}
+
+function Save-ComponentReceipt([string]$Role, [switch]$Remove) {
+    $path = Join-Path $script:StateRoot 'installation-components.json'
+    $roles = @()
+    if (Test-Path -LiteralPath $path) {
+        $previous = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        if ($previous.schemaVersion -eq 1) { $roles = @($previous.roles | Where-Object { $_ -in @('client', 'server') }) }
+    }
+    New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
+    $selected = if ($Remove) { @($roles | Where-Object { $_ -ne $Role }) } else { @(($roles + $Role) | Select-Object -Unique) }
+    $receipt = @{schemaVersion=1; roles=@($selected); updatedUtc=[datetime]::UtcNow.ToString('o')}
+    $receipt | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath ($path + '.tmp') -Encoding UTF8
+    Move-Item -LiteralPath ($path + '.tmp') -Destination $path -Force
+}
+
+function Assert-SuitePorts($Config) {
+    if ([int]$Config.NdiDiscoveryPort -ne 5959) { throw 'Suite clients require NDI Discovery on TCP 5959. Custom Discovery ports are not supported by the PC/device contract.' }
+    if ([int]$Config.WebPort -in @(8080, 8091, 8094)) { throw 'TCP 8080, 8091 and 8094 are reserved for Arena, Job Configurator and PC Agent. Choose another KiloLink web port.' }
 }
 
 function Install-ClientTools {
@@ -1666,6 +1857,8 @@ function Install-ClientTools {
     Set-OperationOutcome 'Running' 'Installing NDI Tools and PC Agent for this client.'
     Start-SuiteProgress -Activity 'Installing client tools' -Status 'Checking the current official download'
     try {
+        Prepare-ClientPackages
+        Save-ComponentReceipt 'client'
         Install-NdiTools -ClientOnly
         $ndiNeedsRestart = $script:NdiRestartRequired
         $agentCompleted = Install-PcAgent
@@ -1741,9 +1934,9 @@ function Install-FirewallRules {
     Get-NetFirewallRule -Group $script:FirewallGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     $tcpPorts = @([string]$Config.WebPort, '30000-30300', '5960-10000')
     $udpPorts = @([string]$Config.LinkPort, [string]([int]$Config.LinkPort + 1), '30000-30300', '5353', '5960-10000')
-    New-NetFirewallRule -DisplayName 'KiloLink Suite TCP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort $tcpPorts | Out-Null
-    New-NetFirewallRule -DisplayName 'KiloLink Suite UDP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol UDP -LocalPort $udpPorts | Out-Null
-    New-NetFirewallRule -DisplayName 'NDI Discovery Server TCP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort ([string]$Config.NdiDiscoveryPort) | Out-Null
+    New-NetFirewallRule -DisplayName 'KiloLink Suite TCP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort $tcpPorts -Profile Domain,Private -RemoteAddress LocalSubnet -LocalAddress $Config.PublicIp -EdgeTraversalPolicy Block | Out-Null
+    New-NetFirewallRule -DisplayName 'KiloLink Suite UDP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol UDP -LocalPort $udpPorts -Profile Domain,Private -RemoteAddress LocalSubnet -EdgeTraversalPolicy Block | Out-Null
+    New-NetFirewallRule -DisplayName 'NDI Discovery Server TCP' -Group $script:FirewallGroup -Direction Inbound -Action Allow -Protocol TCP -LocalPort ([string]$Config.NdiDiscoveryPort) -Profile Domain,Private -RemoteAddress LocalSubnet -LocalAddress $Config.PublicIp -EdgeTraversalPolicy Block | Out-Null
     if (Get-Command Get-NetFirewallHyperVRule -ErrorAction SilentlyContinue) {
         foreach ($name in @("$($script:HyperVPrefix)TCP", "$($script:HyperVPrefix)UDP")) {
             Get-NetFirewallHyperVRule -Name $name -ErrorAction SilentlyContinue | Remove-NetFirewallHyperVRule
@@ -1963,6 +2156,8 @@ function Repair-Suite {
         Set-OperationOutcome 'Cancelled' 'Installation was cancelled before changes were applied.'
         return
     }
+    Assert-ServerDownloads $config
+    Save-ComponentReceipt 'server'
     Save-Config $config
     Register-MaintenanceEntry
     $showProgress = $LauncherMode -or $Action -in @('Menu', 'Resume')
@@ -1977,6 +2172,7 @@ function Repair-Suite {
         $distro = Ensure-Ubuntu $config
         if (-not $distro) { return }
         Set-SuiteProgress -Percent 30 -Status 'Preparing systemd, Docker Engine, and Avahi'
+        Assert-LinuxDownloads $distro
         Ensure-Docker $distro
         Set-SuiteProgress -Percent 48 -Status 'Installing or validating KiloLink Server Pro'
         Sync-KiloConfig $config
@@ -2076,6 +2272,8 @@ function Update-Suite {
         throw 'No saved configuration exists. Choose Repair / Reconfigure.'
     }
     if ($ConfigurationPath) { $config = Get-RequestedSuiteConfig $ConfigurationPath }
+    Assert-ServerDownloads $config
+    Install-NdiTools -UpdateOnly -PrepareOnly
     Save-Config $config
     Register-MaintenanceEntry
     $showProgress = $LauncherMode -or $Action -eq 'Menu'
@@ -2090,6 +2288,7 @@ function Update-Suite {
             throw 'Ubuntu is missing. Choose Repair / Reconfigure.'
         }
         $config.DistroName = $distro
+        Assert-LinuxDownloads $distro
         Invoke-Wsl $distro 'systemctl start docker && systemctl start avahi-daemon'
         Set-SuiteProgress -Percent 23 -Status 'Checking the selected server address and container settings'
         Sync-PrimaryLanAddress $config
@@ -2188,7 +2387,7 @@ function Uninstall-Suite {
     Write-Host 'This removes KiloLink and its persisted data, NDI Tools/Discovery Server,' -ForegroundColor Yellow
     Write-Host 'scheduled tasks, installer firewall rules, and browser shortcuts.' -ForegroundColor Yellow
     Write-Host "The dedicated $($script:ManagedDistroName) distribution will be deleted." -ForegroundColor Yellow
-    Write-Host 'WSL, unrelated distributions, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
+    Write-Host 'NDI Tools, PC Agent, WSL, unrelated distributions, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
     if (-not $Confirmed -and (Read-InstallerInput 'Type UNINSTALL to continue') -cne 'UNINSTALL') {
         Write-Host 'Uninstall cancelled.' -ForegroundColor Yellow
         Set-OperationOutcome 'Cancelled' 'Uninstall was cancelled. No components were removed.'
@@ -2228,18 +2427,10 @@ function Uninstall-Suite {
         }
     }
 
-    $ndi = Get-NdiRegistration
-    if ($ndi) {
-        Set-SuiteProgress -Percent 50 -Status 'Uninstalling NDI Tools and Discovery Server'
-        Write-Step 'Uninstalling NDI Tools and Discovery Server'
-        $command = [string](Get-PropertyValue $ndi 'QuietUninstallString' '')
-        if (-not $command) { $command = [string](Get-PropertyValue $ndi 'UninstallString' '') }
-        if ($command) {
-            Invoke-UninstallCommand $command
-        } else {
-            Write-Warning 'NDI Tools is installed, but its uninstaller entry is missing.'
-        }
-    }
+    # NDI Tools is shared by independently deployed clients and Arena. Removing
+    # server ownership stops Discovery above; runtime removal remains in Windows Apps.
+    Write-Detail 'Shared NDI Tools and PC Agent were retained. Remove them separately in Windows Apps if no longer required.'
+    Save-ComponentReceipt 'server' -Remove
 
     Set-SuiteProgress -Percent 70 -Status 'Removing firewall rules and shortcuts'
     Write-Step 'Removing firewall rules and shortcuts'
@@ -2348,6 +2539,12 @@ try {
         $transcriptStarted = $true
     }
     switch ($Action) {
+        'CheckDownloads' {
+            $config = Get-SavedConfig
+            if (-not $config) { $config = [pscustomobject]@{WebPort=80;NdiDiscoveryPort=5959;DistroName=$script:ManagedDistroName} }
+            Assert-ServerDownloads $config -SourcesOnly
+            Set-OperationOutcome 'Completed' 'Required Windows package sources are reachable. Setup rechecks and verifies packages before installation.'
+        }
         'Menu' {
             if ($LauncherMode) { throw 'The Windows installer requires an explicit action. Reopen Setup.' }
             Show-Menu

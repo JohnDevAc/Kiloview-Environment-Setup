@@ -1272,7 +1272,7 @@ namespace KiloLink.Setup
 
             networkConfigurationInProgress = true;
             SetNetworkControlsEnabled(false);
-            networkStatusLabel.Text = "Applying the static IPv4 configuration...";
+            networkStatusLabel.Text = "Checking required download sources before changing the network...";
             networkStatusLabel.ForeColor = SetupTheme.Accent;
 
             string adapterAlias = choice.Alias;
@@ -1289,6 +1289,9 @@ namespace KiloLink.Setup
                 Exception failure = null;
                 try
                 {
+                    Directory.CreateDirectory(launcherDirectory);
+                    SetupLauncher.ExtractInstaller(installerPath);
+                    RunHiddenPowerShell("& " + PowerShellLiteral(installerPath) + " -Action CheckDownloads -LauncherMode; if ($LASTEXITCODE -ne 0) { throw 'Download readiness failed. Network settings were retained; restore source access and retry.' }");
                     result = RunHiddenPowerShell(script);
                 }
                 catch (Exception exception)

@@ -335,6 +335,8 @@ namespace KiloLink.Setup
                 || !IsUsableServerAddress(normalized, 32)) { return "Choose a connected physical adapter with a usable IPv4 address."; }
             if (linkPortBox.Value % 2 != 0) { return "The device link port must be even; it also uses the next UDP port."; }
             if (webPortBox.Value == ndiPortBox.Value) { return "The web and NDI Discovery services must use different TCP ports."; }
+            if (ndiPortBox.Value != 5959) { return "Suite clients require NDI Discovery on TCP 5959."; }
+            if (webPortBox.Value == 8080 || webPortBox.Value == 8091 || webPortBox.Value == 8094) { return "TCP 8080, 8091 and 8094 are reserved for Arena, Job Configurator and PC Agent."; }
             return null;
         }
 
@@ -351,7 +353,7 @@ namespace KiloLink.Setup
             reviewText.Text = client
                 ? "Install the latest Windows NDI Tools from NDI's official website.\r\nInstall NDI Configurator PC Agent from JohnDevAc's latest production release.\r\n\r\nPC Agent setup opens in its own Windows window. Review its licence and select the production adapter there, then close that window to return here.\r\n\r\nExisting NDI Tools can be updated or repaired. Newer installed versions of either application are retained.\r\n\r\nInternet access is required. Windows may need to restart."
                 : removal
-                ? "Remove KiloLink Server Pro and all of its application data.\r\nRemove NDI Tools and NDI Discovery Server.\r\nDelete the dedicated KiloLink-Ubuntu distribution.\r\nRemove suite tasks, firewall rules, shortcuts and maintenance registration.\r\n\r\nWSL, unrelated distributions, shared .wslconfig and Windows IP settings are retained. The reusable installer and diagnostic logs are retained.\r\n\r\nBack up any KiloLink data you need before continuing."
+                ? "Remove KiloLink Server Pro and all of its application data.\r\nStop managed NDI Discovery startup.\r\nDelete the dedicated KiloLink-Ubuntu distribution.\r\nRemove suite tasks, firewall rules, shortcuts and maintenance registration.\r\n\r\nShared NDI Tools, PC Agent, WSL, unrelated distributions and Windows IP settings are retained. The reusable installer and diagnostic logs are retained.\r\n\r\nBack up any KiloLink data you need before continuing."
                 : selectedAction + " KiloLink Server Pro, NDI Tools and NDI Discovery Server\r\n\r\nPrimary adapter: " + preferredInterfaceAlias + "\r\nServer IPv4: " + preferredIpAddress
                     + "\r\nKiloLink web: http://" + preferredIpAddress + ":" + webPortBox.Value + "/"
                     + "\r\nDevice link: " + linkPortBox.Value + "–" + (linkPortBox.Value + 1) + " UDP"

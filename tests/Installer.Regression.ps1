@@ -73,6 +73,11 @@ $baseMocks = {
     function Get-ScheduledTask { $null }
     function Get-LanCandidates { [pscustomobject]@{Alias='Ethernet';Address='192.0.2.10';Dhcp=$false} }
     function Get-WslDistroNames { @() }
+    function Assert-PackageSource { }
+    function Prepare-ClientPackages { }
+    function Assert-ServerDownloads { }
+    function Assert-ServerOwner { }
+    function Assert-LinuxDownloads { }
 }
 $repairMocks = {
     function Ensure-WslFeatures { $true }
@@ -105,6 +110,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
             $PreferredIpAddress = ''
             $ConfigurationPath = ''
             $ConfirmRemoval = $false
+            $PackageDirectory = ''
             $AcceptLicenses = $false
             $script:StateRoot = Join-Path $testRoot ([guid]::NewGuid().ToString('N'))
             $script:ConfigPath = Join-Path $script:StateRoot 'installer-config.json'
@@ -121,13 +127,75 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 }
 
 try {
+    Test-Case 'Client stages both packages before any installation and stops on unavailable downloads' {
+        Invoke-Expression ($ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Prepare-ClientPackages' }, $true).Extent.Text)
+        $AcceptLicenses = $true
+        $script:Calls = [Collections.Generic.List[string]]::new()
+        function Install-PcAgent { param([switch]$PrepareOnly) $script:Calls.Add("Agent-$PrepareOnly"); if (-not $PrepareOnly) { throw 'Installation must remain gated' }; $true }
+        function Install-NdiTools { param([switch]$ClientOnly,[switch]$PrepareOnly) $script:Calls.Add("NDI-$PrepareOnly"); throw 'NDI source offline' }
+        function Save-ComponentReceipt { throw 'No role should be recorded before prerequisites pass' }
+        Assert-Throws { Install-ClientTools } 'NDI source offline'
+        Assert-True (($script:Calls -join ',') -eq 'Agent-True,NDI-True') 'Client installed a component before all downloads were ready.'
+    }
+    Test-Case 'Server unavailable package gates features and configuration writes' {
+        Invoke-Expression ($ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-ServerDownloads' }, $true).Extent.Text)
+        function Test-WslRuntime { $false }
+        function Invoke-RestMethod { throw 'fixture DNS failure' }
+        function Save-Config { throw 'Unexpected configuration mutation' }
+        function Ensure-WslFeatures { throw 'Unexpected Windows mutation' }
+        Assert-Throws { Repair-Suite -RequestedConfiguration (New-Config) -LicenseAccepted } 'WSL prerequisites cannot be downloaded'
+    }
+    Test-Case 'Readiness rejects captive portals and inaccessible package sources' {
+        Invoke-Expression ($ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-PackageSource' }, $true).Extent.Text)
+        function Invoke-WebRequest { @{Headers=@{'Content-Type'='text/html'}} }
+        Assert-Throws { Assert-PackageSource 'https://example.invalid/package.exe' } 'web page instead of a package'
+        function Invoke-WebRequest { throw 'Proxy authentication required' }
+        Assert-Throws { Assert-PackageSource 'https://example.invalid/package.exe' } 'Required download unavailable from example.invalid'
+    }
+    Test-Case 'Client and server receipt roles survive independent removal' {
+        Save-ComponentReceipt 'client'
+        Save-ComponentReceipt 'server'
+        $path = Join-Path $script:StateRoot 'installation-components.json'
+        Assert-True (@((Get-Content $path -Raw | ConvertFrom-Json).roles).Count -eq 2) 'Combined role was lost.'
+        Save-ComponentReceipt 'server' -Remove
+        Assert-True (((Get-Content $path -Raw | ConvertFrom-Json).roles -join ',') -eq 'client') 'Server removal erased the Client role.'
+    }
+    Test-Case 'Suite ports and prerelease ordering are consistent' {
+        Assert-True ((Compare-PcAgentVersion '0.7.0-dev.2' '0.7.0') -lt 0) 'Development build collapsed to stable.'
+        Assert-True ((Compare-PcAgentVersion '0.7.0-dev.10' '0.7.0-dev.2') -gt 0) 'Development version ordering is lexical.'
+        foreach ($port in @(8080,8091,8094)) { $config = New-Config; $config.WebPort = $port; Assert-Throws { Assert-SuitePorts $config } 'reserved' }
+        $config = New-Config; $config.NdiDiscoveryPort = 5960; Assert-Throws { Assert-SuitePorts $config } '5959'
+    }
+    Test-Case 'Server ownership and WSL-context readiness fail before dependent changes' {
+        Invoke-Expression ($ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-ServerOwner' }, $true).Extent.Text)
+        function Get-InteractiveUserSid { 'different-desktop-owner' }
+        Assert-Throws { Assert-ServerOwner } 'signed-in administrator desktop'
+        Invoke-Expression ($ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-LinuxDownloads' }, $true).Extent.Text)
+        function Invoke-WslScript {
+            param($Distro,$Script)
+            Assert-True ($Distro -eq 'Fixture' -and $Script -match 'registry-1.docker.io' -and $Script -match 'apt-get' -and $Script -notmatch 'apt-get install') 'Linux gate did not use the actual package context.'
+            throw 'Fixture WSL DNS failure'
+        }
+        Assert-Throws { Assert-LinuxDownloads 'Fixture' } 'unavailable inside WSL'
+    }
+    Test-Case 'Explicit local client packages never fall back to the internet' {
+        $PackageDirectory = Join-Path $testRoot 'offline-input'
+        New-Item -ItemType Directory -Path $PackageDirectory -Force | Out-Null
+        $source = Join-Path $PackageDirectory 'NDI-Tools.exe'
+        Set-Content -LiteralPath $source -Value 'offline fixture'
+        function Assert-PackageSource { throw 'Offline path attempted an internet probe' }
+        $destination = Join-Path $testRoot 'offline-copy.exe'
+        Download-FileWithProgress -Uri $script:NdiToolsUrl -Destination $destination -BasePercent 0 -PercentSpan 1 -Status 'Fixture'
+        Assert-True ((Get-Content $destination -Raw) -eq (Get-Content $source -Raw)) 'Explicit package bytes were not retained.'
+        Assert-Throws { Download-FileWithProgress -Uri 'https://github.com/fixture/PC-Agent.zip' -Destination $destination -BasePercent 0 -PercentSpan 1 -Status 'Fixture' } 'missing|offline|Offline'
+    }
     Test-Case 'Native request validates typed settings without saving them' {
         $requestFile = Join-Path $testRoot 'valid-request.json'
         $request = New-Config
-        $request.WebPort = 8080
+        $request.WebPort = 8088
         $request | ConvertTo-Json | Set-Content -LiteralPath $requestFile
         $config = Get-RequestedSuiteConfig $requestFile
-        Assert-True ($config.WebPort -eq 8080 -and $config.LinkPort -eq 50000) 'Requested ports were lost.'
+        Assert-True ($config.WebPort -eq 8088 -and $config.LinkPort -eq 50000) 'Requested ports were lost.'
         Assert-True (-not (Test-Path -LiteralPath $script:ConfigPath)) 'Reviewing a request changed saved settings.'
     }
     Test-Case 'Native request rejects invalid ports, addresses, and stale adapters' {
@@ -237,7 +305,7 @@ try {
         $old = New-Config
         Save-Config $old
         $request = New-Config
-        $request.WebPort = 8080
+        $request.WebPort = 8088
         function Confirm-LicenseAcceptance { $false }
         Repair-Suite -RequestedConfiguration $request
         Assert-True ((Get-SavedConfig).WebPort -eq 80) 'Cancelled request overwrote previous settings.'
@@ -248,7 +316,7 @@ try {
         $LauncherMode = $true
         Save-Config (New-Config)
         $request = New-Config
-        $request.WebPort = 8080
+        $request.WebPort = 8088
         $ConfigurationPath = Join-Path $testRoot 'update-request.json'
         $request | ConvertTo-Json | Set-Content -LiteralPath $ConfigurationPath
         function Get-UbuntuDistro { 'KiloLink-Ubuntu' }
@@ -256,7 +324,7 @@ try {
         function Invoke-WslScript { }
         function Read-InstallerInput { throw 'Unexpected text prompt' }
         Update-Suite
-        Assert-True ((Get-SavedConfig).WebPort -eq 8080 -and $script:OperationOutcome -eq 'Completed') 'Update did not apply the requested web port.'
+        Assert-True ((Get-SavedConfig).WebPort -eq 8088 -and $script:OperationOutcome -eq 'Completed') 'Update did not apply the requested web port.'
     }
     Test-Case 'Restarted update resumes updating and clears continuation after success' {
         Save-Config (New-Config)
@@ -283,7 +351,7 @@ try {
     Test-Case 'Cancelled repair preserves the previous configuration' {
         $config = New-Config
         Save-Config $config
-        function Read-SuiteConfig { $new = New-Config; $new.WebPort = 8080; $new }
+        function Read-SuiteConfig { $new = New-Config; $new.WebPort = 8088; $new }
         function Confirm-LicenseAcceptance { $false }
         Repair-Suite
         Assert-True ((Get-SavedConfig).WebPort -eq 80) 'Cancellation overwrote the applied port.'
@@ -292,7 +360,7 @@ try {
     Test-Case 'Repair retries settings saved before an interrupted attempt' {
         . $repairMocks
         $config = New-Config
-        $config.WebPort = 8080
+        $config.WebPort = 8088
         Save-Config $config
         Repair-Suite -UseSavedConfiguration -LicenseAccepted
         Assert-True ($script:Recreated -eq 1) 'The stale container was not recreated.'
@@ -345,7 +413,7 @@ try {
         function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='6.0.0'} }
         function Get-NdiDiscoveryExe { if ($script:NdiInstalled) { 'C:\Fake\NDI Discovery Service.exe' } }
         function Download-FileWithProgress { $script:NdiDownloads++ }
-        function Get-InstallerSignatureWithProgress { [pscustomobject]@{Status='Valid'} }
+        function Get-InstallerSignatureWithProgress { [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='CN=NDI Fixture'}} }
         function Get-Item { [pscustomobject]@{VersionInfo=[pscustomobject]@{ProductVersion='6.0.0'}} }
         function Start-QuietInstaller {
             $script:NdiInstallCalls++
@@ -633,11 +701,11 @@ try {
         function Get-PcAgentBinaryVersion {
             param($Path,$Product)
             Assert-True ($Product -eq 'NDI Configurator PC Agent') 'The package product metadata does not match the real release.'
-            if ($script:AgentSetupRan -or ($script:AgentPayloadReady -and $Path -like '*\Payload\*')) { [version]'0.7.0' }
+            if ($script:AgentSetupRan -or ($script:AgentPayloadReady -and $Path -like '*\Payload-*\*')) { [version]'0.7.0' }
         }
         function Invoke-PcAgentSetup {
             param($Path)
-            Assert-True ($script:AgentPayloadReady -and $Path -like '*\Payload\NDI Configurator PC Agent Setup.exe') 'The native setup launched outside its verified package.'
+            Assert-True ($script:AgentPayloadReady -and $Path -like '*\Payload-*\NDI Configurator PC Agent Setup.exe') 'The native setup launched outside its verified package.'
             $script:AgentSetupRan = $true
             $true
         }
@@ -650,7 +718,9 @@ try {
         function Get-NetFirewallRule { }
         function Get-NetFirewallHyperVRule { }
         function New-NetFirewallRule {
-            param($DisplayName,$Group,$Direction,$Action,$Protocol,$LocalPort)
+            param($DisplayName,$Group,$Direction,$Action,$Protocol,$LocalPort,$Profile,$RemoteAddress,$LocalAddress,$EdgeTraversalPolicy)
+            Assert-True (($Profile -join ',') -eq 'Domain,Private' -and $RemoteAddress -eq 'LocalSubnet' -and $EdgeTraversalPolicy -eq 'Block') 'Environment firewall lost its LAN/profile boundary.'
+            if ($Protocol -eq 'TCP') { Assert-True ($LocalAddress -eq '192.0.2.10') 'TCP management traffic is not scoped to the selected local address.' }
             $script:Rules.Add([pscustomobject]@{Kind='Windows';Protocol=$Protocol;Ports=$LocalPort})
         }
         function New-NetFirewallHyperVRule {
@@ -966,7 +1036,7 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
             $formType.GetField('launcherDirectory',$instanceFlags).SetValue($form,$testRoot)
             $formType.GetField('preferredInterfaceAlias',$instanceFlags).SetValue($form,'Ethernet "AV"')
             $formType.GetField('preferredIpAddress',$instanceFlags).SetValue($form,'192.0.2.10')
-            $formType.GetField('webPortBox',$instanceFlags).GetValue($form).Value = 8080
+            $formType.GetField('webPortBox',$instanceFlags).GetValue($form).Value = 8088
             [void]$formType.GetMethod('ReviewSelectedAction',$instanceFlags).Invoke($form,@())
             $arguments = $formType.GetMethod('BuildOperationArguments',$instanceFlags)
             Assert-Throws { $arguments.Invoke($form,@()) } 'licence acceptance'
@@ -975,7 +1045,7 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
             Assert-True ($value -like ' -Action Install -AcceptLicenses -ConfigurationPath *') 'The worker still launches an interactive menu.'
             $request = $formType.GetField('requestPath',$instanceFlags).GetValue($form)
             $json = Get-Content -Raw -LiteralPath $request | ConvertFrom-Json
-            Assert-True ($json.PrimaryInterfaceAlias -eq 'Ethernet "AV"' -and $json.WebPort -eq 8080 -and $json.LinkPort -eq 50000 -and $json.NdiDiscoveryPort -eq 5959 -and $json.PublicIp -eq '192.0.2.10') 'Request serialization lost or changed a setting.'
+            Assert-True ($json.PrimaryInterfaceAlias -eq 'Ethernet "AV"' -and $json.WebPort -eq 8088 -and $json.LinkPort -eq 50000 -and $json.NdiDiscoveryPort -eq 5959 -and $json.PublicIp -eq '192.0.2.10') 'Request serialization lost or changed a setting.'
             [void]$formType.GetMethod('FinishWizardOperation',$instanceFlags).Invoke($form,@(0))
             Assert-True (-not (Test-Path -LiteralPath $request)) 'The completed request was not cleaned up.'
         } finally { $form.Dispose() }
