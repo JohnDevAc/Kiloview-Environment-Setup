@@ -13,7 +13,13 @@ $root = Split-Path -Parent $PSScriptRoot
 $testRoot = Join-Path $env:TEMP ('kilolink-tests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 $originalTemp = $env:TEMP
+$originalProgramData = $env:ProgramData
+$liveReceiptPath = Join-Path $originalProgramData 'KiloLink\installation-components.json'
+$liveReceiptHash = if (Test-Path -LiteralPath $liveReceiptPath) { (Get-FileHash -LiteralPath $liveReceiptPath -Algorithm SHA256).Hash } else { $null }
 $env:TEMP = $testRoot
+$env:ProgramData = Join-Path $testRoot 'program-data'
+New-Item -ItemType Directory -Path $env:ProgramData | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs') -Force | Out-Null
 $results = New-Object Collections.Generic.List[object]
 
 function Assert-True($Condition, [string]$Message) {
@@ -896,6 +902,8 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
         $output = & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixturePath -LauncherMode -Action InstallClient -AcceptLicenses
         Assert-True ($LASTEXITCODE -eq 0) 'The Client action failed without a server request.'
         Assert-True (($output -join "`n") -match '"outcome":"Completed"') 'The real client entry point did not report both tools installed.'
+        $fixtureReceipt = Join-Path $env:ProgramData 'KiloLink\installation-components.json'
+        Assert-True (Test-Path -LiteralPath $fixtureReceipt) 'The child Client fixture did not write its receipt inside the isolated ProgramData.'
         $output = & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixturePath -LauncherMode -Action InstallClient
         Assert-True ($LASTEXITCODE -eq 1 -and ($output -join "`n") -match '"outcome":"Failed"') 'Missing NDI acceptance was not rejected by the real entry point.'
     }
@@ -1174,8 +1182,11 @@ echo SERVICE_OK
     }
 } finally {
     $env:TEMP = $originalTemp
+    $env:ProgramData = $originalProgramData
     [Environment]::ExitCode = 0
 }
+$currentLiveReceiptHash = if (Test-Path -LiteralPath $liveReceiptPath) { (Get-FileHash -LiteralPath $liveReceiptPath -Algorithm SHA256).Hash } else { $null }
+Assert-True ($currentLiveReceiptHash -eq $liveReceiptHash) 'The regression suite changed the live deployment receipt.'
 $failed = @($results | Where-Object { -not $_.Passed })
 Write-Host ("{0}/{1} regression checks passed. Test artifacts: {2}" -f ($results.Count - $failed.Count),$results.Count,$testRoot)
 if ($failed.Count -gt 0) { exit 1 }
