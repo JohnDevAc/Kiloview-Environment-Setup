@@ -14,7 +14,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Install', 'Repair', 'Update', 'Uninstall', 'Resume')]
+    [ValidateSet('Menu', 'Install', 'InstallClient', 'Repair', 'Update', 'Uninstall', 'Resume')]
     [string]$Action = 'Menu',
     [switch]$AcceptLicenses,
     [switch]$AutoRestart,
@@ -327,7 +327,7 @@ function Register-MaintenanceEntry {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
     New-Item -Path $key -Force | Out-Null
     $values = @{
-        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.0.1'
+        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.0'
         Publisher = 'John Lightfoot'; DisplayIcon = $script:PersistentLauncherPath
         InstallLocation = $script:StateRoot
         UninstallString = ('"{0}" --uninstall' -f $script:PersistentLauncherPath)
@@ -1382,24 +1382,43 @@ function Get-InstallerSignatureWithProgress {
     }
 }
 
+function Get-CurrentNdiToolsUrl {
+    $page = Invoke-WebRequest -UseBasicParsing -Uri 'https://ndi.video/tools/' -TimeoutSec 60
+    $candidates = @($page.Links | ForEach-Object {
+        $url = $null
+        if ([Uri]::TryCreate([string](Get-PropertyValue $_ 'href' ''), [UriKind]::Absolute, [ref]$url) -and
+            $url.Scheme -eq 'https' -and $url.Host -eq 'downloads.ndi.tv' -and
+            [Uri]::UnescapeDataString($url.AbsolutePath) -match '^/Tools/NDI[^/]*Tools\.exe$') {
+            $url.AbsoluteUri
+        }
+    } | Select-Object -Unique)
+    if ($candidates.Count -ne 1) {
+        throw 'The current Windows NDI Tools download could not be identified on ndi.video/tools/. Try again later.'
+    }
+    return $candidates[0]
+}
+
 function Install-NdiTools {
-    param([switch]$UpdateOnly)
+    param([switch]$UpdateOnly, [switch]$ClientOnly)
+    $script:NdiRestartRequired = $false
     $registration = Get-NdiRegistration
     if ($UpdateOnly -and -not $registration) {
         throw 'NDI Tools is missing. Choose Repair / Reconfigure to install it.'
     }
-    $componentsMissing = -not (Get-NdiDiscoveryExe)
-    if ($registration -and -not $UpdateOnly -and -not $componentsMissing) {
+    $componentsMissing = -not $ClientOnly -and -not (Get-NdiDiscoveryExe)
+    if ($registration -and -not $UpdateOnly -and -not $ClientOnly -and -not $componentsMissing) {
         $installedVersion = Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' ''))
         Write-Detail "NDI Tools $installedVersion is already installed." Green
         return
     }
 
     Write-Step 'Checking the current NDI Tools package'
+    $downloadUrl = if ($ClientOnly) { Get-CurrentNdiToolsUrl } else { $script:NdiToolsUrl }
     $downloadDir = Join-Path $env:TEMP 'KiloLinkSuite'
     $installer = Join-Path $downloadDir 'NDI-Tools.exe'
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-    Download-FileWithProgress -Uri $script:NdiToolsUrl -Destination $installer -BasePercent $script:ProgressPercent -PercentSpan 8 -Status 'Downloading NDI Tools'
+    $downloadSpan = if ($ClientOnly) { 35 } else { 8 }
+    Download-FileWithProgress -Uri $downloadUrl -Destination $installer -BasePercent $script:ProgressPercent -PercentSpan $downloadSpan -Status 'Downloading NDI Tools'
 
     Set-SuiteProgress -Percent ([Math]::Min(90, $script:ProgressPercent + 1)) -Status 'Verifying the NDI Tools signature'
     $signature = Get-InstallerSignatureWithProgress -Path $installer
@@ -1409,6 +1428,8 @@ function Install-NdiTools {
     $installedVersion = if ($registration) { Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' '')) } else { $null }
     $packageVersion = Convert-ToVersion ((Get-Item -LiteralPath $installer).VersionInfo.ProductVersion)
     $install = $componentsMissing -or -not $registration -or -not $installedVersion -or -not $packageVersion -or $packageVersion -gt $installedVersion
+    # Re-running client setup repairs the current package without requiring any server components.
+    if ($ClientOnly -and $packageVersion -eq $installedVersion) { $install = $true }
     if (-not $install) {
         Write-Detail "NDI Tools $installedVersion is current." Green
         Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
@@ -1416,7 +1437,9 @@ function Install-NdiTools {
     }
 
     Set-SuiteProgress -Percent ([Math]::Min(92, $script:ProgressPercent + 2)) -Status 'Installing NDI Tools'
-    $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-') -PassThru -WindowStyle Hidden
+    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-')
+    if ($ClientOnly) { $arguments += '/RESTARTEXITCODE=3010' }
+    $process = Start-Process -FilePath $installer -ArgumentList $arguments -PassThru -WindowStyle Hidden
     while (-not $process.HasExited) {
         Update-SuiteProgressPulse
         Start-Sleep -Milliseconds 300
@@ -1429,10 +1452,188 @@ function Install-NdiTools {
     if (-not (Get-NdiRegistration)) {
         throw 'NDI Tools finished installing but was not detected in Programs and Features.'
     }
-    if (-not (Get-NdiDiscoveryExe)) {
+    if (-not $ClientOnly -and -not (Get-NdiDiscoveryExe)) {
         throw 'NDI Tools finished installing but its Discovery Service executable is still missing.'
     }
+    $script:NdiRestartRequired = $process.ExitCode -eq 3010
     Write-Detail 'NDI Tools installed or updated.' Green
+}
+
+function Get-PcAgentRelease {
+    $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/JohnDevAc/Kiloview-PC-Onboarding/releases/latest' -TimeoutSec 60 -Headers @{
+        'User-Agent' = 'Kiloview-Environment-Setup'; Accept = 'application/vnd.github+json'
+    }
+    if ($release.draft -or $release.prerelease -or $release.target_commitish -ne 'main' -or
+        $release.tag_name -notmatch '^v(\d+\.\d+\.\d+)$') { throw 'The PC Agent production release could not be verified.' }
+    $version = [version]$Matches[1]
+    $name = 'NDI-Configurator-PC-Agent-win-x64.zip'
+    $assets = @($release.assets | Where-Object name -eq $name)
+    if ($assets.Count -ne 1) { throw 'The complete PC Agent Windows package is missing from its production release.' }
+    $asset = $assets[0]
+    $expectedUrl = 'https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/download/' + $release.tag_name + '/' + $name
+    if ($asset.browser_download_url -cne $expectedUrl -or $asset.size -le 0 -or $asset.size -gt 512MB -or
+        (Get-PropertyValue $asset 'digest' '') -notmatch '^sha256:([a-fA-F0-9]{64})$') {
+        throw 'The PC Agent download URL, size or SHA-256 digest is invalid.'
+    }
+    return [pscustomobject]@{ Version = $version; Url = $expectedUrl; Size = [long]$asset.size; Hash = $Matches[1] }
+}
+
+function Expand-PcAgentPackage {
+    param([string]$Archive, [string]$Destination)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $root = [IO.Path]::GetFullPath($Destination).TrimEnd('\') + '\'
+    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        $paths = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        $total = 0L
+        if ($zip.Entries.Count -gt 4096) { throw 'The PC Agent archive has too many entries.' }
+        # Validate every destination before extracting any package content.
+        foreach ($entry in $zip.Entries) {
+            $relative = $entry.FullName.Replace('/', '\')
+            $parts = $relative.TrimEnd('\').Split('\')
+            $target = [IO.Path]::GetFullPath((Join-Path $Destination $relative))
+            # Spaces within normal filenames are supported; trailing spaces and device paths are not.
+            $unsafePart = @($parts | Where-Object {
+                $_ -in @('', '.', '..') -or $_ -match '[:*?"<>|]|[. ]$' -or
+                $_ -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$'
+            })
+            $total += $entry.Length
+            if ($relative.StartsWith('\') -or $unsafePart.Count -gt 0 -or
+                -not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or
+                -not $paths.Add($target) -or $total -gt 1GB -or
+                (($entry.ExternalAttributes -shr 16) -band 0xF000) -eq 0xA000) {
+                throw 'The PC Agent archive contains unsafe or duplicate paths.'
+            }
+        }
+        foreach ($entry in $zip.Entries) {
+            $target = [IO.Path]::GetFullPath((Join-Path $Destination $entry.FullName))
+            if ([string]::IsNullOrEmpty($entry.Name)) { [IO.Directory]::CreateDirectory($target) | Out-Null }
+            else {
+                [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target)) | Out-Null
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $false)
+            }
+        }
+    } finally { $zip.Dispose() }
+}
+
+function Get-PcAgentBinaryVersion {
+    param([string]$Path, [string]$Product)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $info = (Get-Item -LiteralPath $Path).VersionInfo
+    if ($info.ProductName -ne $Product) { return $null }
+    $version = Convert-ToVersion $info.ProductVersion
+    if (-not $version) { return $null }
+    return [version]::new($version.Major, $version.Minor, [Math]::Max(0, $version.Build))
+}
+
+function Test-PcAgentConfigured {
+    $statePath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'NDI Configurator\PC Agent\agent-state.json'
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return $false }
+    try {
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $address = $null
+        return ([int](Get-PropertyValue $state 'schemaVersion' 0) -eq 1 -and
+            -not [string]::IsNullOrWhiteSpace([string](Get-PropertyValue $state 'adapterId' '')) -and
+            [Net.IPAddress]::TryParse([string](Get-PropertyValue $state 'address' ''), [ref]$address) -and
+            $address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork)
+    } catch { return $false }
+}
+
+function Invoke-PcAgentSetup {
+    param([string]$Path)
+    Set-SuiteProgress -Percent 90 -Status 'Complete the PC Agent setup window, then close it to return here'
+    $process = Start-Process -FilePath $Path -WorkingDirectory (Split-Path -Parent $Path) -PassThru -WindowStyle Normal
+    try {
+        while (-not $process.HasExited) {
+            Update-SuiteProgressPulse
+            Start-Sleep -Milliseconds 300
+            $process.Refresh()
+        }
+        if ($process.ExitCode -eq 2) { return $false }
+        if ($process.ExitCode -ne 0) { throw "PC Agent setup failed with exit code $($process.ExitCode)." }
+        return Test-PcAgentConfigured
+    } finally { $process.Dispose() }
+}
+
+function Install-PcAgent {
+    if (-not [Environment]::Is64BitOperatingSystem) { throw 'NDI Configurator PC Agent requires 64-bit Windows.' }
+    Set-SuiteProgress -Percent 50 -Status 'Checking the PC Agent production release'
+    $release = Get-PcAgentRelease
+    $installRoot = Join-Path $env:ProgramFiles 'NDI Configurator\PC Agent'
+    $installedSetup = Join-Path $installRoot 'NDI Configurator PC Agent Setup.exe'
+    $installedAgent = Join-Path $installRoot 'NDI Configurator PC Agent.exe'
+    $setupVersion = Get-PcAgentBinaryVersion $installedSetup 'NDI Configurator PC Agent'
+    $agentVersion = Get-PcAgentBinaryVersion $installedAgent 'NDI Configurator PC Agent'
+    if ($setupVersion -and $agentVersion -and $setupVersion -ge $release.Version -and $agentVersion -ge $release.Version) {
+        if (Test-PcAgentConfigured) {
+            Write-Detail "PC Agent $agentVersion is already installed and configured." Green
+            return $true
+        }
+        return Invoke-PcAgentSetup $installedSetup
+    }
+    # Never overwrite one half of a newer independent installation with an older release.
+    if (($setupVersion -and $setupVersion -gt $release.Version) -or ($agentVersion -and $agentVersion -gt $release.Version)) {
+        throw 'A newer PC Agent installation is incomplete. Repair it using its own matching release package.'
+    }
+    $cacheRoot = [IO.Path]::GetFullPath((Join-Path $env:TEMP 'KiloLinkSuite'))
+    $packageRoot = Join-Path $cacheRoot ('PC-Agent-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+    try {
+        $archive = Join-Path $packageRoot 'PC-Agent.zip'
+        Download-FileWithProgress -Uri $release.Url -Destination $archive -BasePercent 52 -PercentSpan 30 -Status 'Downloading NDI Configurator PC Agent'
+        if ((Get-Item -LiteralPath $archive).Length -ne $release.Size -or
+            (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $release.Hash) {
+            throw 'The PC Agent package size or SHA-256 did not match its production release.'
+        }
+        $payload = Join-Path $packageRoot 'Payload'
+        Expand-PcAgentPackage -Archive $archive -Destination $payload
+        $setup = Join-Path $payload 'NDI Configurator PC Agent Setup.exe'
+        $agent = Join-Path $payload 'Agent\NDI Configurator PC Agent.exe'
+        if ((Get-PcAgentBinaryVersion $setup 'NDI Configurator PC Agent') -ne $release.Version -or
+            (Get-PcAgentBinaryVersion $agent 'NDI Configurator PC Agent') -ne $release.Version -or
+            -not (Test-Path -LiteralPath (Join-Path $payload 'LICENSE.md') -PathType Leaf)) {
+            throw 'The PC Agent package is incomplete or its product/version does not match the release.'
+        }
+        $completed = Invoke-PcAgentSetup $setup
+        if (-not $completed) { return $false }
+        $setupVersion = Get-PcAgentBinaryVersion $installedSetup 'NDI Configurator PC Agent'
+        $agentVersion = Get-PcAgentBinaryVersion $installedAgent 'NDI Configurator PC Agent'
+        if (-not $setupVersion -or -not $agentVersion -or $setupVersion -lt $release.Version -or $agentVersion -lt $release.Version) {
+            throw 'PC Agent setup closed before the expected application files were installed.'
+        }
+        return $true
+    } finally {
+        $resolvedPackage = [IO.Path]::GetFullPath($packageRoot)
+        if (-not $resolvedPackage.StartsWith($cacheRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'PC Agent cleanup path is outside the download cache.'
+        }
+        Remove-Item -LiteralPath $resolvedPackage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Install-ClientTools {
+    if (-not $AcceptLicenses) { throw 'Review and accept the NDI Tools licence before installing client tools.' }
+    Set-OperationOutcome 'Running' 'Installing NDI Tools and PC Agent for this client.'
+    Start-SuiteProgress -Activity 'Installing client tools' -Status 'Checking the current official download'
+    try {
+        Install-NdiTools -ClientOnly
+        $ndiNeedsRestart = $script:NdiRestartRequired
+        $agentCompleted = Install-PcAgent
+        if (-not $agentCompleted) {
+            if ($ndiNeedsRestart) {
+                Set-OperationOutcome 'RestartRequired' 'NDI Tools needs a Windows restart. PC Agent setup was not completed; run Client setup again afterwards.'
+            } else {
+                Set-OperationOutcome 'Cancelled' 'NDI Tools is installed. PC Agent setup was not completed; run Client setup again to finish.'
+            }
+            return
+        }
+        Set-SuiteProgress -Percent 100 -Status 'Client installation finished'
+        if ($ndiNeedsRestart) {
+            Set-OperationOutcome 'RestartRequired' 'NDI Tools and PC Agent are installed. Restart Windows to finish NDI Tools installation.'
+        } else {
+            Set-OperationOutcome 'Completed' 'NDI Tools and NDI Configurator PC Agent are installed.'
+        }
+    } finally { Stop-SuiteProgress }
 }
 
 function Configure-NdiServer {
@@ -2107,6 +2308,7 @@ try {
             }
             Repair-Suite -RequestedConfiguration (Get-RequestedSuiteConfig $ConfigurationPath) -LicenseAccepted
         }
+        'InstallClient' { Install-ClientTools }
         'Repair' {
             if (-not $AcceptLicenses) {
                 throw 'Unattended repair requires -AcceptLicenses after the vendor agreements have been reviewed and accepted.'

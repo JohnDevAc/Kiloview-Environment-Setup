@@ -28,6 +28,15 @@ repository and remain subject to their separate vendor terms.
 
 NDI® is a registered trademark of Vizrt NDI AB.
 
+## NDI Configurator PC Agent
+
+Client setup downloads the unmodified complete Windows release from
+<https://github.com/JohnDevAc/Kiloview-PC-Onboarding>. The PC Agent package is
+not embedded in this repository or relicensed under MIT. It remains a separate
+product with its own proprietary licence, artwork, installation and update feed.
+Its native setup presents its licence before a new installation. See
+<https://github.com/JohnDevAc/Kiloview-PC-Onboarding/blob/main/LICENSE.md>.
+
 ## Platform components
 
 Windows, Windows Subsystem for Linux, Ubuntu, Docker Engine, containerd, and

@@ -53,6 +53,8 @@ try {
     $form.ShowInTaskbar = $false
     $form.Show()
     [Windows.Forms.Application]::DoEvents()
+    Render '00-server-or-client'
+    Call 'ShowServerHome'
     (Field 'installChoice').Enabled = $true
     (Field 'installChoice').Checked = $true
     (Field 'repairChoice').Enabled = $false
@@ -81,5 +83,15 @@ try {
     $form.ClientSize = [Drawing.Size]::new(640,480)
     (Field 'settingsPanel').AutoScrollPosition = [Drawing.Point]::new(160,300)
     Render '07-small-window-scrolled'
+    Call 'ShowHome'
+    (Field 'clientChoice').Checked = $true
+    Call 'ChooseRole'
+    Render '08-client-review'
+    Call 'ShowProgressView'
+    (Field 'webLink').Visible = $false
+    Call 'HandleOutputLine' @('@@KILOVIEW_EVENT@@{"type":"outcome","outcome":"Completed","message":"NDI Tools and NDI Configurator PC Agent are installed."}')
+    Call 'ApplyInstallerOutcome' @(0)
+    Call 'FinishWizardOperation' @(0)
+    Render '09-client-complete'
 } finally { $form.Dispose(); [Environment]::ExitCode = 0 }
 Write-Output $OutputDirectory
