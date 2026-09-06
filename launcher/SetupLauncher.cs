@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("John Lightfoot")]
 [assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 John Lightfoot")]
-[assembly: AssemblyVersion("2.0.1.0")]
-[assembly: AssemblyFileVersion("2.0.1.0")]
+[assembly: AssemblyVersion("2.1.0.0")]
+[assembly: AssemblyFileVersion("2.1.0.0")]
 
 namespace KiloLink.Setup
 {
@@ -321,6 +321,7 @@ namespace KiloLink.Setup
     {
         private enum LauncherView
         {
+            Role,
             Network,
             Welcome,
             Settings,
@@ -390,7 +391,7 @@ namespace KiloLink.Setup
             legacyPersistentLauncherPath = Path.Combine(launcherDirectory, "KiloLink-Environment-Setup.exe");
             installerPath = Path.Combine(launcherDirectory, "Install-KiloLinkSuite.ps1");
             logPath = Path.Combine(programData, "KiloLink", "setup-launcher.log");
-            currentView = LauncherView.Welcome;
+            currentView = LauncherView.Role;
 
             Text = "Kiloview Environment Setup";
             StartPosition = FormStartPosition.CenterScreen;
@@ -426,7 +427,7 @@ namespace KiloLink.Setup
             title.Location = new Point(122, 27);
 
             Label subtitle = new Label();
-            subtitle.Text = "KiloLink Server Pro + NDI environment";
+            subtitle.Text = "Server and client setup for KiloLink + NDI";
             subtitle.Font = new Font("Segoe UI", 10F);
             subtitle.ForeColor = SetupTheme.Papaya;
             subtitle.AutoSize = true;
@@ -523,7 +524,7 @@ namespace KiloLink.Setup
             Button networkCloseButton = CreateButton("Back", false);
             networkCloseButton.Location = new Point(556, 365);
             networkCloseButton.Size = new Size(172, 44);
-            networkCloseButton.Click += delegate { ShowHome(); };
+            networkCloseButton.Click += delegate { ShowServerHome(); };
 
             networkStatusLabel = new Label();
             networkStatusLabel.Text = "Select the adapter that will carry KiloLink and NDI traffic.";
@@ -637,7 +638,7 @@ namespace KiloLink.Setup
             Controls.Add(welcomePanel);
             Controls.Add(progressPanel);
             Controls.Add(headerPanel);
-            AcceptButton = startButton;
+            AcceptButton = roleNextButton;
 
             pulseTimer = new Timer();
             pulseTimer.Interval = 90;
@@ -651,13 +652,6 @@ namespace KiloLink.Setup
                 {
                     ShowProgressView();
                     BeginInvoke((MethodInvoker)StartInstaller);
-                };
-            }
-            else
-            {
-                Shown += delegate
-                {
-                    BeginInvoke((MethodInvoker)LoadSavedSettings);
                 };
             }
         }
@@ -1531,6 +1525,7 @@ namespace KiloLink.Setup
 
             progressViewVisible = true;
             currentView = LauncherView.Progress;
+            rolePanel.Visible = false;
             networkPanel.Visible = false;
             welcomePanel.Visible = false;
             settingsPanel.Visible = false;
@@ -1614,10 +1609,10 @@ namespace KiloLink.Setup
                 installerProcess.StandardInput.Close();
                 installerProcess.BeginOutputReadLine();
                 installerProcess.BeginErrorReadLine();
-                activityLabel.Text = autoResume ? "Resuming setup" : selectedAction + " in progress";
+                activityLabel.Text = autoResume ? "Resuming setup" : selectedAction == "InstallClient" ? "Installing client tools" : selectedAction + " in progress";
                 progressStatusLabel.Text = autoResume
                     ? "Windows and WSL state are being verified."
-                    : "Applying the settings you reviewed.";
+                    : selectedAction == "InstallClient" ? "Checking the latest NDI Tools download." : "Applying the settings you reviewed.";
                 // Subscribe to process completion only after both output readers
                 // are active, so the final outcome can be drained before rendering.
                 installerProcess.EnableRaisingEvents = true;
@@ -1771,7 +1766,9 @@ namespace KiloLink.Setup
                 Environment.ExitCode = 3010;
                 activityLabel.Text = "Restart required";
                 activityLabel.ForeColor = SetupTheme.Accent;
-                progressStatusLabel.Text = "Restart Windows and sign back in to continue setup.";
+                progressStatusLabel.Text = selectedAction == "InstallClient"
+                    ? operationMessage
+                    : "Restart Windows and sign back in to continue setup.";
             }
             else if (String.Equals(operationOutcome, "Completed", StringComparison.OrdinalIgnoreCase))
             {

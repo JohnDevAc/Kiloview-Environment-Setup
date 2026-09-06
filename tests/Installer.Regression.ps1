@@ -105,6 +105,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
             $PreferredIpAddress = ''
             $ConfigurationPath = ''
             $ConfirmRemoval = $false
+            $AcceptLicenses = $false
             $script:StateRoot = Join-Path $testRoot ([guid]::NewGuid().ToString('N'))
             $script:ConfigPath = Join-Path $script:StateRoot 'installer-config.json'
             $script:StartupScriptPath = Join-Path $script:StateRoot 'watchdog.ps1'
@@ -375,6 +376,226 @@ try {
         Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 0) 'A current healthy package was reinstalled.'
     }
 
+    Test-Case 'Client resolves the current official NDI download including a future major version' {
+        function Invoke-WebRequest {
+            [pscustomobject]@{Links=@(
+                [pscustomobject]@{name='anchor-without-href'},
+                [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe'},
+                [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe'},
+                [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDIToolsInstaller.pkg'},
+                [pscustomobject]@{href='https://example.com/Tools/NDI%207%20Tools.exe'}
+            )}
+        }
+        Assert-True ((Get-CurrentNdiToolsUrl) -eq 'https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe') 'The client download is tied to an old NDI major version.'
+    }
+    Test-Case 'An ambiguous or missing NDI download fails instead of using a stale URL' {
+        function Invoke-WebRequest { [pscustomobject]@{Links=@()} }
+        Assert-Throws { Get-CurrentNdiToolsUrl } 'could not be identified'
+        function Invoke-WebRequest { [pscustomobject]@{Links=@(
+            [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe'},
+            [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%208%20Tools.exe'}
+        )} }
+        Assert-Throws { Get-CurrentNdiToolsUrl } 'could not be identified'
+    }
+    $clientNdiMocks = {
+        . $ndiMocks
+        function Get-CurrentNdiToolsUrl { 'https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe' }
+        function Get-NdiDiscoveryExe { throw 'Client must not require Discovery Server' }
+        function Download-FileWithProgress { param($Uri) $script:NdiDownloads++; $script:DownloadedNdiUrl = $Uri }
+    }
+    Test-Case 'Fresh client installs NDI without requiring a server component' {
+        . $clientNdiMocks
+        function Get-NdiRegistration { if ($script:NdiInstalled) { [pscustomobject]@{DisplayVersion='6.0.0'} } }
+        Install-NdiTools -ClientOnly
+        Assert-True ($script:NdiInstallCalls -eq 1 -and $script:DownloadedNdiUrl -match 'NDI%207') 'Fresh client did not install the current package.'
+    }
+    Test-Case 'Client reinstalls the current NDI package to repair missing files' {
+        . $clientNdiMocks
+        $script:NdiInstalled = $true
+        Install-NdiTools -ClientOnly
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 1) 'Client bypassed latest-package validation or repair.'
+    }
+    Test-Case 'Client installs a newer NDI package and retains newer installed versions' {
+        . $clientNdiMocks
+        $script:NdiInstalled = $true
+        function Get-Item { [pscustomobject]@{VersionInfo=[pscustomobject]@{ProductVersion='7.0.0'}} }
+        Install-NdiTools -ClientOnly
+        Assert-True ($script:NdiInstallCalls -eq 1) 'An older NDI installation was not updated.'
+        $script:NdiInstallCalls = 0
+        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='8.0.0'} }
+        Install-NdiTools -ClientOnly
+        Assert-True ($script:NdiInstallCalls -eq 0) 'Client attempted to downgrade NDI Tools.'
+    }
+    Test-Case 'Client refuses unsigned NDI downloads before launching a process' {
+        . $clientNdiMocks
+        function Get-InstallerSignatureWithProgress { [pscustomobject]@{Status='NotSigned'} }
+        Assert-Throws { Install-NdiTools -ClientOnly } 'signature validation failed'
+        Assert-True ($script:NdiInstallCalls -eq 0) 'An unverified NDI package was executed.'
+    }
+    Test-Case 'Client preserves the NDI restart exit code without scheduling a server resume' {
+        . $clientNdiMocks
+        function Start-Process {
+            param($ArgumentList)
+            Assert-True ($ArgumentList -contains '/RESTARTEXITCODE=3010' -and $ArgumentList -contains '/NORESTART') 'NDI can restart without the Windows UI.'
+            [pscustomobject]@{HasExited=$true;ExitCode=3010}
+        }
+        Install-NdiTools -ClientOnly
+        Assert-True $script:NdiRestartRequired 'NDI restart requirement was discarded.'
+    }
+    $clientOperationMocks = {
+        $AcceptLicenses = $true
+        $script:ClientSteps = New-Object Collections.Generic.List[string]
+        function Install-NdiTools { param([switch]$ClientOnly) Assert-True $ClientOnly 'Client did not select NDI-only installation'; $script:ClientSteps.Add('NDI'); $script:NdiRestartRequired = $false }
+        function Install-PcAgent { $script:ClientSteps.Add('Agent'); $true }
+        function Save-Config { throw 'Client reached server configuration' }
+        function Get-RequestedSuiteConfig { throw 'Client requested server settings' }
+        function Get-LanCandidates { throw 'Client reached server networking' }
+        function Ensure-WslFeatures { throw 'Client reached WSL setup' }
+        function Configure-NdiServer { throw 'Client configured Discovery Server' }
+        function Install-FirewallRules { throw 'Client opened server firewall ports' }
+        function Register-MaintenanceEntry { throw 'Client registered server maintenance' }
+    }
+    Test-Case 'Client installs NDI then PC Agent without server setup or configuration writes' {
+        . $clientOperationMocks
+        Install-ClientTools
+        Assert-True (($script:ClientSteps -join ',') -eq 'NDI,Agent' -and $script:OperationOutcome -eq 'Completed') 'Client installation did not complete both components in order.'
+        Assert-True (-not (Test-Path -LiteralPath $script:ConfigPath)) 'Client saved a server configuration.'
+    }
+    Test-Case 'Client requires NDI licence acceptance before downloading or installing' {
+        . $clientOperationMocks
+        $AcceptLicenses = $false
+        Assert-Throws { Install-ClientTools } 'licence before installing'
+        Assert-True ($script:ClientSteps.Count -eq 0) 'Client changed the system before acceptance.'
+    }
+    Test-Case 'Cancelled PC Agent setup is not reported as successful client installation' {
+        . $clientOperationMocks
+        function Install-PcAgent { $false }
+        Install-ClientTools
+        Assert-True ($script:OperationOutcome -eq 'Cancelled' -and $script:OperationMessage -match 'PC Agent setup was not completed') 'Partial client setup was reported as complete.'
+    }
+    Test-Case 'Client reports an NDI restart after successful or cancelled agent setup' {
+        . $clientOperationMocks
+        function Install-NdiTools { $script:NdiRestartRequired = $true }
+        Install-ClientTools
+        Assert-True ($script:OperationOutcome -eq 'RestartRequired' -and (Get-InstallerExitCode) -eq 3010) 'Client restart was reported as completion.'
+        function Install-PcAgent { $false }
+        Install-ClientTools
+        Assert-True ($script:OperationOutcome -eq 'RestartRequired' -and $script:OperationMessage -match 'not completed') 'A pending restart obscured incomplete agent setup.'
+    }
+    Test-Case 'A failed PC Agent install cannot complete the client operation' {
+        . $clientOperationMocks
+        function Install-PcAgent { throw 'Fixture PC Agent download failure' }
+        Assert-Throws { Install-ClientTools } 'download failure'
+        Assert-True ($script:OperationOutcome -ne 'Completed') 'Agent failure was reported as success.'
+    }
+    $pcReleaseMocks = {
+        $script:PcRelease = [pscustomobject]@{draft=$false;prerelease=$false;target_commitish='main';tag_name='v0.7.0';assets=@(
+            [pscustomobject]@{name='NDI-Configurator-PC-Agent-win-x64.zip';size=100;digest=('sha256:' + ('a' * 64));browser_download_url='https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/download/v0.7.0/NDI-Configurator-PC-Agent-win-x64.zip'}
+        )}
+        function Invoke-RestMethod { $script:PcRelease }
+    }
+    Test-Case 'PC Agent selects the complete stable package from its own production feed' {
+        . $pcReleaseMocks
+        $release = Get-PcAgentRelease
+        Assert-True ($release.Version -eq [version]'0.7.0' -and $release.Size -eq 100 -and $release.Hash -eq ('a' * 64)) 'The PC Agent release metadata was changed or lost.'
+        $script:PcRelease.prerelease = $true
+        Assert-Throws { Get-PcAgentRelease } 'production release could not be verified'
+    }
+    Test-Case 'PC Agent rejects untrusted download URLs and missing SHA-256 metadata' {
+        . $pcReleaseMocks
+        $script:PcRelease.assets[0].browser_download_url = 'https://example.com/agent.zip'
+        Assert-Throws { Get-PcAgentRelease } 'download URL, size or SHA-256'
+        . $pcReleaseMocks
+        $script:PcRelease.assets[0].PSObject.Properties.Remove('digest')
+        Assert-Throws { Get-PcAgentRelease } 'download URL, size or SHA-256'
+    }
+    Test-Case 'PC Agent archive validation rejects traversal and duplicate paths before extraction' {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        foreach ($badPath in @('../escape.exe','/absolute.exe','nested/../../escape.exe','GOOD.txt','file.txt:stream','folder/NUL.txt')) {
+            $archive = Join-Path $testRoot ([guid]::NewGuid().ToString('N') + '.zip')
+            $zip = [IO.Compression.ZipFile]::Open($archive,[IO.Compression.ZipArchiveMode]::Create)
+            try { [void]$zip.CreateEntry('good.txt'); [void]$zip.CreateEntry($badPath) } finally { $zip.Dispose() }
+            $destination = Join-Path $testRoot ([guid]::NewGuid().ToString('N'))
+            Assert-Throws { Expand-PcAgentPackage $archive $destination } 'unsafe|not supported|illegal|format'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $destination 'good.txt'))) 'Extraction began before every path was validated.'
+        }
+    }
+    Test-Case 'PC Agent archive extraction supports normal Windows filenames and nested payloads' {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = Join-Path $testRoot 'valid-agent.zip'
+        $zip = [IO.Compression.ZipFile]::Open($archive,[IO.Compression.ZipArchiveMode]::Create)
+        try { [void]$zip.CreateEntry('NDI Configurator PC Agent Setup.exe'); [void]$zip.CreateEntry('Agent/NDI Configurator PC Agent.exe') } finally { $zip.Dispose() }
+        $destination = Join-Path $testRoot 'valid-agent-payload'
+        Expand-PcAgentPackage $archive $destination
+        Assert-True (Test-Path -LiteralPath (Join-Path $destination 'Agent\NDI Configurator PC Agent.exe')) 'The complete nested agent payload was not extracted.'
+    }
+    Test-Case 'PC Agent validates product identity and normalizes binary versions' {
+        function Test-Path { $true }
+        function Get-Item { [pscustomobject]@{VersionInfo=[pscustomobject]@{ProductName='NDI Configurator PC Agent';ProductVersion='0.7.0.0'}} }
+        Assert-True ((Get-PcAgentBinaryVersion 'fixture.exe' 'NDI Configurator PC Agent') -eq [version]'0.7.0') 'The valid four-part binary version was rejected.'
+        Assert-True ($null -eq (Get-PcAgentBinaryVersion 'fixture.exe' 'Other Product')) 'A different product passed identity validation.'
+    }
+    Test-Case 'PC Agent retains a configured newer independent installation without downloading' {
+        function Get-PcAgentRelease { [pscustomobject]@{Version=[version]'0.7.0'} }
+        function Get-PcAgentBinaryVersion { [version]'0.8.0' }
+        function Test-PcAgentConfigured { $true }
+        function Download-FileWithProgress { throw 'A newer PC Agent must not be downloaded over' }
+        Assert-True (Install-PcAgent) 'A newer configured PC Agent was rejected.'
+    }
+    Test-Case 'PC Agent refuses a corrupted release package before extraction or execution' {
+        function Get-PcAgentRelease { [pscustomobject]@{Version=[version]'0.7.0';Url='https://example.invalid/fixture';Size=7;Hash=('0' * 64)} }
+        function Get-PcAgentBinaryVersion { $null }
+        function Download-FileWithProgress { param($Destination) [IO.File]::WriteAllBytes($Destination,[Text.Encoding]::ASCII.GetBytes('fixture')) }
+        function Expand-PcAgentPackage { throw 'Corrupt package reached extraction' }
+        Assert-Throws { Install-PcAgent } 'size or SHA-256 did not match'
+    }
+    Test-Case 'PC Agent setup cancellation and an unconfigured zero exit remain incomplete' {
+        $script:AgentSetupExitCode = 2
+        function Start-Process {
+            param($WindowStyle)
+            Assert-True ($WindowStyle -eq 'Normal') 'The native PC Agent window was hidden.'
+            $process = [pscustomobject]@{HasExited=$true;ExitCode=$script:AgentSetupExitCode}
+            $process | Add-Member ScriptMethod Dispose { }
+            return $process
+        }
+        function Test-PcAgentConfigured { $false }
+        Assert-True (-not (Invoke-PcAgentSetup 'C:\Fixture\Agent Setup.exe')) 'EULA cancellation was treated as completed installation.'
+        $script:AgentSetupExitCode = 0
+        Assert-True (-not (Invoke-PcAgentSetup 'C:\Fixture\Agent Setup.exe')) 'Closing before adapter setup was treated as success.'
+        function Test-PcAgentConfigured { $true }
+        Assert-True (Invoke-PcAgentSetup 'C:\Fixture\Agent Setup.exe') 'Configured agent setup was rejected.'
+        $script:AgentSetupExitCode = 1
+        Assert-Throws { Invoke-PcAgentSetup 'C:\Fixture\Agent Setup.exe' } 'failed with exit code 1'
+    }
+    Test-Case 'PC Agent verifies the complete download and installed files around its native setup' {
+        $script:AgentSetupRan = $false
+        $script:AgentPayloadReady = $false
+        $bytes = [Text.Encoding]::ASCII.GetBytes('fixture')
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $script:AgentFixtureHash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','') } finally { $sha.Dispose() }
+        function Get-PcAgentRelease { [pscustomobject]@{Version=[version]'0.7.0';Url='https://example.invalid/fixture';Size=7;Hash=$script:AgentFixtureHash} }
+        function Download-FileWithProgress { param($Destination) [IO.File]::WriteAllBytes($Destination,[Text.Encoding]::ASCII.GetBytes('fixture')) }
+        function Expand-PcAgentPackage {
+            param($Archive,$Destination)
+            $script:AgentPayloadReady = $true
+            New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $Destination 'LICENSE.md') -Value 'Fixture licence'
+        }
+        function Get-PcAgentBinaryVersion {
+            param($Path,$Product)
+            Assert-True ($Product -eq 'NDI Configurator PC Agent') 'The package product metadata does not match the real release.'
+            if ($script:AgentSetupRan -or ($script:AgentPayloadReady -and $Path -like '*\Payload\*')) { [version]'0.7.0' }
+        }
+        function Invoke-PcAgentSetup {
+            param($Path)
+            Assert-True ($script:AgentPayloadReady -and $Path -like '*\Payload\NDI Configurator PC Agent Setup.exe') 'The native setup launched outside its verified package.'
+            $script:AgentSetupRan = $true
+            $true
+        }
+        Assert-True (Install-PcAgent) 'The complete verified agent flow did not finish.'
+        Assert-True $script:AgentSetupRan 'The agent was reported installed without launching setup.'
+    }
+
     Test-Case 'Firewall opens the complete streaming range in both firewalls' {
         $script:Rules = New-Object Collections.Generic.List[object]
         function Get-NetFirewallRule { }
@@ -524,6 +745,26 @@ function Update-Suite { throw 'Fixture update failure' }
         $events = @($output | Where-Object { $_ -like '@@KILOVIEW_EVENT@@*' } | ForEach-Object { $_.Substring('@@KILOVIEW_EVENT@@'.Length) | ConvertFrom-Json })
         Assert-True (@($events | Where-Object { $_.type -eq 'outcome' -and $_.outcome -eq 'Failed' }).Count -eq 1) 'The launcher failure event was missing.'
     }
+    Test-Case 'Real Client entry point needs no network request and enforces acceptance' {
+        $fixtureMocks = @'
+function Ensure-Administrator { }
+function Write-InstallerLog { }
+function Install-NdiTools { param([switch]$ClientOnly) if (-not $ClientOnly) { throw 'Not the client NDI path' }; $script:NdiRestartRequired = $false }
+function Install-PcAgent { $true }
+function Get-RequestedSuiteConfig { throw 'Client requested server configuration' }
+function Repair-Suite { throw 'Client entered server installation' }
+function Register-MaintenanceEntry { throw 'Client registered server maintenance' }
+
+'@
+        $source = [IO.File]::ReadAllText($installerPath)
+        $fixturePath = Join-Path $testRoot 'client-entry-fixture.ps1'
+        [IO.File]::WriteAllText($fixturePath,$source.Insert($entryOffset,$fixtureMocks),[Text.Encoding]::UTF8)
+        $output = & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixturePath -LauncherMode -Action InstallClient -AcceptLicenses
+        Assert-True ($LASTEXITCODE -eq 0) 'The Client action failed without a server request.'
+        Assert-True (($output -join "`n") -match '"outcome":"Completed"') 'The real client entry point did not report both tools installed.'
+        $output = & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixturePath -LauncherMode -Action InstallClient
+        Assert-True ($LASTEXITCODE -eq 1 -and ($output -join "`n") -match '"outcome":"Failed"') 'Missing NDI acceptance was not rejected by the real entry point.'
+    }
     Test-Case 'Generated watchdog task retries failures and preserves WSL exit codes' {
         $script:TaskEvents = New-Object Collections.Generic.List[string]
         function Stop-ManagedTask { $script:TaskEvents.Add('Stop') }
@@ -555,6 +796,58 @@ function Update-Suite { throw 'Fixture update failure' }
     $staticFlags = [Reflection.BindingFlags]'NonPublic,Static'
     $instanceFlags = [Reflection.BindingFlags]'NonPublic,Instance'
     $networkScript = $formType.GetMethod('BuildStaticNetworkScript',$staticFlags).Invoke($null,@('Ethernet','192.0.2.20',24,'192.0.2.1','192.0.2.1',''))
+    Test-Case 'Native setup starts with Server or Client before loading network adapters' {
+        $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
+        try {
+            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Role') 'The first screen is not the role choice.'
+            Assert-True ($formType.GetField('serverChoice',$instanceFlags).GetValue($form).Checked) 'Server is not the normal default.'
+            Assert-True ($formType.GetField('networkAdapterBox',$instanceFlags).GetValue($form).Items.Count -eq 0) 'Network discovery ran before the role choice.'
+            Assert-True ($form.AcceptButton -eq $formType.GetField('roleNextButton',$instanceFlags).GetValue($form)) 'Enter does not advance the role choice.'
+            [void]$formType.GetMethod('ChooseRole',$instanceFlags).Invoke($form,@())
+            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Welcome') 'Server did not retain its existing maintenance flow.'
+            Assert-True ($formType.GetField('networkAdapterBox',$instanceFlags).GetValue($form).Items.Count -eq 0) 'Server queried networking before the maintenance choice.'
+        } finally { $form.Dispose() }
+    }
+    Test-Case 'Native Client skips server networking and ports and reviews only client tools' {
+        $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
+        try {
+            $form.Opacity = 0
+            $form.ShowInTaskbar = $false
+            $form.Show()
+            $formType.GetField('clientChoice',$instanceFlags).GetValue($form).Checked = $true
+            [void]$formType.GetMethod('ChooseRole',$instanceFlags).Invoke($form,@())
+            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Review') 'Client did not skip server setup.'
+            Assert-True ($formType.GetField('networkAdapterBox',$instanceFlags).GetValue($form).Items.Count -eq 0) 'Client queried server adapters.'
+            $review = $formType.GetField('reviewText',$instanceFlags).GetValue($form).Text
+            Assert-True ($review -match 'NDI Tools' -and $review -match 'PC Agent' -and $review -notmatch 'KiloLink Server|Discovery Server|Server IPv4') 'Client review contains server configuration.'
+            $links = @($formType.GetField('reviewPanel',$instanceFlags).GetValue($form).Controls | Where-Object { $_ -is [Windows.Forms.LinkLabel] -and $_.Visible })
+            Assert-True ($links.Count -eq 2 -and @($links | Where-Object Name -eq 'kiloTerms').Count -eq 0) 'Client showed the wrong vendor licences.'
+            $arguments = $formType.GetMethod('BuildOperationArguments',$instanceFlags)
+            Assert-Throws { $arguments.Invoke($form,@()) } 'NDI Tools licence acceptance'
+            $formType.GetField('acceptanceBox',$instanceFlags).GetValue($form).Checked = $true
+            Assert-True ($arguments.Invoke($form,@()) -eq ' -Action InstallClient -AcceptLicenses') 'Client created a server request or launched a menu.'
+            Assert-True ($null -eq $formType.GetField('requestPath',$instanceFlags).GetValue($form)) 'Client wrote a network configuration request.'
+            [void]$formType.GetMethod('ShowHome',$instanceFlags).Invoke($form,@())
+            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Role') 'Back to setup skipped the role choice.'
+        } finally { $form.Dispose() }
+    }
+    Test-Case 'Native client completion and restart omit server endpoints and continuation promises' {
+        $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
+        try {
+            $formType.GetField('selectedAction',$instanceFlags).SetValue($form,'InstallClient')
+            $handler = $formType.GetMethod('HandleOutputLine',$instanceFlags)
+            [void]$handler.Invoke($form,@('@@KILOVIEW_EVENT@@{"type":"summary","webUrl":"http://192.0.2.10:80/","ndiEndpoint":"192.0.2.10:5959"}'))
+            Assert-True ($null -eq $formType.GetField('resultWebUrl',$instanceFlags).GetValue($form)) 'Client exposed a KiloLink login.'
+            [void]$handler.Invoke($form,@('@@KILOVIEW_EVENT@@{"type":"outcome","outcome":"Completed","message":"NDI Tools and PC Agent are installed."}'))
+            [void]$formType.GetMethod('FinishWizardOperation',$instanceFlags).Invoke($form,@(0))
+            $endpoint = $formType.GetField('endpointLabel',$instanceFlags).GetValue($form).Text
+            Assert-True ($endpoint -match 'onboard this PC' -and $endpoint -notmatch 'admin|5959') 'Client completion used server endpoints.'
+            [void]$handler.Invoke($form,@('@@KILOVIEW_EVENT@@{"type":"outcome","outcome":"RestartRequired","message":"Restart Windows to finish NDI Tools installation."}'))
+            [void]$formType.GetMethod('ApplyInstallerOutcome',$instanceFlags).Invoke($form,@(3010))
+            $status = $formType.GetField('progressStatusLabel',$instanceFlags).GetValue($form).Text
+            Assert-True ($status -match 'NDI Tools' -and $status -notmatch 'sign back in to continue') 'Client restart incorrectly promised server continuation.'
+        } finally { $form.Dispose(); [Environment]::ExitCode = 0 }
+    }
     Test-Case 'Native uninstall reaches review without requiring network configuration' {
         $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
         try {

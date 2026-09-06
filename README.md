@@ -1,6 +1,11 @@
 # Kiloview Environment Setup
 
-Kiloview Environment Setup is a single-file Windows 11 installer with a native Windows Forms interface for:
+Kiloview Environment Setup is a single-file Windows installer with a native
+Windows Forms interface. Its first screen lets you choose **Server** or **Client**.
+
+**Client** installs the latest official NDI Tools and
+[NDI Configurator PC Agent](https://github.com/JohnDevAc/Kiloview-PC-Onboarding).
+**Server** provides the full Windows 11 environment:
 
 - Kiloview KiloLink Server Pro
 - NDI Tools
@@ -14,28 +19,61 @@ Download `Kiloview-Environment-Setup.exe`, double-click it and approve the
 Windows Administrator prompt. All setup choices use native Windows controls;
 there are no embedded PowerShell menus or text responses to type.
 
-1. Choose **Install**, **Repair / reconfigure**, **Check for and install
+1. Choose **Server** or **Client**, then **Next**, before any networking decisions.
+   **Client** goes directly to the client review described below.
+2. For **Server**, choose **Install**, **Repair / reconfigure**, **Check for and install
    updates**, or **Uninstall**. Existing and partial installations are detected
    from saved configuration, the dedicated WSL registration and NDI Tools.
-2. For install, repair or update, select a physical Ethernet or Wi-Fi adapter.
+3. For server install, repair or update, select a physical Ethernet or Wi-Fi adapter.
    Review the prefilled IPv4 address, prefix length, gateway and DNS servers.
    Apply a static address, or use **Skip for now** for an existing stable address
    or DHCP reservation. Applying the address can briefly interrupt networking.
-3. Set the KiloLink web port, even device-link port pair and NDI Discovery port.
+4. Set the KiloLink web port, even device-link port pair and NDI Discovery port.
    Repair and update prefill saved values. When saved settings are missing,
    review the displayed port defaults; repair preserves any detected existing
    KiloLink data mount and vendor image.
-4. Review the settings and vendor licence links, tick the acceptance checkbox,
+5. Review the settings and vendor licence links, tick the acceptance checkbox,
    then choose **Install**, **Apply repair** or **Install updates**.
-5. Follow the native progress view and read-only activity log. At completion,
+6. Follow the native progress view and read-only activity log. At completion,
    open KiloLink, return to setup, or finish. When Windows needs a restart,
    choose **Restart Windows** or **Restart later**.
 
-Uninstall goes straight to a removal review, without requiring a working
+Server uninstall goes straight to a removal review, without requiring a working
 network adapter. Its confirmation checkbox explicitly acknowledges deletion
 of KiloLink application data before **Uninstall** is enabled.
 
-Static-address setup waits for Windows to confirm that the address is usable.
+### Client setup
+
+Client review lists NDI Tools and PC Agent, with their licence links. Accept the
+NDI Tools licence and choose **Install client tools**. Setup obtains the current
+Windows package from [NDI's official download page](https://ndi.video/tools/),
+checks its Windows signature and installs it. Re-running Client updates older
+NDI Tools or reinstalls the current package to restore missing files. A newer
+installed version is retained.
+
+Setup then obtains the latest stable PC Agent release from
+`JohnDevAc/Kiloview-PC-Onboarding`. It uses the complete Windows x64 package,
+including its .NET runtime, verifies GitHub's SHA-256 digest, size, archive paths
+and binary product/version, then opens the agent's own native Windows setup.
+Review its licence and select the production adapter there. Close that window
+when it reports the agent is ready to return to this installer's completion view.
+A configured PC Agent at the current or a newer version is retained.
+
+The agent keeps its own blue identity, tray UI, licence and update feed. Its setup
+configures its per-user startup and subnet-scoped discovery/monitoring firewall
+rules. Job onboarding is initiated from NDI Job Configurator. Cancelling agent
+setup is reported as incomplete client setup; NDI Tools remains installed and
+Client can be run again to finish.
+
+Client skips this installer's static-IP page and server port settings. It does
+not deploy KiloLink, WSL, Docker, the dedicated Discovery Server startup task,
+server firewall rules, server maintenance registration or server configuration.
+It can also be selected on a PC with an existing server configuration without
+changing that configuration. If NDI Tools needs a restart, the Windows UI offers
+**Restart Windows** or **Restart later**; no server continuation is scheduled.
+An internet connection and 64-bit Windows are required for the client packages.
+
+Server static-address setup waits for Windows to confirm that the address is usable.
 A duplicate address or a 30-second readiness timeout triggers an attempt to
 restore the previous network settings and prevents proceeding with that address.
 Only one copy of the installer can be open at a time.
@@ -103,13 +141,13 @@ operations use the application's granular progress view. Detailed
 WSL, APT, Docker, and installer output is shown in the activity panel and
 written to `C:\ProgramData\KiloLink\installer.log`.
 
-On a clean PC, choose Install. Missing or disabled WSL is treated as the normal
+For a clean server PC, choose **Server**, then **Install**. Missing or disabled WSL is treated as the normal
 clean-install state. Setup enables and verifies WSL and Virtual Machine
 Platform, installs and updates the WSL runtime without an unrelated default
 distribution, and waits for each prerequisite to become healthy before moving
 on.
 
-When Windows must restart, Setup saves its configuration, registers a maximum
+When server setup requires a restart, Setup saves its configuration, registers a maximum
 of three elevated continuation attempts, and offers to restart Windows with a
 20-second warning. About 20 seconds after the same user signs back in, the
 persisted launcher resumes automatically, waits for physical networking, and
@@ -125,7 +163,7 @@ The watchdog checks Docker, Avahi, and the container every 30 seconds. Failures
 exit with an error so Task Scheduler can retry after one minute, up to three
 times; the regular five-minute trigger remains available afterward.
 
-Installation and update finish successfully only after the watchdog and
+Server installation and update finish successfully only after the watchdog and
 container are running, NDI owns a listening socket on the configured port, and
 the KiloLink web interface responds. Readiness checks retry for up to two minutes.
 The launcher distinguishes successful completion, cancellation, failure, and a
@@ -142,7 +180,8 @@ interactive prompt sequence.
 
 ## Repair, updates and removal
 
-Rerun the same EXE at any time to repair, reconfigure, update or uninstall.
+Rerun the same EXE and choose **Server** to repair, reconfigure, update or uninstall
+the server suite. Choose **Client** to check/install the client tools again.
 Once an installation, repair or update begins, setup also creates a **Kiloview
 Environment Setup** Start menu shortcut and registers an uninstall entry in
 Windows **Installed apps**. Maintenance is registered for the installing
@@ -160,7 +199,12 @@ The retained installer can be used for a fresh installation.
 
 ### Background repair and update
 
-After an interactive run has saved the configuration, repair can run without
+Client installation can run directly from an elevated PowerShell session with
+`-Action InstallClient -AcceptLicenses`. Its PC Agent bootstrap still uses its
+native licence and adapter-selection windows when required; this action is not
+an unattended deployment interface.
+
+After a server run has saved the configuration, repair can run without
 menu prompts from an elevated PowerShell session:
 
     .\Install-KiloLinkSuite.ps1 -Action Repair -AcceptLicenses -LogPath C:\ProgramData\KiloLink\background-install.log
@@ -176,7 +220,7 @@ failure, and `3010` when setup needs a Windows restart to continue. A zero exit
 code alone does not mean an installation took place; the launcher displays the
 operation outcome separately.
 
-After a successful install, repair, or update, the application activity view
+After a successful server install, repair, or update, the application activity view
 shows the KiloLink web address, NDI Discovery Server endpoint, and login
 details. Kiloview's
 [installation and deployment manual](https://www.kiloview.com/downloads/downloads/Firmware/kilolink-server-pro/Kilolink_Server_Pro_Installation_and_Deployment_Manual.pdf)
