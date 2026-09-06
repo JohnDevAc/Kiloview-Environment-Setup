@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
-    Menu-driven installer for KiloLink Server Pro, NDI Tools, and NDI Discovery Server.
+    Deployment engine for KiloLink Server Pro, NDI Tools, and NDI Discovery Server.
 
 .DESCRIPTION
     KiloLink runs in Docker Engine inside a dedicated Ubuntu WSL 2 distribution.
@@ -14,14 +14,16 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Repair', 'Update', 'Resume')]
+    [ValidateSet('Menu', 'Install', 'Repair', 'Update', 'Uninstall', 'Resume')]
     [string]$Action = 'Menu',
     [switch]$AcceptLicenses,
     [switch]$AutoRestart,
     [switch]$LauncherMode,
     [string]$LogPath,
     [string]$PreferredInterfaceAlias,
-    [string]$PreferredIpAddress
+    [string]$PreferredIpAddress,
+    [string]$ConfigurationPath,
+    [switch]$ConfirmRemoval
 )
 
 Set-StrictMode -Version 2.0
@@ -93,8 +95,7 @@ function Write-LauncherEvent {
 function Read-InstallerInput {
     param([string]$Prompt)
     if ($LauncherMode) {
-        Write-LauncherEvent -Type 'prompt' -Data @{ prompt = $Prompt }
-        return [Console]::In.ReadLine()
+        throw "Setup needs configuration from the Windows interface: $Prompt. Return to setup and review the settings."
     }
     return Read-Host $Prompt
 }
@@ -231,6 +232,10 @@ function Ensure-Administrator {
     if ($AutoRestart) { $elevationArguments += ' -AutoRestart' }
     if ($LauncherMode) { $elevationArguments += ' -LauncherMode' }
     if ($LogPath) { $elevationArguments += " -LogPath `"$LogPath`"" }
+    if ($ConfigurationPath) { $elevationArguments += " -ConfigurationPath `"$ConfigurationPath`"" }
+    if ($ConfirmRemoval) { $elevationArguments += ' -ConfirmRemoval' }
+    if ($PreferredInterfaceAlias) { $elevationArguments += " -PreferredInterfaceAlias `"$PreferredInterfaceAlias`"" }
+    if ($PreferredIpAddress) { $elevationArguments += " -PreferredIpAddress `"$PreferredIpAddress`"" }
     Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs | Out-Null
     exit 0
 }
@@ -256,6 +261,91 @@ function Save-Config {
         $Config.UpdatedAt = (Get-Date).ToString('o')
     }
     $Config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:ConfigPath -Encoding UTF8
+}
+
+function Get-RequestedSuiteConfig {
+    param([string]$Path)
+    $request = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+    if ([int](Get-PropertyValue $request 'SchemaVersion' 0) -ne 1) {
+        throw 'Unsupported setup configuration. Reopen the current installer.'
+    }
+    $alias = [string](Get-PropertyValue $request 'PrimaryInterfaceAlias' '')
+    $address = [string](Get-PropertyValue $request 'PublicIp' '')
+    $ip = $null
+    if (-not $alias -or $address -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -or
+        -not [Net.IPAddress]::TryParse($address, [ref]$ip) -or
+        $ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+        $ip.GetAddressBytes()[0] -in @(0, 127) -or $ip.GetAddressBytes()[0] -ge 224 -or
+        ($ip.GetAddressBytes()[0] -eq 169 -and $ip.GetAddressBytes()[1] -eq 254)) {
+        throw 'Select a physical adapter with a usable IPv4 address in Network settings.'
+    }
+    $ports = @{}
+    foreach ($name in @('WebPort', 'LinkPort', 'NdiDiscoveryPort')) {
+        $port = 0
+        if (-not [int]::TryParse([string](Get-PropertyValue $request $name ''), [ref]$port) -or
+            $port -lt 1 -or $port -gt 65535) { throw "Invalid $name. Enter a port between 1 and 65535." }
+        $ports[$name] = $port
+    }
+    if ($ports.LinkPort % 2 -ne 0 -or $ports.LinkPort -gt 65534) {
+        throw 'The KiloLink link port must be even and between 2 and 65534.'
+    }
+    if ($ports.WebPort -eq $ports.NdiDiscoveryPort) {
+        throw 'KiloLink web and NDI Discovery must use different TCP ports.'
+    }
+    $adapter = @(Get-LanCandidates | Where-Object { $_.Alias -eq $alias -and $_.Address -eq $address })
+    if ($adapter.Count -eq 0) { throw 'The selected adapter/address is no longer available. Refresh Network settings and retry.' }
+    $saved = Get-SavedConfig
+    $distro = [string](Get-PropertyValue $saved 'DistroName' $script:ManagedDistroName)
+    $distros = @(Get-WslDistroNames)
+    if ($distro -ne $script:ManagedDistroName -and
+        ($distros -notcontains $distro -or -not (Test-KiloContainer $distro))) {
+        $distro = $script:ManagedDistroName
+    }
+    $existing = $saved
+    if (-not $existing -and $distros -contains $distro -and (Test-KiloContainer $distro)) {
+        $existing = Get-LegacyKiloConfig $distro
+        if (-not $existing) { throw 'Could not read the existing container settings. Repair stopped to preserve its data.' }
+    }
+    # Infrastructure values are retained, never accepted from the UI request.
+    $dataPath = [string](Get-PropertyValue $existing 'LinuxDataPath' $script:LinuxDataPath)
+    $image = [string](Get-PropertyValue $existing 'KiloLinkImage' $script:KiloImage)
+    if ($distro -notmatch '^[a-zA-Z0-9_.-]+$' -or
+        $dataPath -notmatch '^/(?:opt|root|home/[a-zA-Z0-9_-]+)/kilolink-server/?$' -or
+        $image -notmatch '^kiloview/klnk-pro(?::[a-zA-Z0-9_.-]+|@sha256:[a-fA-F0-9]{64})?$') {
+        throw 'Saved container settings are outside the supported vendor image or data locations. Review installer-config.json before continuing.'
+    }
+    return [pscustomobject]@{
+        SchemaVersion = 1; PrimaryInterfaceAlias = $alias; PublicIp = $address
+        WebPort = $ports.WebPort; LinkPort = $ports.LinkPort; NdiDiscoveryPort = $ports.NdiDiscoveryPort
+        DistroName = $distro; LinuxDataPath = $dataPath; KiloLinkImage = $image
+    }
+}
+
+function Register-MaintenanceEntry {
+    if (-not $LauncherMode -or -not (Test-Path -LiteralPath $script:PersistentLauncherPath)) { return }
+    # WSL distributions belong to the installing Windows account.
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
+    New-Item -Path $key -Force | Out-Null
+    $values = @{
+        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.0.0'
+        Publisher = 'John Lightfoot'; DisplayIcon = $script:PersistentLauncherPath
+        InstallLocation = $script:StateRoot
+        UninstallString = ('"{0}" --uninstall' -f $script:PersistentLauncherPath)
+        ModifyPath = ('"{0}" --repair' -f $script:PersistentLauncherPath)
+    }
+    foreach ($name in $values.Keys) { New-ItemProperty -Path $key -Name $name -Value $values[$name] -PropertyType String -Force | Out-Null }
+    $programs = Join-Path ([Environment]::GetFolderPath('Programs')) 'Kiloview'
+    New-Item -ItemType Directory -Path $programs -Force | Out-Null
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut((Join-Path $programs 'Kiloview Environment Setup.lnk'))
+    $shortcut.TargetPath = $script:PersistentLauncherPath
+    $shortcut.Save()
+}
+
+function Remove-MaintenanceEntry {
+    Remove-Item -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup' -Recurse -Force -ErrorAction SilentlyContinue
+    $programs = Join-Path ([Environment]::GetFolderPath('Programs')) 'Kiloview'
+    Remove-Item -LiteralPath (Join-Path $programs 'Kiloview Environment Setup.lnk') -Force -ErrorAction SilentlyContinue
 }
 
 function Invoke-Native {
@@ -440,6 +530,7 @@ function Register-ResumeContinuation {
         Reason = $Reason
         RegisteredAt = (Get-Date).ToString('o')
         User = $identity
+        Action = if ($Action -eq 'Update' -or ($Action -eq 'Resume' -and (Get-PropertyValue $oldState 'Action' '') -eq 'Update')) { 'Update' } else { 'Repair' }
     } | ConvertTo-Json | Set-Content -LiteralPath $script:ResumeStatePath -Encoding UTF8
     Write-InstallerLog "Registered restart continuation attempt $attempt for $identity. Reason: $Reason"
 }
@@ -457,7 +548,7 @@ function Request-RestartAndResume {
     Write-Host $Reason -ForegroundColor Yellow
     Write-Host 'Setup will resume automatically about 20 seconds after you sign back in.' -ForegroundColor Green
 
-    $restartNow = $Action -eq 'Resume' -or $AutoRestart
+    $restartNow = ($Action -eq 'Resume' -and -not $LauncherMode) -or $AutoRestart
     if ($Action -eq 'Menu') {
         $answer = Read-InstallerInput 'Restart Windows now? [Y/n]'
         $restartNow = [string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(?i)y(?:es)?$'
@@ -1539,6 +1630,10 @@ function Test-SuiteHealth {
     Write-Step 'Verifying installed components and waiting for service readiness'
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $url = "http://$($Config.PublicIp):$($Config.WebPort)/"
+    Write-LauncherEvent -Type 'summary' -Data @{
+        webUrl = $url; ndiEndpoint = "$($Config.PublicIp):$($Config.NdiDiscoveryPort)"
+        linkEndpoint = "$($Config.PublicIp):$($Config.LinkPort)-$([int]$Config.LinkPort + 1) UDP"
+    }
     do {
         $failures = New-Object Collections.Generic.List[string]
         $startupTask = Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue
@@ -1596,11 +1691,14 @@ function Show-SuiteSummary {
 function Repair-Suite {
     param(
         [switch]$UseSavedConfiguration,
-        [switch]$LicenseAccepted
+        [switch]$LicenseAccepted,
+        $RequestedConfiguration
     )
     Set-OperationOutcome 'Running' 'Installing or repairing the suite.'
     $old = Get-SavedConfig
-    if ($UseSavedConfiguration) {
+    if ($null -ne $RequestedConfiguration) {
+        $config = $RequestedConfiguration
+    } elseif ($UseSavedConfiguration) {
         if (-not $old) {
             throw 'A saved configuration is required for unattended repair.'
         }
@@ -1615,7 +1713,8 @@ function Repair-Suite {
         return
     }
     Save-Config $config
-    $showProgress = $Action -in @('Menu', 'Resume')
+    Register-MaintenanceEntry
+    $showProgress = $LauncherMode -or $Action -in @('Menu', 'Resume')
     $succeeded = $false
     if ($showProgress) { Start-SuiteProgress -Activity 'Installing KiloLink Server Pro and NDI' -Status 'Preparing the saved configuration' }
     try {
@@ -1671,6 +1770,7 @@ function Wait-ResumeNetwork {
 }
 
 function Resume-Suite {
+    $continuation = Get-ResumeState
     Remove-ResumeTask
     if (-not (Get-SavedConfig)) {
         throw 'Setup cannot resume because its saved configuration is missing.'
@@ -1682,7 +1782,12 @@ function Resume-Suite {
     } finally {
         Stop-SuiteProgress
     }
-    Repair-Suite -UseSavedConfiguration -LicenseAccepted
+    if ((Get-PropertyValue $continuation 'Action' 'Repair') -eq 'Update') {
+        Update-Suite
+        if ($script:OperationOutcome -eq 'Completed') { Clear-ResumeContinuation }
+    } else {
+        Repair-Suite -UseSavedConfiguration -LicenseAccepted
+    }
 }
 
 function Update-KiloLink {
@@ -1719,7 +1824,10 @@ function Update-Suite {
     if (-not $config) {
         throw 'No saved configuration exists. Choose Repair / Reconfigure.'
     }
-    $showProgress = $Action -eq 'Menu'
+    if ($ConfigurationPath) { $config = Get-RequestedSuiteConfig $ConfigurationPath }
+    Save-Config $config
+    Register-MaintenanceEntry
+    $showProgress = $LauncherMode -or $Action -eq 'Menu'
     $succeeded = $false
     if ($showProgress) { Start-SuiteProgress -Activity 'Updating KiloLink Server Pro and NDI' -Status 'Preparing the saved configuration' }
     try {
@@ -1793,7 +1901,7 @@ function Invoke-UninstallCommand {
     } else {
         $arguments += ' /VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
     }
-    $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru
+    $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru -WindowStyle Hidden
     while (-not $process.HasExited) {
         Update-SuiteProgressPulse
         Start-Sleep -Milliseconds 300
@@ -1823,19 +1931,20 @@ function Remove-LegacyPortProxies {
 }
 
 function Uninstall-Suite {
+    param([switch]$Confirmed)
     Set-OperationOutcome 'Running' 'Uninstalling the suite.'
     Write-Heading 'Uninstall KiloLink Suite'
     Write-Host 'This removes KiloLink and its persisted data, NDI Tools/Discovery Server,' -ForegroundColor Yellow
     Write-Host 'scheduled tasks, installer firewall rules, and browser shortcuts.' -ForegroundColor Yellow
     Write-Host "The dedicated $($script:ManagedDistroName) distribution will be deleted." -ForegroundColor Yellow
     Write-Host 'WSL, unrelated distributions, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
-    if ((Read-InstallerInput 'Type UNINSTALL to continue') -cne 'UNINSTALL') {
+    if (-not $Confirmed -and (Read-InstallerInput 'Type UNINSTALL to continue') -cne 'UNINSTALL') {
         Write-Host 'Uninstall cancelled.' -ForegroundColor Yellow
         Set-OperationOutcome 'Cancelled' 'Uninstall was cancelled. No components were removed.'
         return
     }
 
-    $showProgress = $Action -eq 'Menu'
+    $showProgress = $LauncherMode -or $Action -eq 'Menu'
     if ($showProgress) { Start-SuiteProgress -Activity 'Uninstalling the KiloLink and NDI suite' -Status 'Preparing removal' }
     try {
     Set-SuiteProgress -Percent 8 -Status 'Stopping startup tasks and NDI services'
@@ -1903,7 +2012,11 @@ function Uninstall-Suite {
         Invoke-Native wsl.exe @('--unregister', $script:ManagedDistroName)
     }
     Set-SuiteProgress -Percent 100 -Status 'Uninstall complete'
-    Remove-Item -LiteralPath $script:StateRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-MaintenanceEntry
+    # Retain the reusable installer and logs, including the active transcript.
+    foreach ($file in @($script:ConfigPath, $script:StartupScriptPath, $script:ResumeStatePath)) {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
     } finally {
         if ($showProgress) { Stop-SuiteProgress }
     }
@@ -1984,23 +2097,39 @@ try {
         $transcriptStarted = $true
     }
     switch ($Action) {
-        'Menu' { Show-Menu }
+        'Menu' {
+            if ($LauncherMode) { throw 'The Windows installer requires an explicit action. Reopen Setup.' }
+            Show-Menu
+        }
+        'Install' {
+            if (-not $AcceptLicenses -or -not $ConfigurationPath) {
+                throw 'Installation requires reviewed configuration and vendor licence acceptance.'
+            }
+            Repair-Suite -RequestedConfiguration (Get-RequestedSuiteConfig $ConfigurationPath) -LicenseAccepted
+        }
         'Repair' {
             if (-not $AcceptLicenses) {
                 throw 'Unattended repair requires -AcceptLicenses after the vendor agreements have been reviewed and accepted.'
             }
-            Repair-Suite -UseSavedConfiguration -LicenseAccepted
+            if ($ConfigurationPath) {
+                Repair-Suite -RequestedConfiguration (Get-RequestedSuiteConfig $ConfigurationPath) -LicenseAccepted
+            } else {
+                Repair-Suite -UseSavedConfiguration -LicenseAccepted
+            }
         }
-        'Update' { Update-Suite }
+        'Update' {
+            if ($LauncherMode -and -not $AcceptLicenses) { throw 'Review and accept vendor licences before updating.' }
+            Update-Suite
+        }
+        'Uninstall' {
+            if (-not $ConfirmRemoval) { throw 'Uninstall requires confirmation that KiloLink application data will be deleted.' }
+            Uninstall-Suite -Confirmed
+        }
         'Resume' {
             if (-not $AcceptLicenses) {
                 throw 'A restart continuation requires the license acceptance recorded by the initial setup run.'
             }
             Resume-Suite
-            if ($LauncherMode -and -not $script:RestartScheduled) {
-                Write-Host ''
-                Read-InstallerInput 'Setup has finished. Press Enter to close this window' | Out-Null
-            }
         }
     }
 } catch {
@@ -2014,10 +2143,6 @@ try {
     }
 }
 if ($backgroundExitCode -ne 0) {
-    if ($Action -in @('Menu', 'Resume') -and $LauncherMode) {
-        Write-Host ''
-        Read-InstallerInput 'Press Enter to close this window' | Out-Null
-    }
     exit $backgroundExitCode
 }
 exit (Get-InstallerExitCode)
