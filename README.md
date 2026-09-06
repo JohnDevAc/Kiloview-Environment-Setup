@@ -34,7 +34,7 @@ there are no embedded PowerShell menus or text responses to type.
    KiloLink data mount and vendor image.
 5. Review the settings and vendor licence links, tick the acceptance checkbox,
    then choose **Install**, **Apply repair** or **Install updates**.
-6. Follow the native progress view and read-only activity log. At completion,
+6. Follow the native progress bar and status messages. At completion,
    open KiloLink, return to setup, or finish. When Windows needs a restart,
    choose **Restart Windows** or **Restart later**.
 
@@ -49,15 +49,23 @@ NDI Tools licence and choose **Install client tools**. Setup obtains the current
 Windows package from [NDI's official download page](https://ndi.video/tools/),
 checks its Windows signature and installs it. Re-running Client updates older
 NDI Tools or reinstalls the current package to restore missing files. A newer
-installed version is retained.
+installed version is retained. The vendor installer runs on a private background
+desktop, so its console helpers and completion launcher do not appear. Only that
+installation's remaining child processes are closed when it finishes; existing
+NDI applications are not targeted.
 
 Setup then obtains the latest stable PC Agent release from
 `JohnDevAc/Kiloview-PC-Onboarding`. It uses the complete Windows x64 package,
-including its .NET runtime, verifies GitHub's SHA-256 digest, size, archive paths
+including its .NET runtime, verifies the release SHA-256 digest, size, archive paths
 and binary product/version, then opens the agent's own native Windows setup.
 Review its licence and select the production adapter there. Close that window
 when it reports the agent is ready to return to this installer's completion view.
 A configured PC Agent at the current or a newer version is retained.
+
+If the GitHub API is unavailable or returns a rate-limit error such as HTTP 403,
+setup uses the repository's public latest-release redirect and published `.sha256`
+asset. The exact repository, stable version, checksum filename and package size
+are validated before the normal archive and binary checks.
 
 The agent keeps its own blue identity, tray UI, licence and update feed. Its setup
 configures its per-user startup and subnet-scoped discovery/monitoring firewall
@@ -86,10 +94,13 @@ its own visual identity. The same artwork is used in the EXE, window title
 bar, taskbar, installer header and Windows maintenance entry. Palette and
 icon build details are documented in [assets/README.md](assets/README.md).
 
-The launcher is per-monitor DPI aware. Its welcome and progress views scale for
-the active display, including mixed-DPI monitor changes. When the effective
-desktop area is smaller than the full progress layout, the activity view
-remains accessible by scrolling instead of clipping controls.
+The launcher is per-monitor DPI aware. Each page measures its text and controls
+and sizes the window to its content, including mixed-DPI monitor changes. The
+first page is approximately 680 by 351 client pixels at 100% scaling. Pages that
+cannot fit on the current desktop scroll vertically to keep every control reachable.
+The progress page uses native status messages; raw engine output is kept in
+diagnostic files. **Save diagnostics** exports a copy without opening a console
+or an embedded log viewer.
 
 Launcher diagnostics are saved to
 `C:\ProgramData\KiloLink\setup-launcher.log`.
@@ -116,7 +127,8 @@ launcher source, run:
 ```
 
 The build embeds the current PowerShell script into the executable. Launcher
-source (`SetupLauncher.cs` and `SetupWizard.cs`) and its Administrator manifest are under `launcher`. The Windows icon
+source (`SetupLauncher.cs`, `SetupWizard.cs`, `SetupLayout.cs` and the embedded
+`QuietInstaller.cs` helper) and its Administrator manifest are under `launcher`. The Windows icon
 source and multi-resolution `.ico` file are under `assets` and are embedded by
 the same build. The MIT licence and third-party notices are also embedded and
 can be viewed from the launcher's **Licences** button.
@@ -125,6 +137,7 @@ Run the regression checks after building:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Installer.Regression.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-QuietInstaller.ps1
 ```
 
 The checks use isolated configuration files, fake Windows services and network
@@ -138,8 +151,8 @@ The application uses a hidden PowerShell deployment engine for system operations
 It runs one explicit action with a validated JSON configuration and closed
 standard input; the Windows UI never starts the legacy script menu. Native
 operations use the application's granular progress view. Detailed
-WSL, APT, Docker, and installer output is shown in the activity panel and
-written to `C:\ProgramData\KiloLink\installer.log`.
+WSL, APT, Docker, and installer output is written to diagnostic files, including
+`C:\ProgramData\KiloLink\installer.log`, and is not displayed inside the app.
 
 For a clean server PC, choose **Server**, then **Install**. Missing or disabled WSL is treated as the normal
 clean-install state. Setup enables and verifies WSL and Virtual Machine
@@ -220,7 +233,7 @@ failure, and `3010` when setup needs a Windows restart to continue. A zero exit
 code alone does not mean an installation took place; the launcher displays the
 operation outcome separately.
 
-After a successful server install, repair, or update, the application activity view
+After a successful server install, repair, or update, the completion page
 shows the KiloLink web address, NDI Discovery Server endpoint, and login
 details. Kiloview's
 [installation and deployment manual](https://www.kiloview.com/downloads/downloads/Firmware/kilolink-server-pro/Kilolink_Server_Pro_Installation_and_Deployment_Manual.pdf)

@@ -347,10 +347,10 @@ try {
         function Download-FileWithProgress { $script:NdiDownloads++ }
         function Get-InstallerSignatureWithProgress { [pscustomobject]@{Status='Valid'} }
         function Get-Item { [pscustomobject]@{VersionInfo=[pscustomobject]@{ProductVersion='6.0.0'}} }
-        function Start-Process {
+        function Start-QuietInstaller {
             $script:NdiInstallCalls++
             $script:NdiInstalled = $true
-            [pscustomobject]@{HasExited=$true;ExitCode=0}
+            [pscustomobject]@{HasExited=$true;ExitCode=0} | Add-Member -MemberType ScriptMethod -Name Dispose -Value { } -PassThru
         }
     }
     Test-Case 'Missing NDI executable triggers a same-version reinstall' {
@@ -434,10 +434,10 @@ try {
     }
     Test-Case 'Client preserves the NDI restart exit code without scheduling a server resume' {
         . $clientNdiMocks
-        function Start-Process {
+        function Start-QuietInstaller {
             param($ArgumentList)
-            Assert-True ($ArgumentList -contains '/RESTARTEXITCODE=3010' -and $ArgumentList -contains '/NORESTART') 'NDI can restart without the Windows UI.'
-            [pscustomobject]@{HasExited=$true;ExitCode=3010}
+            Assert-True ($ArgumentList -contains '/RESTARTEXITCODE=3010' -and $ArgumentList -contains '/NORESTART' -and $ArgumentList -contains '/NORESTARTAPPLICATIONS') 'NDI can restart Windows or applications without the Windows UI.'
+            [pscustomobject]@{HasExited=$true;ExitCode=3010} | Add-Member -MemberType ScriptMethod -Name Dispose -Value { } -PassThru
         }
         Install-NdiTools -ClientOnly
         Assert-True $script:NdiRestartRequired 'NDI restart requirement was discarded.'
@@ -508,6 +508,55 @@ try {
         . $pcReleaseMocks
         $script:PcRelease.assets[0].PSObject.Properties.Remove('digest')
         Assert-Throws { Get-PcAgentRelease } 'download URL, size or SHA-256'
+    }
+    $publicReleaseMocks = {
+        $script:PublicTag = 'https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/tag/v0.7.0'
+        $script:PublicChecksum = ('a' * 64) + '  NDI-Configurator-PC-Agent-win-x64.zip' + "`r`n"
+        $script:PublicSize = '133089006'
+        $script:PublicModernResponse = $false
+        function Invoke-RestMethod { throw 'The remote server returned an error: (403) Forbidden.' }
+        function Invoke-WebRequest {
+            param($Uri, $Method)
+            if ($Uri.EndsWith('/latest')) {
+                if ($script:PublicModernResponse) { return [pscustomobject]@{BaseResponse=[pscustomobject]@{RequestMessage=[pscustomobject]@{RequestUri=[uri]$script:PublicTag}}} }
+                return [pscustomobject]@{BaseResponse=[pscustomobject]@{ResponseUri=[uri]$script:PublicTag}}
+            }
+            Assert-True ($Uri.StartsWith('https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/download/v0.7.0/')) 'Fallback left the exact publisher release.'
+            if ($Uri.EndsWith('.sha256')) { return [pscustomobject]@{Content=$script:PublicChecksum} }
+            Assert-True ($Method -eq 'Head') 'Metadata check downloaded the complete package.'
+            return [pscustomobject]@{Headers=@{'Content-Length'=$script:PublicSize}}
+        }
+    }
+    Test-Case 'GitHub 403 falls back to a verified public PC Agent release in PowerShell 5 and 7' {
+        . $publicReleaseMocks
+        foreach ($modern in @($false,$true)) {
+            $script:PublicModernResponse = $modern
+            if ($modern) { $script:PublicChecksum = [Text.Encoding]::UTF8.GetBytes($script:PublicChecksum) }
+            $release = Get-PcAgentRelease
+            Assert-True ($release.Version -eq [version]'0.7.0' -and $release.Size -eq 133089006 -and $release.Hash -eq ('a' * 64)) 'The public release lost its version, size or checksum.'
+        }
+    }
+    Test-Case 'PC Agent public fallback rejects foreign redirects, preview tags and mismatched checksums' {
+        . $publicReleaseMocks
+        foreach ($bad in @('https://example.com/releases/tag/v0.7.0','https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/tag/v0.8.0-dev.1')) {
+            $script:PublicTag = $bad
+            Assert-Throws { Get-PcAgentRelease } 'public production release could not be verified'
+        }
+        . $publicReleaseMocks
+        $script:PublicChecksum = ('a' * 64) + '  another-package.zip'
+        Assert-Throws { Get-PcAgentRelease } 'checksum is missing or invalid'
+        . $publicReleaseMocks
+        $script:PublicSize = '9999999999'
+        Assert-Throws { Get-PcAgentRelease } 'download size is invalid'
+    }
+    Test-Case 'NDI failure always disposes the private desktop and preserves its failure code' {
+        . $clientNdiMocks
+        $script:QuietDisposed = $false
+        function Start-QuietInstaller {
+            [pscustomobject]@{HasExited=$true;ExitCode=7} | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $script:QuietDisposed = $true } -PassThru
+        }
+        Assert-Throws { Install-NdiTools -ClientOnly } 'failed with exit code 7'
+        Assert-True $script:QuietDisposed 'A failed vendor install left its windows running.'
     }
     Test-Case 'PC Agent archive validation rejects traversal and duplicate paths before extraction' {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -808,6 +857,41 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
             Assert-True ($formType.GetField('networkAdapterBox',$instanceFlags).GetValue($form).Items.Count -eq 0) 'Server queried networking before the maintenance choice.'
         } finally { $form.Dispose() }
     }
+    Test-Case 'Native pages fit their content across display scales and constrained desktops' {
+        $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
+        try {
+            $form.Opacity = 0; $form.ShowInTaskbar = $false; $form.Show()
+            $formType.GetField('preferredInterfaceAlias',$instanceFlags).SetValue($form,'Production Ethernet')
+            $formType.GetField('preferredIpAddress',$instanceFlags).SetValue($form,'192.0.2.10')
+            foreach ($scale in @([single]1, [single]1.25, [single]1.5, [single]2, [single]2.5, [single]1)) {
+                [void]$formType.GetMethod('ApplyDisplayScale',$instanceFlags).Invoke($form,@($scale))
+                [void]$formType.GetMethod('ApplyDisplayScale',$instanceFlags).Invoke($form,@($scale))
+                foreach ($method in @('ShowHome','ShowServerHome','ShowNetworkPage','ShowSettings','ReviewSelectedAction','ShowProgressView')) {
+                    $args = if ($method -eq 'ShowSettings') { @('') } else { @() }
+                    [void]$formType.GetMethod($method,$instanceFlags).Invoke($form,$args)
+                    [Windows.Forms.Application]::DoEvents()
+                    foreach ($area in @([Drawing.Rectangle]::new(0,0,1920,1040),[Drawing.Rectangle]::new(0,0,1366,728))) {
+                        [void]$formType.GetMethod('FitPageToArea',$instanceFlags).Invoke($form,@($area,$true))
+                        $page = $formType.GetMethod('CurrentPage',$instanceFlags).Invoke($form,@())
+                        Assert-True ($form.Width -le $area.Width -and $form.Height -le $area.Height) "$method at $scale exceeds the desktop."
+                        $controls = @($page.Controls | Where-Object { $_.Visible -and $_.Width -gt 0 -and $_.Height -gt 0 })
+                        foreach ($control in $controls) {
+                            Assert-True ($control.Right -le $page.ClientSize.Width -and $control.Left -ge 0) "$method at $scale clips $($control.Text) horizontally."
+                            Assert-True (-not ($control -is [Windows.Forms.RichTextBox]) -and $control.Font.FontFamily.Name -ne 'Consolas') 'A console-style output pane is visible.'
+                            foreach ($other in $controls) {
+                                if ($control -ne $other) { Assert-True (-not $control.Bounds.IntersectsWith($other.Bounds)) "$method at $scale overlaps '$($control.Text)' and '$($other.Text)'." }
+                            }
+                        }
+                        $lastBottom = ($controls | Measure-Object Bottom -Maximum).Maximum
+                        Assert-True ($page.AutoScrollMinSize.Height -ge $lastBottom) 'Controls are unreachable at the end of the page.'
+                        if ($scale -eq 1 -and $method -eq 'ShowHome') { Assert-True ($form.Height -lt 430) 'The first page retained a large blank area.' }
+                        $bitmap = New-Object Drawing.Bitmap($form.Width,$form.Height)
+                        try { $form.DrawToBitmap($bitmap,[Drawing.Rectangle]::new(0,0,$form.Width,$form.Height)) } finally { $bitmap.Dispose() }
+                    }
+                }
+            }
+        } finally { $form.Dispose() }
+    }
     Test-Case 'Native Client skips server networking and ports and reviews only client tools' {
         $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
         try {
@@ -968,6 +1052,9 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
         try { $embedded = $reader.ReadToEnd() } finally { $reader.Dispose() }
         Assert-True ($embedded -ceq [IO.File]::ReadAllText($installerPath)) 'Rebuild required: embedded installer differs from source.'
         Assert-True ($embedded.Contains('http://127.0.0.1:')) 'The local shortcut change is absent from the executable.'
+        $reader = New-Object IO.StreamReader($assembly.GetManifestResourceStream('KiloLink.Setup.QuietInstaller.cs'))
+        try { $quiet = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        Assert-True ($quiet -ceq [IO.File]::ReadAllText((Join-Path $root 'launcher\QuietInstaller.cs'))) 'The hidden vendor installer helper is stale or missing.'
     }
 
     Test-Case 'Watchdog exits on startup failure and checks services again after startup' {

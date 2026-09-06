@@ -8,6 +8,8 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $source = Join-Path $root 'launcher\SetupLauncher.cs'
 $wizardSource = Join-Path $root 'launcher\SetupWizard.cs'
+$layoutSource = Join-Path $root 'launcher\SetupLayout.cs'
+$quietSource = Join-Path $root 'launcher\QuietInstaller.cs'
 $manifest = Join-Path $root 'launcher\Setup.exe.manifest'
 $installer = Join-Path $root 'Install-KiloLinkSuite.ps1'
 $icon = Join-Path $root 'assets\setup.ico'
@@ -26,7 +28,7 @@ if (-not $compiler) {
     throw 'The Windows .NET Framework C# compiler was not found.'
 }
 
-foreach ($requiredFile in @($source, $wizardSource, $manifest, $installer, $icon, $iconArtwork, $license, $thirdPartyNotices)) {
+foreach ($requiredFile in @($source, $wizardSource, $layoutSource, $quietSource, $manifest, $installer, $icon, $iconArtwork, $license, $thirdPartyNotices)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
         throw "Required build input is missing: $requiredFile"
     }
@@ -41,6 +43,7 @@ $compilerArguments = @(
     ('/win32manifest:"{0}"' -f $manifest),
     ('/win32icon:"{0}"' -f $icon),
     ('/resource:"{0}",KiloLink.Setup.Install-KiloLinkSuite.ps1' -f $installer),
+    ('/resource:"{0}",KiloLink.Setup.QuietInstaller.cs' -f $quietSource),
     ('/resource:"{0}",KiloLink.Setup.setup-icon.png' -f $iconArtwork),
     ('/resource:"{0}",KiloLink.Setup.setup.ico' -f $icon),
     ('/resource:"{0}",KiloLink.Setup.LICENSE' -f $license),
@@ -51,7 +54,8 @@ $compilerArguments = @(
     '/reference:System.Web.Extensions.dll',
     ('/out:"{0}"' -f $output),
     ('"{0}"' -f $source),
-    ('"{0}"' -f $wizardSource)
+    ('"{0}"' -f $wizardSource),
+    ('"{0}"' -f $layoutSource)
 )
 
 & $compiler @compilerArguments

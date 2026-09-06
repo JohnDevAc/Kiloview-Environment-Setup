@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!-- Copyright (c) 2026 John Lightfoot; SPDX-License-Identifier: MIT -->
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="2.1.0.0" name="JohnLightfoot.KiloviewEnvironmentSetup" />
+  <assemblyIdentity version="2.1.1.0" name="JohnLightfoot.KiloviewEnvironmentSetup" />
   <description>Kiloview Environment Setup</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
