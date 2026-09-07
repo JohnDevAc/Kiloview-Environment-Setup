@@ -101,8 +101,7 @@ and sizes the window to its content, including mixed-DPI monitor changes. The
 first page is approximately 680 by 351 client pixels at 100% scaling. Pages that
 cannot fit on the current desktop scroll vertically to keep every control reachable.
 The progress page uses native status messages; raw engine output is kept in
-diagnostic files. **Save diagnostics** exports a copy without opening a console
-or an embedded log viewer.
+diagnostic files.
 
 Launcher diagnostics are saved to
 `C:\ProgramData\KiloLink\setup-launcher.log`.
@@ -132,8 +131,8 @@ The build embeds the current PowerShell script into the executable. Launcher
 source (`SetupLauncher.cs`, `SetupWizard.cs`, `SetupLayout.cs` and the embedded
 `QuietInstaller.cs` helper) and its Administrator manifest are under `launcher`. The Windows icon
 source and multi-resolution `.ico` file are under `assets` and are embedded by
-the same build. The MIT licence and third-party notices are also embedded and
-can be viewed from the launcher's **Licences** button.
+the same build. The MIT licence and third-party notices are also embedded;
+their source files are `LICENSE` and `THIRD_PARTY_NOTICES.md`.
 
 Run the regression checks after building:
 

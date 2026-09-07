@@ -93,7 +93,6 @@ namespace KiloLink.Setup
             clientChoice = ActionChoice(rolePanel, "Client", "Install the latest NDI Tools and NDI Configurator PC Agent.", 238);
             serverChoice.Checked = true;
             roleNextButton = PageButton(rolePanel, "Next", 34, 436, 180, true, delegate { ChooseRole(); });
-            PageButton(rolePanel, "Licences", 410, 436, 160, false, LicencesButtonClick);
             PageButton(rolePanel, "Close", 580, 436, 170, false, delegate { Close(); });
             Controls.Add(rolePanel);
 
@@ -107,8 +106,6 @@ namespace KiloLink.Setup
                 Location = new Point(34, 377), Size = new Size(716, 42) };
             welcomePanel.Controls.Add(welcomeStatusLabel);
             startButton = PageButton(welcomePanel, "Next", 34, 436, 180, true, StartButtonClick);
-            logButton = PageButton(welcomePanel, "Save diagnostics", 224, 436, 176, false, LogButtonClick);
-            PageButton(welcomePanel, "Licences", 410, 436, 160, false, LicencesButtonClick);
             closeButton = PageButton(welcomePanel, "Back", 580, 436, 170, false, delegate { ShowHome(); });
 
             settingsPanel = CreatePage("Configure services", "Choose the ports used by this server. The device link uses an even UDP port and the next port.\r\nWindows and WSL firewall rules are configured automatically.");
@@ -221,7 +218,6 @@ namespace KiloLink.Setup
                 ? "An existing or partial installation was found. Saved settings are prefilled; service readiness is checked during maintenance."
                 : "Ready for a new installation. Choose Next to configure the server network.");
             welcomeStatusLabel.ForeColor = error == null ? SetupTheme.Accent : SetupTheme.Error;
-            logButton.Enabled = File.Exists(logPath);
         }
 
         private static bool HasManagedDistribution()
