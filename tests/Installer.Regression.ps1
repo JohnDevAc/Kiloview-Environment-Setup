@@ -81,6 +81,7 @@ $baseMocks = {
     function Get-LanCandidates { [pscustomobject]@{Alias='Ethernet';Address='192.0.2.10';Dhcp=$false} }
     function Get-WslDistroNames { @() }
     function Assert-PackageSource { }
+    function Assert-NdiToolsFilesAvailable { }
     function Prepare-ClientPackages { }
     function Assert-ServerDownloads { }
     function Assert-ServerOwner { }
@@ -565,6 +566,32 @@ try {
         Assert-Throws { Install-NdiTools -UpdateOnly -PrepareOnly } 'signature validation failed'
         Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 0 -and -not $script:PreparedNdiInstaller) 'Unverified newer NDI reached installation.'
     }
+    Test-Case 'NDI preflight rejects locked files before staging an installation' {
+        . $ndiMocks
+        function Assert-NdiToolsFilesAvailable { throw 'NDI Tools files are in use by: Fixture Server (PID 123).' }
+        Assert-Throws { Install-NdiTools -PrepareOnly } 'files are in use.*Fixture Server'
+        Assert-True ($script:NdiInstallCalls -eq 0 -and -not $script:PreparedNdiInstaller) 'The locked package reached installation or successful preflight.'
+    }
+    Test-Case 'NDI rechecks locks when consuming a verified prepared package' {
+        . $ndiMocks
+        Install-NdiTools -PrepareOnly
+        function Assert-NdiToolsFilesAvailable { throw 'NDI Tools files are in use by: New Fixture Server.' }
+        Assert-Throws { Install-NdiTools } 'files are in use.*New Fixture Server'
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 0) 'A newly locked file reached installation after preflight.'
+    }
+    Test-Case 'NDI uses a vendor log and never closes or restarts other applications' {
+        . $ndiMocks
+        function Start-QuietInstaller {
+            param($FilePath, $ArgumentList)
+            Assert-True ($ArgumentList -contains '/NOCLOSEAPPLICATIONS' -and $ArgumentList -contains '/NORESTARTAPPLICATIONS' -and $ArgumentList -contains '/NORESTART' -and $ArgumentList -contains '/RESTARTEXITCODE=3010') 'The installer can close apps or hide a restart requirement.'
+            $log = @($ArgumentList | Where-Object { $_ -like '/LOG=*' })
+            Assert-True ($log.Count -eq 1 -and $log[0].Contains($script:StateRoot)) 'The vendor diagnostic log is missing or outside the test state.'
+            [pscustomobject]@{HasExited=$true;ExitCode=5} | Add-Member -MemberType ScriptMethod -Name Dispose -Value { } -PassThru
+        }
+        Assert-Throws { Install-NdiTools } 'failed with exit code 5.*Vendor log:'
+    }
+
+    . (Join-Path $PSScriptRoot 'ServerUpdate.Regression.ps1')
 
     Test-Case 'Client resolves the current official NDI download including a future major version' {
         function Invoke-WebRequest {

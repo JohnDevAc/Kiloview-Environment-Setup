@@ -64,6 +64,7 @@ $script:OperationMessage = 'No deployment operation was performed.'
 $script:OperationFailed = $false
 $script:PreparedNdiInstaller = $null
 $script:PreparedNdiCheck = $null
+$script:NdiRestartRequired = $false
 $script:PreparedPcAgentRoot = $null
 $script:PreparedPcAgentRelease = $null
 
@@ -335,7 +336,7 @@ function Register-MaintenanceEntry {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
     New-Item -Path $key -Force | Out-Null
     $values = @{
-        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.4'
+        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.5'
         Publisher = 'John Lightfoot'; DisplayIcon = $script:PersistentLauncherPath
         InstallLocation = $script:StateRoot
         UninstallString = ('"{0}" --uninstall' -f $script:PersistentLauncherPath)
@@ -1452,13 +1453,31 @@ function Get-CurrentNdiToolsVersion {
     return $null
 }
 
-function Start-QuietInstaller {
-    param([string]$FilePath, [string[]]$ArgumentList)
+function Initialize-QuietInstaller {
     if (-not ('KiloLink.Setup.QuietInstaller' -as [type])) {
         $source = Join-Path $PSScriptRoot 'QuietInstaller.cs'
         if (-not (Test-Path -LiteralPath $source)) { $source = Join-Path $PSScriptRoot 'launcher\QuietInstaller.cs' }
         Add-Type -Path $source
     }
+}
+
+function Assert-NdiToolsFilesAvailable {
+    $ndiRoot = Join-Path $env:ProgramFiles 'NDI'
+    if (-not (Test-Path -LiteralPath $ndiRoot)) { return }
+    $files = @(Get-ChildItem -LiteralPath $ndiRoot -Directory -Filter 'NDI * Tools' | ForEach-Object {
+        Get-ChildItem -LiteralPath $_.FullName -File -Recurse | Where-Object { $_.Extension -in @('.exe','.dll') } | Select-Object -ExpandProperty FullName
+    })
+    if ($files.Count -eq 0) { return }
+    Initialize-QuietInstaller
+    $applications = @([KiloLink.Setup.QuietInstaller]::GetLockingApplications([string[]]$files))
+    if ($applications.Count -gt 0) {
+        throw "NDI Tools files are in use by: $($applications -join ', '). Close these applications or stop their background tasks, then retry Setup. No NDI installation was started."
+    }
+}
+
+function Start-QuietInstaller {
+    param([string]$FilePath, [string[]]$ArgumentList)
+    Initialize-QuietInstaller
     return [KiloLink.Setup.QuietInstaller]::Start($FilePath, ($ArgumentList -join ' '))
 }
 
@@ -1506,12 +1525,13 @@ function Install-NdiTools {
     if ([string]$signature.SignerCertificate.Subject -notmatch '(?i)(Vizrt|NDI|NewTek)') {
         throw 'NDI installer publisher validation failed. Use the official NDI package.'
     }
-    if ($PrepareOnly) { $script:PreparedNdiInstaller = $installer; return }
-    $script:PreparedNdiInstaller = $null
     $packageVersion = Convert-ToNdiToolsVersion ((Get-Item -LiteralPath $installer).VersionInfo.ProductVersion)
     $install = $componentsMissing -or -not $registration -or -not $installedVersion -or -not $packageVersion -or $packageVersion -gt $installedVersion
     # Re-running client setup repairs the current package without requiring any server components.
     if ($ClientOnly -and $packageVersion -eq $installedVersion) { $install = $true }
+    if ($install) { Assert-NdiToolsFilesAvailable }
+    if ($PrepareOnly) { $script:PreparedNdiInstaller = $installer; return }
+    $script:PreparedNdiInstaller = $null
     if (-not $install) {
         Write-Detail "NDI Tools $installedVersion is current." Green
         Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
@@ -1519,8 +1539,11 @@ function Install-NdiTools {
     }
 
     Set-SuiteProgress -Percent ([Math]::Min(92, $script:ProgressPercent + 2)) -Status 'Installing NDI Tools'
-    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NORESTARTAPPLICATIONS', '/SP-')
-    if ($ClientOnly) { $arguments += '/RESTARTEXITCODE=3010' }
+    $vendorLogDirectory = Join-Path $script:StateRoot 'Logs'
+    New-Item -ItemType Directory -Path $vendorLogDirectory -Force | Out-Null
+    $vendorLog = Join-Path $vendorLogDirectory ('ndi-tools-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N') + '.log')
+    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NORESTARTAPPLICATIONS', '/NOCLOSEAPPLICATIONS', '/RESTARTEXITCODE=3010', '/SP-', ('/LOG="' + $vendorLog + '"'))
+    Write-InstallerLog "Starting NDI Tools setup. Vendor log: $vendorLog"
     $process = Start-QuietInstaller -FilePath $installer -ArgumentList $arguments
     try {
         while (-not $process.HasExited) {
@@ -1529,7 +1552,8 @@ function Install-NdiTools {
             $process.Refresh()
         }
         $exitCode = $process.ExitCode
-        if ($exitCode -notin @(0, 3010)) { throw "NDI Tools installer failed with exit code $exitCode." }
+        Write-InstallerLog "NDI Tools setup exited with code $exitCode. Vendor log: $vendorLog"
+        if ($exitCode -notin @(0, 3010)) { throw "NDI Tools installer failed with exit code $exitCode. Vendor log: $vendorLog" }
     } finally { $process.Dispose() }
     Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
     if (-not (Get-NdiRegistration)) {
@@ -2402,6 +2426,7 @@ function Repair-Suite {
         Sync-KiloConfig $config
         Set-SuiteProgress -Percent 60 -Status 'Installing or validating NDI Tools'
         Install-NdiTools
+        if ($script:NdiRestartRequired) { Request-RestartAndResume 'NDI Tools needs a Windows restart before server setup can continue.'; return }
         Set-SuiteProgress -Percent 70 -Status 'Configuring NDI Discovery Server'
         Configure-NdiServer $config
         Set-SuiteProgress -Percent 77 -Status 'Opening Windows and WSL firewall ports'
@@ -2536,6 +2561,7 @@ systemctl enable --now avahi-daemon
         Update-KiloLink $config
         Set-SuiteProgress -Percent 64 -Status 'Checking the NDI Tools package'
         Install-NdiTools -UpdateOnly
+        if ($script:NdiRestartRequired) { Request-RestartAndResume 'NDI Tools needs a Windows restart before the server update can continue.'; return }
         Set-SuiteProgress -Percent 76 -Status 'Refreshing NDI Discovery Server'
         Configure-NdiServer $config
         Set-SuiteProgress -Percent 82 -Status 'Refreshing firewall rules and shortcuts'

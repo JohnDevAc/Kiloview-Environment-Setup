@@ -17,6 +17,41 @@ namespace KiloLink.Setup
         private IntPtr desktop, job, process;
         private QuietInstaller() { }
 
+        // Query only: never let an unattended vendor installer shut down other
+        // applications or discover a locked DLL after uninstalling old Tools.
+        public static string[] GetLockingApplications(string[] paths)
+        {
+            if (paths == null || paths.Length == 0) { return new string[0]; }
+            uint session;
+            int result = RmStartSession(out session, 0, new StringBuilder(33));
+            if (result != 0) { throw new Win32Exception(result); }
+            try
+            {
+                result = RmRegisterResources(session, (uint)paths.Length, paths, 0, IntPtr.Zero, 0, null);
+                if (result != 0) { throw new Win32Exception(result); }
+                uint needed, count = 0, reasons;
+                RestartProcessInfo[] applications = null;
+                for (int attempt = 0; attempt < 4; attempt++)
+                {
+                    result = RmGetList(session, out needed, ref count, applications, out reasons);
+                    if (result == 0)
+                    {
+                        string[] names = new string[count];
+                        for (int index = 0; index < count; index++)
+                        {
+                            names[index] = applications[index].Name + " (PID " + applications[index].Process.ProcessId + ")";
+                        }
+                        return names;
+                    }
+                    if (result != 234) { throw new Win32Exception(result); }
+                    applications = new RestartProcessInfo[needed];
+                    count = needed;
+                }
+                throw new InvalidOperationException("The applications using NDI files kept changing. Close NDI applications and retry.");
+            }
+            finally { RmEndSession(session); }
+        }
+
         public static QuietInstaller Start(string path, string arguments)
         {
             QuietInstaller instance = new QuietInstaller();
@@ -112,6 +147,29 @@ namespace KiloLink.Setup
             public IoCounters IoInfo;
             public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
         }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RestartUniqueProcess
+        {
+            public uint ProcessId;
+            public System.Runtime.InteropServices.ComTypes.FILETIME StartTime;
+        }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct RestartProcessInfo
+        {
+            public RestartUniqueProcess Process;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Name;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string ServiceName;
+            public uint Type, Status, SessionId;
+            [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+        }
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmStartSession(out uint session, uint flags, StringBuilder key);
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmRegisterResources(uint session, uint fileCount, string[] files, uint processCount, IntPtr processes, uint serviceCount, string[] services);
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmGetList(uint session, out uint needed, ref uint count, [In, Out] RestartProcessInfo[] applications, out uint reasons);
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmEndSession(uint session);
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr CreateDesktop(string name, string device, IntPtr mode, uint flags, uint access, IntPtr attributes);
         [DllImport("user32.dll")] private static extern bool CloseDesktop(IntPtr handle);

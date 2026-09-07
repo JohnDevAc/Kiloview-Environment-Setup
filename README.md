@@ -255,6 +255,14 @@ skips the installer download. Older installations and missing Discovery files
 still use the signed installer. If the advertised version is unavailable or
 ambiguous, setup downloads and verifies the package to check its version.
 
+Before replacing NDI Tools, setup checks for applications using its installed
+files. If an application or background task has them open, setup identifies it
+and stops before starting the NDI installer. Close the named application or stop
+its background task, then retry. Setup does not automatically close other apps.
+NDI installer diagnostics are saved under `C:\ProgramData\KiloLink\Logs`; a failed
+installation reports its specific log path. A required Windows restart defers
+the remaining server configuration until setup resumes after sign-in.
+
 Uninstall removes KiloLink and its persisted application data, NDI Tools and
 Discovery Server, the scheduled tasks, installer firewall rules, legacy port
 proxies associated with the saved configuration, shortcuts, and the dedicated
