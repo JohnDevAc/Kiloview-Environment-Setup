@@ -249,6 +249,11 @@ Discovery Server do not provide a web login.
 
 Update checks the official current NDI Tools package, Ubuntu and Docker
 packages, and the Kiloview KiloLink container image.
+For NDI Tools, server updates first read the version advertised on the official
+download page. A current or newer installation with Discovery Service present
+skips the installer download. Older installations and missing Discovery files
+still use the signed installer. If the advertised version is unavailable or
+ambiguous, setup downloads and verifies the package to check its version.
 
 Uninstall removes KiloLink and its persisted application data, NDI Tools and
 Discovery Server, the scheduled tasks, installer firewall rules, legacy port
