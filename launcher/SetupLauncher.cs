@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("John Lightfoot")]
 [assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 John Lightfoot")]
-[assembly: AssemblyVersion("2.1.3.0")]
-[assembly: AssemblyFileVersion("2.1.3.0")]
+[assembly: AssemblyVersion("2.1.4.0")]
+[assembly: AssemblyFileVersion("2.1.4.0")]
 
 namespace KiloLink.Setup
 {
@@ -344,7 +344,6 @@ namespace KiloLink.Setup
         private readonly Label networkAdapterDetailsLabel;
         private readonly Label networkStatusLabel;
         private Button startButton;
-        private Button logButton;
         private Button closeButton;
         private Label welcomeStatusLabel;
         private Panel welcomePanel;
@@ -584,29 +583,9 @@ namespace KiloLink.Setup
 
             InitializeResultControls();
 
-            Button progressLogButton = CreateButton("Save diagnostics", false);
-            progressLogButton.Location = new Point(30, 492);
-            progressLogButton.Size = new Size(135, 38);
-            progressLogButton.Click += LogButtonClick;
-
-            Button progressLicencesButton = CreateButton("Licences", false);
-            progressLicencesButton.Location = new Point(175, 492);
-            progressLicencesButton.Size = new Size(110, 38);
-            progressLicencesButton.Click += LicencesButtonClick;
-
-            Label privacyLabel = new Label();
-            privacyLabel.Text = "Diagnostics are saved automatically.";
-            privacyLabel.ForeColor = SetupTheme.Muted;
-            privacyLabel.AutoSize = true;
-            privacyLabel.Location = new Point(309, 505);
-
             progressPanel.Controls.Add(activityLabel);
             progressPanel.Controls.Add(progressBar);
             progressPanel.Controls.Add(progressStatusLabel);
-
-            progressPanel.Controls.Add(progressLogButton);
-            progressPanel.Controls.Add(progressLicencesButton);
-            progressPanel.Controls.Add(privacyLabel);
 
             Controls.Add(networkPanel);
             Controls.Add(welcomePanel);
@@ -1562,7 +1541,6 @@ namespace KiloLink.Setup
                 activityLabel.Text = "Setup could not start";
                 activityLabel.ForeColor = SetupTheme.Error;
                 progressStatusLabel.Text = exception.Message;
-                logButton.Enabled = File.Exists(logPath);
                 AppendOutput("ERROR: " + exception.Message);
                 MessageBox.Show(
                     "Setup could not start.\r\n\r\n" + exception.Message,
@@ -1750,7 +1728,6 @@ namespace KiloLink.Setup
                 {
                     pulseTimer.Stop();
                     FinishWizardOperation(exitCode);
-                    logButton.Enabled = File.Exists(logPath);
 
                     ApplyInstallerOutcome(exitCode);
                     AppendOutput(activityLabel.Text + ": " + progressStatusLabel.Text);
@@ -1812,75 +1789,5 @@ namespace KiloLink.Setup
             }
         }
 
-        private void LogButtonClick(object sender, EventArgs eventArgs)
-        {
-            try
-            {
-                if (!File.Exists(logPath) && diagnosticOutput.Length == 0)
-                {
-                    MessageBox.Show("No diagnostic log has been created yet.", Text);
-                    return;
-                }
-                using (SaveFileDialog save = new SaveFileDialog { Title = "Save setup diagnostics", FileName = "Kiloview-setup-diagnostics.txt", Filter = "Text files (*.txt)|*.txt", AddExtension = true })
-                {
-                    if (save.ShowDialog(this) != DialogResult.OK) { return; }
-                    string transcript = File.Exists(logPath) ? File.ReadAllText(logPath) : String.Empty;
-                    File.WriteAllText(save.FileName, transcript + Environment.NewLine + diagnosticOutput.ToString(), new UTF8Encoding(true));
-                }
-            }
-            catch (Exception exception)
-            {
-                MessageBox.Show("Could not save diagnostics.\r\n\r\n" + exception.Message, Text);
-            }
-        }
-
-        private void LicencesButtonClick(object sender, EventArgs eventArgs)
-        {
-            try
-            {
-                string notices = SetupLauncher.ReadEmbeddedText(SetupLauncher.LicenseResourceName)
-                    + "\r\n\r\n"
-                    + SetupLauncher.ReadEmbeddedText(SetupLauncher.ThirdPartyNoticesResourceName);
-
-                using (Form noticeForm = new Form())
-                {
-                    noticeForm.Text = "Licences and third-party notices";
-                    noticeForm.StartPosition = FormStartPosition.CenterParent;
-                    noticeForm.AutoScaleDimensions = new SizeF(96F, 96F);
-                    noticeForm.AutoScaleMode = AutoScaleMode.Dpi;
-                    noticeForm.Size = new Size(720, 560);
-                    noticeForm.Shown += delegate
-                    {
-                        Size noticeSize = ScaleLogicalSize(new Size(720, 560));
-                        Rectangle workingArea = Screen.FromControl(this).WorkingArea;
-                        noticeForm.Size = new Size(
-                            Math.Min(noticeSize.Width, Math.Max(320, workingArea.Width - 40)),
-                            Math.Min(noticeSize.Height, Math.Max(240, workingArea.Height - 40)));
-                    };
-                    noticeForm.MinimizeBox = false;
-                    noticeForm.MaximizeBox = true;
-                    noticeForm.ShowIcon = false;
-                    noticeForm.BackColor = SetupTheme.Surface;
-
-                    TextBox noticeText = new TextBox();
-                    noticeText.Multiline = true;
-                    noticeText.ReadOnly = true;
-                    noticeText.ScrollBars = ScrollBars.Both;
-                    noticeText.WordWrap = true;
-                    noticeText.Dock = DockStyle.Fill;
-                    noticeText.Font = new Font("Segoe UI", 9F);
-                    noticeText.Text = notices;
-                    noticeText.SelectionStart = 0;
-                    noticeText.SelectionLength = 0;
-
-                    noticeForm.Controls.Add(noticeText);
-                    noticeForm.ShowDialog(this);
-                }
-            }
-            catch (Exception exception)
-            {
-                MessageBox.Show("Could not display the legal notices.\r\n\r\n" + exception.Message, Text);
-            }
-        }
     }
 }

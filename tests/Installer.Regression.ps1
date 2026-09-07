@@ -426,14 +426,46 @@ try {
         Assert-Throws { Sync-PrimaryLanAddress (New-Config) } 'no longer available'
     }
 
+    Test-Case 'NDI versions normalize omitted zero components and reject uncertain labels' {
+        foreach ($value in @('6.0','6.0.0','6.0.0.0')) {
+            Assert-True ((Convert-ToNdiToolsVersion $value) -eq [version]'6.0.0.0') 'Equivalent NDI versions compared differently.'
+        }
+        foreach ($value in @('', 'unknown', '6.0.0-preview', 'version 6.0.0', '6.0.0.0.1')) {
+            Assert-True ($null -eq (Convert-ToNdiToolsVersion $value)) 'An uncertain NDI version could suppress an update.'
+        }
+    }
+    Test-Case 'NDI metadata reads the labelled Tools version for the selected official package' {
+        function Invoke-WebRequest {
+            param($Uri, $Headers, $TimeoutSec)
+            Assert-True ($Uri -eq 'https://ndi.video/tools/' -and $Headers['Cache-Control'] -eq 'no-cache' -and $TimeoutSec -le 20) 'NDI metadata did not use a bounded fresh official-page request.'
+            [pscustomobject]@{
+                Links=@([pscustomobject]@{href=$script:NdiToolsUrl})
+                Content='<a>NDI 6.3</a><div>Version 6.3.2</div><div>Version 6.3.2.0</div><script>"<div>Version 9.0.0</div>"</script><!-- <div>Version 8.0.0</div> -->'
+            }
+        }
+        Assert-True ((Get-CurrentNdiToolsVersion -Uri $script:NdiToolsUrl) -eq [version]'6.3.2.0') 'The advertised Tools version was not read correctly.'
+    }
+    Test-Case 'Missing ambiguous or unrelated NDI metadata cannot mark the package current' {
+        foreach ($content in @('', '<div>NDI 6.3</div>', '<div>Version 6.3.2-preview</div>', '<div>Version 6.3.2</div><div>Version 6.3.3</div>')) {
+            function Invoke-WebRequest { [pscustomobject]@{Links=@([pscustomobject]@{href=$script:NdiToolsUrl});Content=$content} }
+            Assert-True ($null -eq (Get-CurrentNdiToolsVersion -Uri $script:NdiToolsUrl)) 'Uncertain metadata suppressed a package check.'
+        }
+        function Invoke-WebRequest { [pscustomobject]@{Links=@([pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe'});Content='<div>Version 7.0.0</div>'} }
+        Assert-True ($null -eq (Get-CurrentNdiToolsVersion -Uri $script:NdiToolsUrl)) 'A different package supplied the version.'
+        function Invoke-WebRequest { throw 'Fixture metadata unavailable' }
+        Assert-True ($null -eq (Get-CurrentNdiToolsVersion -Uri $script:NdiToolsUrl)) 'Unavailable metadata prevented the installer fallback.'
+    }
     $ndiMocks = {
         $script:NdiInstalled = $false
         $script:NdiDownloads = 0
         $script:NdiInstallCalls = 0
+        $script:NdiVersionChecks = 0
+        $script:NdiSignatureChecks = 0
+        function Get-CurrentNdiToolsVersion { $script:NdiVersionChecks++; [version]'6.0.0.0' }
         function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='6.0.0'} }
         function Get-NdiDiscoveryExe { if ($script:NdiInstalled) { 'C:\Fake\NDI Discovery Service.exe' } }
         function Download-FileWithProgress { $script:NdiDownloads++ }
-        function Get-InstallerSignatureWithProgress { [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='CN=NDI Fixture'}} }
+        function Get-InstallerSignatureWithProgress { $script:NdiSignatureChecks++; [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='CN=NDI Fixture'}} }
         function Get-Item { [pscustomobject]@{VersionInfo=[pscustomobject]@{ProductVersion='6.0.0'}} }
         function Start-QuietInstaller {
             $script:NdiInstallCalls++
@@ -457,11 +489,81 @@ try {
         function Get-NdiDiscoveryExe { $null }
         Assert-Throws { Install-NdiTools } 'executable is still missing'
     }
-    Test-Case 'Same-version NDI update is skipped when files are healthy' {
+    Test-Case 'Current NDI skips downloads through preflight and update and checks again next time' {
         . $ndiMocks
         $script:NdiInstalled = $true
+        Install-NdiTools -UpdateOnly -PrepareOnly
+        Assert-True ($script:NdiVersionChecks -eq 1 -and $script:PreparedNdiCheck) 'Preflight did not retain the current version check.'
         Install-NdiTools -UpdateOnly
-        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 0) 'A current healthy package was reinstalled.'
+        Assert-True ($script:NdiDownloads -eq 0 -and $script:NdiInstallCalls -eq 0 -and $script:NdiSignatureChecks -eq 0) 'Current NDI downloaded or ran an installer.'
+        Assert-True ($script:NdiVersionChecks -eq 1 -and -not $script:PreparedNdiCheck) 'Update did not consume its preflight result.'
+        Install-NdiTools -UpdateOnly
+        Assert-True ($script:NdiVersionChecks -eq 2 -and $script:NdiDownloads -eq 0) 'A later update reused stale version metadata.'
+    }
+    Test-Case 'A newer installed NDI version avoids downloading an older package' {
+        . $ndiMocks
+        $script:NdiInstalled = $true
+        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='7.0.0'} }
+        Install-NdiTools -UpdateOnly
+        Assert-True ($script:NdiDownloads -eq 0 -and $script:NdiInstallCalls -eq 0) 'A newer local NDI version was downloaded or downgraded.'
+    }
+    Test-Case 'An older NDI installation stages one verified package and installs it' {
+        . $ndiMocks
+        $script:NdiInstalled = $true
+        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='5.0.0'} }
+        Install-NdiTools -UpdateOnly -PrepareOnly
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 0 -and $script:NdiSignatureChecks -eq 1) 'The update package was not verified before mutation.'
+        Install-NdiTools -UpdateOnly
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 1 -and $script:NdiSignatureChecks -eq 2) 'The staged package was downloaded twice or not reverified before execution.'
+    }
+    Test-Case 'Unavailable NDI metadata falls back to one verified download' {
+        . $ndiMocks
+        $script:NdiInstalled = $true
+        function Get-CurrentNdiToolsVersion { $null }
+        Install-NdiTools -UpdateOnly -PrepareOnly
+        Install-NdiTools -UpdateOnly
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiSignatureChecks -eq 2 -and $script:NdiInstallCalls -eq 0) 'Metadata fallback bypassed package verification or reinstalled healthy NDI.'
+    }
+    Test-Case 'An unknown installed NDI version cannot bypass the verified installer' {
+        . $ndiMocks
+        $script:NdiInstalled = $true
+        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='unknown'} }
+        Install-NdiTools -UpdateOnly
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 1 -and $script:NdiVersionChecks -eq 0) 'An unknown installation was marked current.'
+    }
+    Test-Case 'NDI update repairs missing Discovery even at the advertised current version' {
+        . $ndiMocks
+        Install-NdiTools -UpdateOnly -PrepareOnly
+        Install-NdiTools -UpdateOnly
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 1 -and $script:NdiVersionChecks -eq 0) 'Version metadata prevented Discovery repair.'
+    }
+    Test-Case 'NDI rechecks local version and Discovery after a current preflight result' {
+        . $ndiMocks
+        $script:NdiInstalled = $true
+        Install-NdiTools -UpdateOnly -PrepareOnly
+        $script:NdiInstalled = $false
+        Install-NdiTools -UpdateOnly
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 1) 'Disappearing Discovery was hidden by a preflight result.'
+        Install-NdiTools -UpdateOnly -PrepareOnly
+        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='5.0.0'} }
+        Install-NdiTools -UpdateOnly
+        Assert-True ($script:NdiDownloads -eq 2 -and $script:NdiInstallCalls -eq 2) 'An older local replacement was hidden by a preflight result.'
+    }
+    Test-Case 'Explicit offline NDI updates never request online version metadata' {
+        . $ndiMocks
+        $script:NdiInstalled = $true
+        $PackageDirectory = $testRoot
+        function Get-CurrentNdiToolsVersion { throw 'Unexpected online metadata request' }
+        Install-NdiTools -UpdateOnly
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiSignatureChecks -eq 1 -and $script:NdiInstallCalls -eq 0) 'Offline package version and signature were not checked.'
+    }
+    Test-Case 'NDI update metadata cannot authorize an unsigned newer installer' {
+        . $ndiMocks
+        $script:NdiInstalled = $true
+        function Get-CurrentNdiToolsVersion { [version]'7.0.0.0' }
+        function Get-InstallerSignatureWithProgress { [pscustomobject]@{Status='NotSigned'} }
+        Assert-Throws { Install-NdiTools -UpdateOnly -PrepareOnly } 'signature validation failed'
+        Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 0 -and -not $script:PreparedNdiInstaller) 'Unverified newer NDI reached installation.'
     }
 
     Test-Case 'Client resolves the current official NDI download including a future major version' {

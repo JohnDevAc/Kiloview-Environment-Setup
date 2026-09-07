@@ -63,6 +63,7 @@ $script:OperationOutcome = 'Idle'
 $script:OperationMessage = 'No deployment operation was performed.'
 $script:OperationFailed = $false
 $script:PreparedNdiInstaller = $null
+$script:PreparedNdiCheck = $null
 $script:PreparedPcAgentRoot = $null
 $script:PreparedPcAgentRelease = $null
 
@@ -334,7 +335,7 @@ function Register-MaintenanceEntry {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
     New-Item -Path $key -Force | Out-Null
     $values = @{
-        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.3'
+        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.4'
         Publisher = 'John Lightfoot'; DisplayIcon = $script:PersistentLauncherPath
         InstallLocation = $script:StateRoot
         UninstallString = ('"{0}" --uninstall' -f $script:PersistentLauncherPath)
@@ -1407,7 +1408,8 @@ function Get-InstallerSignatureWithProgress {
 }
 
 function Get-CurrentNdiToolsUrl {
-    $page = Invoke-WebRequest -UseBasicParsing -Uri 'https://ndi.video/tools/' -TimeoutSec 60
+    param($Page = $null)
+    if (-not $Page) { $Page = Invoke-WebRequest -UseBasicParsing -Uri 'https://ndi.video/tools/' -TimeoutSec 60 }
     $candidates = @($page.Links | ForEach-Object {
         $url = $null
         if ([Uri]::TryCreate([string](Get-PropertyValue $_ 'href' ''), [UriKind]::Absolute, [ref]$url) -and
@@ -1420,6 +1422,34 @@ function Get-CurrentNdiToolsUrl {
         throw 'The current Windows NDI Tools download could not be identified on ndi.video/tools/. Try again later.'
     }
     return $candidates[0]
+}
+
+function Convert-ToNdiToolsVersion {
+    param([string]$Value)
+    # A label or prerelease suffix is insufficient evidence to skip an update.
+    if ($Value -notmatch '^\d+(?:\.\d+){1,3}$') { return $null }
+    $version = Convert-ToVersion $Value
+    if (-not $version) { return $null }
+    return [version]::new($version.Major, $version.Minor, [Math]::Max(0, $version.Build), [Math]::Max(0, $version.Revision))
+}
+
+function Get-CurrentNdiToolsVersion {
+    param([string]$Uri)
+    try {
+        $page = Invoke-WebRequest -UseBasicParsing -Uri 'https://ndi.video/tools/' -TimeoutSec 20 -Headers @{'Cache-Control'='no-cache'}
+        # The advertised version must belong to the package this operation uses.
+        if ((Get-CurrentNdiToolsUrl -Page $page) -ne $Uri) { return $null }
+        $content = [string](Get-PropertyValue $page 'Content' '')
+        $content = [regex]::Replace($content, '(?is)<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>', '')
+        $versions = @([regex]::Matches($content, '(?i)>\s*Version\s+(\d+\.\d+\.\d+(?:\.\d+)?)\s*<') | ForEach-Object {
+            $version = Convert-ToNdiToolsVersion $_.Groups[1].Value
+            if ($version) { $version }
+        } | Select-Object -Unique)
+        if ($versions.Count -eq 1) { return $versions[0] }
+    } catch {
+        Write-InstallerLog "NDI version metadata is unavailable; checking the signed installer instead: $($_.Exception.Message)"
+    }
+    return $null
 }
 
 function Start-QuietInstaller {
@@ -1435,19 +1465,32 @@ function Start-QuietInstaller {
 function Install-NdiTools {
     param([switch]$UpdateOnly, [switch]$ClientOnly, [switch]$PrepareOnly)
     $script:NdiRestartRequired = $false
+    $preparedCheck = if (-not $PrepareOnly) { $script:PreparedNdiCheck } else { $null }
+    $script:PreparedNdiCheck = $null
     $registration = Get-NdiRegistration
     if ($UpdateOnly -and -not $registration) {
         throw 'NDI Tools is missing. Choose Repair / Reconfigure to install it.'
     }
     $componentsMissing = -not $ClientOnly -and -not (Get-NdiDiscoveryExe)
+    $installedVersion = if ($registration) { Convert-ToNdiToolsVersion ([string](Get-PropertyValue $registration 'DisplayVersion' '')) } else { $null }
     if ($registration -and -not $UpdateOnly -and -not $ClientOnly -and -not $componentsMissing) {
-        $installedVersion = Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' ''))
         Write-Detail "NDI Tools $installedVersion is already installed." Green
         return
     }
 
     Write-Step 'Checking the current NDI Tools package'
     $downloadUrl = if ($script:PreparedNdiInstaller) { $null } elseif ($ClientOnly -and -not $PackageDirectory) { Get-CurrentNdiToolsUrl } else { $script:NdiToolsUrl }
+    if ($UpdateOnly -and -not $ClientOnly -and -not $componentsMissing -and $installedVersion -and
+        -not $PackageDirectory -and -not $script:PreparedNdiInstaller) {
+        $currentVersion = if ($preparedCheck -and $preparedCheck.Url -eq $downloadUrl) { $preparedCheck.Version } else { Get-CurrentNdiToolsVersion -Uri $downloadUrl }
+        if ($currentVersion -and $installedVersion -ge $currentVersion) {
+            # Keep the preflight result for this operation, then recheck local files
+            # and registration when consuming it. A later operation checks again.
+            if ($PrepareOnly) { $script:PreparedNdiCheck = [pscustomobject]@{Url=$downloadUrl;Version=$currentVersion} }
+            Write-Detail "NDI Tools $installedVersion is current. Download skipped." Green
+            return
+        }
+    }
     $downloadDir = Join-Path $env:TEMP 'KiloLinkSuite'
     $installer = Join-Path $downloadDir 'NDI-Tools.exe'
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
@@ -1465,8 +1508,7 @@ function Install-NdiTools {
     }
     if ($PrepareOnly) { $script:PreparedNdiInstaller = $installer; return }
     $script:PreparedNdiInstaller = $null
-    $installedVersion = if ($registration) { Convert-ToVersion ([string](Get-PropertyValue $registration 'DisplayVersion' '')) } else { $null }
-    $packageVersion = Convert-ToVersion ((Get-Item -LiteralPath $installer).VersionInfo.ProductVersion)
+    $packageVersion = Convert-ToNdiToolsVersion ((Get-Item -LiteralPath $installer).VersionInfo.ProductVersion)
     $install = $componentsMissing -or -not $registration -or -not $installedVersion -or -not $packageVersion -or $packageVersion -gt $installedVersion
     # Re-running client setup repairs the current package without requiring any server components.
     if ($ClientOnly -and $packageVersion -eq $installedVersion) { $install = $true }
