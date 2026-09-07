@@ -334,7 +334,7 @@ function Register-MaintenanceEntry {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
     New-Item -Path $key -Force | Out-Null
     $values = @{
-        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.2'
+        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.3'
         Publisher = 'John Lightfoot'; DisplayIcon = $script:PersistentLauncherPath
         InstallLocation = $script:StateRoot
         UninstallString = ('"{0}" --uninstall' -f $script:PersistentLauncherPath)
@@ -1664,6 +1664,7 @@ function Test-PcAgentState($State) {
 function Invoke-PcAgentSetup {
     param([string]$Path)
     Set-SuiteProgress -Percent 90 -Status 'Complete the PC Agent setup window, then close it to return here'
+    Write-InstallerLog "Starting verified PC Agent setup: $Path"
     $process = Start-Process -FilePath $Path -WorkingDirectory (Split-Path -Parent $Path) -PassThru -WindowStyle Normal
     try {
         while (-not $process.HasExited) {
@@ -1671,6 +1672,7 @@ function Invoke-PcAgentSetup {
             Start-Sleep -Milliseconds 300
             $process.Refresh()
         }
+        Write-InstallerLog "PC Agent setup exited with code $($process.ExitCode)."
         if ($process.ExitCode -eq 2) { return $false }
         if ($process.ExitCode -ne 0) { throw "PC Agent setup failed with exit code $($process.ExitCode)." }
         return Test-PcAgentConfigured
@@ -1913,10 +1915,12 @@ function Install-ClientTools {
     if (-not $AcceptLicenses) { throw 'Review and accept the NDI Tools licence before installing client tools.' }
     Set-OperationOutcome 'Running' 'Installing NDI Tools and PC Agent for this client.'
     Start-SuiteProgress -Activity 'Installing client tools' -Status 'Checking the current official download'
+    $ndiInstalled = $false
     try {
         Prepare-ClientPackages
         Save-ComponentReceipt 'client'
         Install-NdiTools -ClientOnly
+        $ndiInstalled = $true
         $ndiNeedsRestart = $script:NdiRestartRequired
         $agentCompleted = Install-PcAgent
         if (-not $agentCompleted) {
@@ -1933,6 +1937,21 @@ function Install-ClientTools {
         } else {
             Set-OperationOutcome 'Completed' 'NDI Tools and NDI Configurator PC Agent are installed.'
         }
+    } catch {
+        if (-not $ndiInstalled) { throw }
+        $failure = $_.Exception.Message
+        $evidence = 'PC Agent installed state could not be verified.'
+        try {
+            $install = Join-Path $env:ProgramFiles 'NDI Configurator\PC Agent'
+            $agentVersion = Get-PcAgentBinaryVersion (Join-Path $install 'NDI Configurator PC Agent.exe') 'NDI Configurator PC Agent'
+            $setupVersion = Get-PcAgentBinaryVersion (Join-Path $install 'NDI Configurator PC Agent Setup.exe') 'NDI Configurator PC Agent'
+            $configured = Test-PcAgentConfigured
+            $evidence = "Detected PC Agent: $(if ($agentVersion) { $agentVersion } else { 'missing/unknown' }); Setup: $(if ($setupVersion) { $setupVersion } else { 'missing/unknown' }); configured: $configured."
+        } catch { Write-InstallerLog "Could not read PC Agent state after failure: $($_.Exception.Message)" }
+        $restart = if ($script:NdiRestartRequired) { ' Restart Windows to finish NDI Tools installation.' } else { '' }
+        # File replacement can precede configuration/startup failure. Preserve the
+        # real failure while explaining exactly what survived for repair/retry.
+        throw "NDI Tools installation completed.$restart PC Agent setup did not finish successfully. $evidence $failure"
     } finally { Stop-SuiteProgress }
 }
 

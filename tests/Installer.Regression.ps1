@@ -144,6 +144,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 
 try {
     . (Join-Path $PSScriptRoot 'Qa.Regression.ps1')
+    . (Join-Path $PSScriptRoot 'ClientUpdate.Regression.ps1')
     Test-Case 'Client stages both packages before any installation and stops on unavailable downloads' {
         Invoke-Expression ($ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Prepare-ClientPackages' }, $true).Extent.Text)
         $AcceptLicenses = $true

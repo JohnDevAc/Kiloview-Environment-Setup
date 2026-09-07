@@ -1,5 +1,11 @@
 # Suite deployment behavior
 
+## Client update diagnostics and validation — 7 September 2026
+
+Client setup records the staged PC Agent Setup path and process exit code. A failure after NDI Tools finishes now reports the surviving Agent/Setup versions and configured-state evidence, retaining the original error and any NDI restart requirement. Updated application files are not sufficient to suppress a genuine setup failure: configuration, startup or firewall work may fail after replacement.
+
+`tests/ClientUpdate.Regression.ps1` adds eleven isolated native-process scenarios to the main regression harness. A harmless compiled fixture upgrades an older Agent/Setup pair through the real archive, version, process-wait and configuration-read paths. It covers normal/fast exits, restart, cancellation, missing configuration, mixed versions, failures before/after file replacement (including NDI restart requirements), a concurrently installed newer pair and staged archive corruption. Vendor installation remains mocked; no production agent, NDI configuration, registry, service or network settings are changed.
+
 ## Additional QA corrections — 6 September 2026
 
 Client setup preserves unsupported component receipts and unknown roles by refusing to overwrite them. A completed Discovery-restoration marker alone no longer recreates server ownership during removal. Configured Client evidence now validates the endpoint/adapter GUIDs, IPv4 host address and prefix, including rejection of loopback, link-local, multicast, network and broadcast addresses. The corrected executable passes 95 isolated regression checks.
