@@ -336,7 +336,7 @@ function Register-MaintenanceEntry {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
     New-Item -Path $key -Force | Out-Null
     $values = @{
-        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.5'
+        DisplayName = 'Kiloview Environment Setup'; DisplayVersion = '2.1.6'
         Publisher = 'John Lightfoot'; DisplayIcon = $script:PersistentLauncherPath
         InstallLocation = $script:StateRoot
         UninstallString = ('"{0}" --uninstall' -f $script:PersistentLauncherPath)
@@ -727,6 +727,7 @@ function Test-KiloContainer {
 }
 
 function Get-NdiRegistration {
+    param([switch]$All)
     $paths = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
@@ -734,30 +735,77 @@ function Get-NdiRegistration {
     $items = foreach ($path in $paths) {
         Get-ItemProperty -Path $path -ErrorAction SilentlyContinue
     }
-    return @($items | Where-Object {
+    $registrations = @($items | Where-Object {
         $name = [string](Get-PropertyValue $_ 'DisplayName' '')
         $publisher = [string](Get-PropertyValue $_ 'Publisher' '')
         $name -match '^NDI\s+\d+\s+Tools' -or ($name -match 'NDI.*Tools' -and $publisher -match 'NDI|Vizrt|NewTek')
-    } | Select-Object -First 1)[0]
+    })
+    if ($All) { return $registrations }
+    return @($registrations | Select-Object -First 1)[0]
+}
+
+function Get-NdiToolsRoots {
+    $candidates = New-Object Collections.Generic.List[string]
+    foreach ($registration in @(Get-NdiRegistration -All)) {
+        $location = [string](Get-PropertyValue $registration 'InstallLocation' '')
+        if (-not [string]::IsNullOrWhiteSpace($location)) { $candidates.Add($location) }
+    }
+    # Older registrations can omit InstallLocation; a registered Discovery service
+    # can still identify a custom Tools root. Never execute its command line.
+    $service = Get-NdiDiscoveryService
+    if ($service) {
+        $nativeService = @(Get-CimInstance Win32_Service -ErrorAction Stop | Where-Object Name -eq $service.Name | Select-Object -First 1)
+        if ($nativeService.Count) {
+            $command = [Environment]::ExpandEnvironmentVariables([string]$nativeService[0].PathName)
+            if ($command -match '^\s*(?:"(?<exe>[A-Za-z]:\\[^"]+\.exe)"|(?<exe>[A-Za-z]:\\.+?\.exe))(?:\s|$)') {
+                $exe = $Matches['exe']
+                if ([IO.Path]::GetFileName($exe) -ieq 'NDI Discovery Service.exe') {
+                    $directory = [IO.Path]::GetDirectoryName($exe)
+                    if ([IO.Path]::GetFileName($directory) -in @('Discovery','Discovery Service')) { $directory = [IO.Path]::GetDirectoryName($directory) }
+                    $candidates.Add($directory)
+                }
+            }
+        }
+    }
+    foreach ($programRoot in @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Select-Object -Unique) {
+        if (-not $programRoot) { continue }
+        $ndiRoot = Join-Path $programRoot 'NDI'
+        if (Test-Path -LiteralPath $ndiRoot -PathType Container) {
+            foreach ($directory in @(Get-ChildItem -LiteralPath $ndiRoot -Directory -Filter 'NDI * Tools' -ErrorAction Stop)) { $candidates.Add($directory.FullName) }
+        }
+    }
+    $seen = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($candidate in $candidates) {
+        $expanded = [Environment]::ExpandEnvironmentVariables($candidate.Trim().Trim('"'))
+        if ($expanded -notmatch '^[A-Za-z]:[\\/]') { throw "Invalid NDI Tools installation location: $candidate" }
+        $path = [IO.Path]::GetFullPath($expanded).TrimEnd('\','/')
+        $broadRoots = @([IO.Path]::GetPathRoot($path), $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:WINDIR, $env:USERPROFILE)
+        if (@($broadRoots | Where-Object { $_ -and $_.TrimEnd('\','/') -ieq $path }).Count) { throw "NDI Tools installation location is too broad to inspect: $candidate" }
+        if (-not $seen.Add($path) -or -not (Test-Path -LiteralPath $path -PathType Container)) { continue }
+        if ((Get-Item -LiteralPath $path -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "NDI Tools installation location is a link: $path" }
+        $path
+    }
+}
+
+function Get-NdiToolsFiles {
+    # Do not recurse through links into unrelated directories, even when a
+    # registered custom root contains a junction. Both consumers use this walk.
+    foreach ($root in @(Get-NdiToolsRoots)) {
+        $pending = New-Object 'Collections.Generic.Stack[string]'
+        $pending.Push($root)
+        while ($pending.Count) {
+            foreach ($entry in @(Get-ChildItem -LiteralPath $pending.Pop() -Force -ErrorAction Stop)) {
+                if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                if ($entry.PSIsContainer) { $pending.Push($entry.FullName) }
+                else { $entry }
+            }
+        }
+    }
 }
 
 function Get-NdiDiscoveryExe {
-    $candidates = @(
-        (Join-Path $env:ProgramFiles 'NDI\NDI 6 Tools\Discovery\NDI Discovery Service.exe'),
-        (Join-Path $env:ProgramFiles 'NDI\NDI 6 Tools\Discovery Service\NDI Discovery Service.exe')
-    )
-    foreach ($path in $candidates) {
-        if (Test-Path -LiteralPath $path) {
-            return $path
-        }
-    }
-    $root = Join-Path $env:ProgramFiles 'NDI'
-    if (Test-Path -LiteralPath $root) {
-        $found = Get-ChildItem -LiteralPath $root -Filter 'NDI Discovery Service.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($found) {
-            return $found.FullName
-        }
-    }
+    $found = Get-NdiToolsFiles | Where-Object Name -eq 'NDI Discovery Service.exe' | Select-Object -First 1
+    if ($found) { return $found.FullName }
     return $null
 }
 
@@ -1201,13 +1249,28 @@ END {
     }
 }
 ' /etc/wsl.conf > /etc/wsl.conf.kilolink
-mv /etc/wsl.conf.kilolink /etc/wsl.conf
+if cmp -s /etc/wsl.conf.kilolink /etc/wsl.conf; then
+    rm /etc/wsl.conf.kilolink
+else
+    mv /etc/wsl.conf.kilolink /etc/wsl.conf
+fi
+# A prior interrupted attempt may have saved systemd=true without restarting.
+# Conversely, a running systemd does not need a restart after normalizing config.
+if [ "$(ps -p 1 -o comm= | tr -d ' ')" = "systemd" ]; then
+    echo KILOLINK_SYSTEMD_READY
+else
+    echo KILOLINK_SYSTEMD_RESTART_REQUIRED
+fi
 '@
-    Invoke-WslScript $Distro $enableSystemd
-    Set-SuiteProgress -Percent ([Math]::Min(42, $script:ProgressPercent + 2)) -Status 'Restarting WSL with systemd enabled'
-    Invoke-Native wsl.exe @('--shutdown') -IgnoreExitCode
-    if (-not (Wait-WslDistroReady -Distro $Distro -TimeoutSeconds 120)) {
-        throw "$Distro did not restart with systemd within 120 seconds."
+    $systemdState = @(Invoke-WslScript $Distro $enableSystemd -Capture)
+    if ($systemdState -contains 'KILOLINK_SYSTEMD_RESTART_REQUIRED') {
+        Set-SuiteProgress -Percent ([Math]::Min(42, $script:ProgressPercent + 2)) -Status "Restarting $Distro with systemd enabled"
+        Invoke-Native wsl.exe @('--terminate', $Distro)
+        if (-not (Wait-WslDistroReady -Distro $Distro -TimeoutSeconds 120)) {
+            throw "$Distro did not restart with systemd within 120 seconds."
+        }
+    } elseif ($systemdState -notcontains 'KILOLINK_SYSTEMD_READY') {
+        throw "Could not verify the systemd state in $Distro. No distribution was restarted."
     }
 
     Set-SuiteProgress -Percent ([Math]::Min(44, $script:ProgressPercent + 2)) -Status 'Installing Linux networking and service prerequisites'
@@ -1462,11 +1525,7 @@ function Initialize-QuietInstaller {
 }
 
 function Assert-NdiToolsFilesAvailable {
-    $ndiRoot = Join-Path $env:ProgramFiles 'NDI'
-    if (-not (Test-Path -LiteralPath $ndiRoot)) { return }
-    $files = @(Get-ChildItem -LiteralPath $ndiRoot -Directory -Filter 'NDI * Tools' | ForEach-Object {
-        Get-ChildItem -LiteralPath $_.FullName -File -Recurse | Where-Object { $_.Extension -in @('.exe','.dll') } | Select-Object -ExpandProperty FullName
-    })
+    $files = @(Get-NdiToolsFiles | Where-Object { $_.Extension -in @('.exe','.dll') } | Select-Object -ExpandProperty FullName -Unique)
     if ($files.Count -eq 0) { return }
     Initialize-QuietInstaller
     $applications = @([KiloLink.Setup.QuietInstaller]::GetLockingApplications([string[]]$files))

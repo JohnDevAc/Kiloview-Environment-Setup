@@ -86,6 +86,9 @@ An internet connection and 64-bit Windows are required for the client packages.
 Server static-address setup waits for Windows to confirm that the address is usable.
 A duplicate address or a 30-second readiness timeout triggers an attempt to
 restore the previous network settings and prevents proceeding with that address.
+Rollback retains manual DNS even when the previous IPv4 address used DHCP;
+an unreadable DNS snapshot prevents changes, and a failed restoration is reported.
+Navigation and new operations are blocked until network configuration finishes.
 Only one copy of the installer can be open at a time.
 
 The executable contains the deployment script, application artwork, licence,
@@ -206,6 +209,11 @@ Repair restores missing components and reconciles the actual container with
 the requested settings. Updates check NDI Tools, Ubuntu/Docker packages and
 the official KiloLink container image. Both preserve existing KiloLink data.
 
+Repair leaves a distribution with systemd already running in place. If systemd
+needs to be activated, only the selected KiloLink distribution is restarted.
+Changing the shared WSL mirrored-networking configuration still requires a
+VM-wide WSL restart; unchanged shared settings do not trigger that restart.
+
 Uninstall removes the suite and its maintenance entry. It retains the reusable
 setup EXE and diagnostic logs in `C:\ProgramData\KiloLink`, WSL, unrelated
 Linux distributions, the shared `.wslconfig` file and Windows IP settings.
@@ -255,8 +263,10 @@ skips the installer download. Older installations and missing Discovery files
 still use the signed installer. If the advertised version is unavailable or
 ambiguous, setup downloads and verifies the package to check its version.
 
+Discovery lookup and file-lock checks use registered NDI installation locations,
+the registered Discovery service path, and the standard Tools directories.
 Before replacing NDI Tools, setup checks for applications using its installed
-files. If an application or background task has them open, setup identifies it
+files, including custom installation directories. If an application or background task has them open, setup identifies it
 and stops before starting the NDI installer. Close the named application or stop
 its background task, then retry. Setup does not automatically close other apps.
 NDI installer diagnostics are saved under `C:\ProgramData\KiloLink\Logs`; a failed

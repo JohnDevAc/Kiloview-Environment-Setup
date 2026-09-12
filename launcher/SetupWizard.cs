@@ -137,7 +137,7 @@ namespace KiloLink.Setup
             reviewPanel.Controls.Add(agentTerms);
             acceptanceBox = new CheckBox { Location = new Point(34, 373), Size = new Size(716, 54), ForeColor = SetupTheme.Text, FlatStyle = FlatStyle.Flat };
             acceptanceBox.FlatAppearance.CheckedBackColor = SetupTheme.Papaya;
-            acceptanceBox.CheckedChanged += delegate { executeButton.Enabled = acceptanceBox.Checked; };
+            acceptanceBox.CheckedChanged += delegate { executeButton.Enabled = acceptanceBox.Checked && !IsOperationInProgress; };
             reviewPanel.Controls.Add(acceptanceBox);
             PageButton(reviewPanel, "Back", 34, 446, 180, false, delegate {
                 if (selectedAction == "InstallClient") { ShowHome(); }
@@ -145,7 +145,7 @@ namespace KiloLink.Setup
                 else { ShowSettings(String.Empty); }
             });
             executeButton = PageButton(reviewPanel, "Install", 550, 446, 200, true, delegate {
-                if (!acceptanceBox.Checked) { return; }
+                if (IsOperationInProgress || !acceptanceBox.Checked) { return; }
                 operationOutcome = "Idle";
                 operationMessage = "No deployment operation was performed.";
                 progressBar.Value = 0;
@@ -267,6 +267,7 @@ namespace KiloLink.Setup
 
         private void ShowPage(LauncherView view, Panel page, IButtonControl next)
         {
+            if (IsOperationInProgress) { return; }
             currentView = view;
             progressViewVisible = false;
             rolePanel.Visible = page == rolePanel;
@@ -282,12 +283,14 @@ namespace KiloLink.Setup
 
         private void ShowHome()
         {
+            if (IsOperationInProgress) { return; }
             autoResume = false;
             ShowPage(LauncherView.Role, rolePanel, roleNextButton);
         }
 
         private void ChooseRole()
         {
+            if (IsOperationInProgress) { return; }
             if (clientChoice.Checked)
             {
                 selectedAction = "InstallClient";
@@ -298,6 +301,7 @@ namespace KiloLink.Setup
 
         private void ShowServerHome()
         {
+            if (IsOperationInProgress) { return; }
             selectedAction = "Install";
             ShowPage(LauncherView.Welcome, welcomePanel, startButton);
             LoadSavedSettings();
@@ -305,6 +309,7 @@ namespace KiloLink.Setup
 
         private void BeginSelectedAction()
         {
+            if (IsOperationInProgress) { return; }
             selectedAction = uninstallChoice.Checked ? "Uninstall" : updateChoice.Checked ? "Update" : repairChoice.Checked ? "Repair" : "Install";
             if (selectedAction == "Uninstall") { ReviewSelectedAction(); }
             else { ShowNetworkPage(); }
@@ -312,12 +317,14 @@ namespace KiloLink.Setup
 
         private void ShowNetworkPage()
         {
+            if (IsOperationInProgress) { return; }
             ShowPage(LauncherView.Network, networkPanel, applyNetworkButton);
             LoadNetworkAdapters();
         }
 
         private void ShowSettings(string status)
         {
+            if (IsOperationInProgress) { return; }
             settingsNetworkLabel.Text = "Server: " + preferredInterfaceAlias + " / " + preferredIpAddress
                 + (String.IsNullOrWhiteSpace(status) ? String.Empty : "\r\n" + status);
             settingsErrorLabel.Text = String.Empty;
@@ -338,6 +345,7 @@ namespace KiloLink.Setup
 
         private void ReviewSelectedAction()
         {
+            if (IsOperationInProgress) { return; }
             bool client = selectedAction == "InstallClient";
             bool removal = selectedAction == "Uninstall";
             if (!removal && !client)
