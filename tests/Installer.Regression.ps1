@@ -144,6 +144,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 }
 
 try {
+    . (Join-Path $PSScriptRoot 'Remediation.Engine.Regression.ps1')
     . (Join-Path $PSScriptRoot 'Qa.Regression.ps1')
     . (Join-Path $PSScriptRoot 'ClientUpdate.Regression.ps1')
     Test-Case 'Client stages both packages before any installation and stops on unavailable downloads' {
@@ -1210,7 +1211,12 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
         $script:Seconds = 0
         function Get-Date { [datetime]'2026-09-05T00:00:00Z' + [timespan]::FromSeconds($script:Seconds) }
         function Start-Sleep { $script:Seconds++ }
-        function Get-NetAdapter { [pscustomobject]@{ifIndex=7;Name='Ethernet'} }
+        function Get-NetAdapter { [pscustomobject]@{ifIndex=7;Name='Ethernet';InterfaceGuid='ad9a9da3-91e9-4e10-92d0-6776f244fc22'} }
+        function Get-ItemProperty {
+            param($LiteralPath)
+            Assert-True ($LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{ad9a9da3-91e9-4e10-92d0-6776f244fc22}') 'Unexpected DNS settings key.'
+            [pscustomobject]@{NameServer=''}
+        }
         function Get-NetIPInterface { [pscustomobject]@{Dhcp='Enabled'} }
         function Get-NetIPAddress {
             if ($script:NetworkApplied) {
@@ -1226,6 +1232,7 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
         function New-NetIPAddress { $script:NetworkApplied = $true }
         function Set-DnsClientServerAddress { }
     }
+    . (Join-Path $PSScriptRoot 'Remediation.Launcher.Regression.ps1')
     Test-Case 'Generated network script parses and accepts a preferred address' {
         . $networkMocks
         $script:AddressState = 'Preferred'

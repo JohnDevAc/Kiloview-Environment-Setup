@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("John Lightfoot")]
 [assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 John Lightfoot")]
-[assembly: AssemblyVersion("2.1.5.0")]
-[assembly: AssemblyFileVersion("2.1.5.0")]
+[assembly: AssemblyVersion("2.1.6.0")]
+[assembly: AssemblyFileVersion("2.1.6.0")]
 
 namespace KiloLink.Setup
 {
@@ -341,6 +341,7 @@ namespace KiloLink.Setup
         private readonly Button applyNetworkButton;
         private readonly Button refreshNetworkButton;
         private readonly Button skipNetworkButton;
+        private readonly Button networkCloseButton;
         private readonly Label networkAdapterDetailsLabel;
         private readonly Label networkStatusLabel;
         private Button startButton;
@@ -363,6 +364,9 @@ namespace KiloLink.Setup
         private bool autoResume;
         private LauncherView currentView;
         private bool networkConfigurationInProgress;
+        private bool installerOperationInProgress;
+        private int networkOperationGeneration;
+        private bool IsOperationInProgress { get { return networkConfigurationInProgress || installerOperationInProgress; } }
         private string preferredInterfaceAlias;
         private string preferredIpAddress;
         private bool progressViewVisible;
@@ -513,7 +517,7 @@ namespace KiloLink.Setup
             skipNetworkButton.Size = new Size(200, 44);
             skipNetworkButton.Click += SkipNetworkButtonClick;
 
-            Button networkCloseButton = CreateButton("Back", false);
+            networkCloseButton = CreateButton("Back", false);
             networkCloseButton.Location = new Point(556, 365);
             networkCloseButton.Size = new Size(172, 44);
             networkCloseButton.Click += delegate { ShowServerHome(); };
@@ -1025,7 +1029,14 @@ namespace KiloLink.Setup
             script.AppendLine("$previousDhcp = [string]$previousInterface.Dhcp");
             script.AppendLine("$previousAddresses = @(Get-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | Select-Object IPAddress, PrefixLength)");
             script.AppendLine("$previousRoutes = @(Get-NetRoute -InterfaceIndex $index -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Select-Object NextHop, RouteMetric)");
-            script.AppendLine("$previousDns = @((Get-DnsClientServerAddress -InterfaceIndex $index -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)");
+            // IPv4 address DHCP and the DNS assignment mode are independent.
+            // Read the saved override before mutation; inaccessible state must not
+            // be mistaken for automatic DNS. Restore through the DNS cmdlet.
+            script.AppendLine("$interfaceGuid = ([guid]$adapter.InterfaceGuid).ToString('B')");
+            script.AppendLine("$dnsSettings = Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\' + $interfaceGuid) -ErrorAction Stop");
+            script.AppendLine("$dnsOverride = $dnsSettings.PSObject.Properties['NameServer']");
+            script.AppendLine("$previousDnsAutomatic = $null -eq $dnsOverride -or [string]::IsNullOrWhiteSpace([string]$dnsOverride.Value)");
+            script.AppendLine("$previousDns = if ($previousDnsAutomatic) { @() } else { @(([string]$dnsOverride.Value) -split '[,\\s]+' | Where-Object { $_ }) }");
             script.AppendLine("function Clear-CurrentIpv4 {");
             script.AppendLine("  Get-NetRoute -InterfaceIndex $index -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue");
             script.AppendLine("  Get-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue");
@@ -1068,7 +1079,6 @@ namespace KiloLink.Setup
             script.AppendLine("    Clear-CurrentIpv4");
             script.AppendLine("    if ($previousDhcp -eq 'Enabled') {");
             script.AppendLine("      Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4 -Dhcp Enabled -ErrorAction Stop");
-            script.AppendLine("      Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses -ErrorAction SilentlyContinue");
             script.AppendLine("    } else {");
             script.AppendLine("      foreach ($oldAddress in $previousAddresses) {");
             script.AppendLine("        New-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -IPAddress $oldAddress.IPAddress -PrefixLength $oldAddress.PrefixLength -ErrorAction Stop | Out-Null");
@@ -1078,13 +1088,13 @@ namespace KiloLink.Setup
             script.AppendLine("          New-NetRoute -InterfaceIndex $index -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -NextHop $oldRoute.NextHop -RouteMetric $oldRoute.RouteMetric -ErrorAction SilentlyContinue | Out-Null");
             script.AppendLine("        }");
             script.AppendLine("      }");
-            script.AppendLine("      if ($previousDns.Count -gt 0) {");
-            script.AppendLine("        Set-DnsClientServerAddress -InterfaceIndex $index -ServerAddresses $previousDns -ErrorAction SilentlyContinue");
-            script.AppendLine("      } else {");
-            script.AppendLine("        Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses -ErrorAction SilentlyContinue");
-            script.AppendLine("      }");
             script.AppendLine("    }");
-            script.AppendLine("  } catch { }");
+            script.AppendLine("    if ($previousDnsAutomatic) {");
+            script.AppendLine("      Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses -ErrorAction Stop");
+            script.AppendLine("    } else {");
+            script.AppendLine("      Set-DnsClientServerAddress -InterfaceIndex $index -ServerAddresses $previousDns -ErrorAction Stop");
+            script.AppendLine("    }");
+            script.AppendLine("  } catch { throw ('Network configuration failed: ' + $configurationFailure.Exception.Message + ' Rollback also failed: ' + $_.Exception.Message + ' Review the adapter settings before retrying.') }");
             script.AppendLine("  throw $configurationFailure");
             script.AppendLine("}");
             return script.ToString();
@@ -1193,11 +1203,13 @@ namespace KiloLink.Setup
             secondaryDnsBox.Enabled = enabled;
             refreshNetworkButton.Enabled = enabled;
             skipNetworkButton.Enabled = enabled;
+            networkCloseButton.Enabled = enabled;
             applyNetworkButton.Enabled = enabled && networkAdapterBox.SelectedItem != null;
         }
 
         private void ApplyNetworkButtonClick(object sender, EventArgs eventArgs)
         {
+            if (IsOperationInProgress) { return; }
             NetworkAdapterChoice choice = networkAdapterBox.SelectedItem as NetworkAdapterChoice;
             if (choice == null)
             {
@@ -1250,6 +1262,7 @@ namespace KiloLink.Setup
             }
 
             networkConfigurationInProgress = true;
+            int generation = ++networkOperationGeneration;
             SetNetworkControlsEnabled(false);
             networkStatusLabel.Text = "Checking required download sources before changing the network...";
             networkStatusLabel.ForeColor = SetupTheme.Accent;
@@ -1286,26 +1299,7 @@ namespace KiloLink.Setup
                 {
                     BeginInvoke((MethodInvoker)delegate
                     {
-                        networkConfigurationInProgress = false;
-                        SetNetworkControlsEnabled(true);
-                        if (failure != null)
-                        {
-                            networkStatusLabel.Text = "Static IP configuration failed. Review the settings and try again.";
-                            networkStatusLabel.ForeColor = SetupTheme.Error;
-                            MessageBox.Show(
-                                "The static IP address could not be applied.\r\n\r\n" + failure.Message,
-                                "Network configuration failed",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Error);
-                            return;
-                        }
-
-                        preferredInterfaceAlias = adapterAlias;
-                        preferredIpAddress = address;
-                        ShowWelcomeView(
-                            String.IsNullOrWhiteSpace(result)
-                                ? "Static IPv4 configured. Ready to begin setup."
-                                : result + ". Ready to begin setup.");
+                        CompleteNetworkConfiguration(generation, adapterAlias, address, result, failure);
                     });
                 }
                 catch (InvalidOperationException) { }
@@ -1314,6 +1308,7 @@ namespace KiloLink.Setup
 
         private void SkipNetworkButtonClick(object sender, EventArgs eventArgs)
         {
+            if (IsOperationInProgress) { return; }
             NetworkAdapterChoice choice = networkAdapterBox.SelectedItem as NetworkAdapterChoice;
             string usableAddress;
             if (choice == null || !choice.Connected || !TryParseIpv4(choice.Address, true, out usableAddress))
@@ -1353,6 +1348,28 @@ namespace KiloLink.Setup
         private void ShowWelcomeView(string status)
         {
             ShowSettings(status);
+        }
+
+        private void CompleteNetworkConfiguration(int generation, string adapterAlias, string address, string result, Exception failure)
+        {
+            if (IsDisposed || !networkConfigurationInProgress || installerOperationInProgress
+                || generation != networkOperationGeneration) { return; }
+            networkConfigurationInProgress = false;
+            SetNetworkControlsEnabled(true);
+            if (currentView != LauncherView.Network) { return; }
+            if (failure != null)
+            {
+                networkStatusLabel.Text = "Static IP configuration failed. Review the settings and try again.";
+                networkStatusLabel.ForeColor = SetupTheme.Error;
+                MessageBox.Show("The static IP address could not be applied.\r\n\r\n" + failure.Message,
+                    "Network configuration failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            preferredInterfaceAlias = adapterAlias;
+            preferredIpAddress = address;
+            ShowWelcomeView(String.IsNullOrWhiteSpace(result)
+                ? "Static IPv4 configured. Ready to begin setup."
+                : result + ". Ready to begin setup.");
         }
 
         private static void AddButtonToTable(TableLayoutPanel table, Button button, int column, int left, int right)
@@ -1434,6 +1451,7 @@ namespace KiloLink.Setup
 
         private void ShowProgressView()
         {
+            if (networkConfigurationInProgress) { return; }
             if (progressViewVisible)
             {
                 return;
@@ -1461,6 +1479,8 @@ namespace KiloLink.Setup
 
         private void StartInstaller()
         {
+            if (IsOperationInProgress) { return; }
+            installerOperationInProgress = true;
             try
             {
                 Directory.CreateDirectory(launcherDirectory);
@@ -1535,6 +1555,16 @@ namespace KiloLink.Setup
             }
             catch (Exception exception)
             {
+                // Keep ownership if Windows started the worker before a reader
+                // setup failed. A retry must not overlap that worker.
+                installerOperationInProgress = false;
+                if (installerProcess != null)
+                {
+                    try { installerOperationInProgress = !installerProcess.HasExited; }
+                    catch (InvalidOperationException) { }
+                    if (installerOperationInProgress) { installerProcess.EnableRaisingEvents = true; }
+                    else { installerProcess.Dispose(); installerProcess = null; }
+                }
                 Environment.ExitCode = 1;
                 FinishWizardOperation(1);
                 pulseTimer.Stop();
@@ -1726,6 +1756,8 @@ namespace KiloLink.Setup
             {
                 BeginInvoke((MethodInvoker)delegate
                 {
+                    if (!Object.ReferenceEquals(installerProcess, completedProcess)) { completedProcess.Dispose(); return; }
+                    installerOperationInProgress = false;
                     pulseTimer.Stop();
                     FinishWizardOperation(exitCode);
 
