@@ -1346,3 +1346,5 @@ Assert-True ($currentLiveReceiptHash -eq $liveReceiptHash) 'The regression suite
 $failed = @($results | Where-Object { -not $_.Passed })
 Write-Host ("{0}/{1} regression checks passed. Test artifacts: {2}" -f ($results.Count - $failed.Count),$results.Count,$testRoot)
 if ($failed.Count -gt 0) { exit 1 }
+# Expected nonzero native fixture exits must not become the suite's CI status.
+exit 0
