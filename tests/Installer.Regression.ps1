@@ -76,11 +76,15 @@ $baseMocks = {
     function Register-ScheduledTask { throw 'Unexpected task registration in test' }
     function Unregister-ScheduledTask { throw 'Unexpected task removal in test' }
     function Start-ScheduledTask { throw 'Unexpected task start in test' }
+    function Disable-ScheduledTask { throw 'Unexpected task disable in test' }
+    function Enable-ScheduledTask { throw 'Unexpected task enable in test' }
     function Stop-ScheduledTask { throw 'Unexpected task stop in test' }
     function Get-ScheduledTask { $null }
     function Get-LanCandidates { [pscustomobject]@{Alias='Ethernet';Address='192.0.2.10';Dhcp=$false} }
+    function Get-NetConnectionProfile { [pscustomobject]@{InterfaceAlias='Ethernet';NetworkCategory='Private'} }
     function Get-WslDistroNames { @() }
     function Assert-PackageSource { }
+    function Save-ResolvedPackage { }
     function Assert-NdiToolsFilesAvailable { }
     function Prepare-ClientPackages { }
     function Assert-ServerDownloads { }
@@ -144,6 +148,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 }
 
 try {
+    . (Join-Path $PSScriptRoot 'Deployment.Regression.ps1')
     . (Join-Path $PSScriptRoot 'Remediation.Engine.Regression.ps1')
     . (Join-Path $PSScriptRoot 'Qa.Regression.ps1')
     . (Join-Path $PSScriptRoot 'ClientUpdate.Regression.ps1')
@@ -399,7 +404,7 @@ try {
         Assert-Throws { Sync-KiloConfig (New-Config) } 'Could not read the live'
         Assert-True ($script:Recreated -eq 0) 'An unreadable container was replaced.'
     }
-    Test-Case 'Update applies the static IP selected in the launcher' {
+    Test-Case 'Update uses the existing address selected in the launcher' {
         . $repairMocks
         $config = New-Config
         Save-Config $config
@@ -464,6 +469,7 @@ try {
         $script:NdiVersionChecks = 0
         $script:NdiSignatureChecks = 0
         function Get-CurrentNdiToolsVersion { $script:NdiVersionChecks++; [version]'6.0.0.0' }
+        function Get-CurrentNdiToolsUrl { $script:NdiToolsUrl }
         function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='6.0.0'} }
         function Get-NdiDiscoveryExe { if ($script:NdiInstalled) { 'C:\Fake\NDI Discovery Service.exe' } }
         function Download-FileWithProgress { $script:NdiDownloads++ }
@@ -933,6 +939,40 @@ try {
         . $healthMocks
         Test-SuiteHealth (New-Config) -TimeoutSeconds 0
     }
+    Test-Case 'Local WSL health and launch URL use localhost while preserving the LAN address' {
+        . $healthMocks
+        $script:SummaryEvent = $null
+        function Write-LauncherEvent { param($Type,$Data) if ($Type -eq 'summary') { $script:SummaryEvent = $Data } }
+        function Invoke-WebRequest {
+            param($Uri)
+            Assert-True ($Uri -eq 'http://127.0.0.1:8088/') 'Health used the mirrored LAN self-address.'
+            [pscustomobject]@{StatusCode=200}
+        }
+        $config = New-Config; $config.WebPort = 8088
+        Test-SuiteHealth $config -TimeoutSeconds 0
+        Assert-True ($script:SummaryEvent.webUrl -eq 'http://127.0.0.1:8088/' -and $script:SummaryEvent.lanWebUrl -eq 'http://192.0.2.10:8088/' -and $script:SummaryEvent.lanVerification -eq 'Requires another device') 'Summary confused local health with LAN verification.'
+    }
+    Test-Case 'Healthy local server on Public network reports the actual network blocker immediately' {
+        . $healthMocks
+        function Get-NetConnectionProfile { [pscustomobject]@{NetworkCategory='Public'} }
+        function Wait-SuiteProgressInterval { throw 'Public network should not wait for a healthy service to start' }
+        Assert-Throws { Test-SuiteHealth (New-Config) } 'responds locally.*Public network.*Private'
+    }
+    Test-Case 'Public server network blocks provisioning before downloads or machine changes' {
+        Invoke-Expression ($ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-ServerDownloads'},$true).Extent.Text)
+        function Get-NetConnectionProfile { [pscustomobject]@{NetworkCategory='Public'} }
+        function Test-WslRuntime { throw 'No runtime probe should follow a Public profile rejection' }
+        function Save-Config { throw 'No configuration should be saved' }
+        Assert-Throws { Repair-Suite -RequestedConfiguration (New-Config) -LicenseAccepted } 'Public network'
+    }
+    Test-Case 'Unknown network profiles fail closed and domain networks pass' {
+        function Get-NetConnectionProfile { throw 'profile unavailable' }
+        Assert-True ((Get-SuiteNetworkAccessIssue (New-Config)) -match 'Could not read.*profile unavailable') 'Unreadable profile was accepted.'
+        function Get-NetConnectionProfile { @() }
+        Assert-True ((Get-SuiteNetworkAccessIssue (New-Config)) -match 'No active') 'Absent network profile was accepted.'
+        function Get-NetConnectionProfile { [pscustomobject]@{NetworkCategory='DomainAuthenticated'} }
+        Assert-True ($null -eq (Get-SuiteNetworkAccessIssue (New-Config))) 'Domain authenticated network was rejected.'
+    }
     Test-Case 'Stopped NDI and unavailable web fail the final health check' {
         . $healthMocks
         function Test-NdiServerReady { $false }
@@ -1068,7 +1108,6 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
     $formType = $assembly.GetType('KiloLink.Setup.SetupForm')
     $staticFlags = [Reflection.BindingFlags]'NonPublic,Static'
     $instanceFlags = [Reflection.BindingFlags]'NonPublic,Instance'
-    $networkScript = $formType.GetMethod('BuildStaticNetworkScript',$staticFlags).Invoke($null,@('Ethernet','192.0.2.20',24,'192.0.2.1','192.0.2.1',''))
     Test-Case 'Native setup starts with Server or Client before loading network adapters' {
         $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
         try {
@@ -1077,8 +1116,8 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
             Assert-True ($formType.GetField('networkAdapterBox',$instanceFlags).GetValue($form).Items.Count -eq 0) 'Network discovery ran before the role choice.'
             Assert-True ($form.AcceptButton -eq $formType.GetField('roleNextButton',$instanceFlags).GetValue($form)) 'Enter does not advance the role choice.'
             [void]$formType.GetMethod('ChooseRole',$instanceFlags).Invoke($form,@())
-            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Welcome') 'Server did not retain its existing maintenance flow.'
-            Assert-True ($formType.GetField('networkAdapterBox',$instanceFlags).GetValue($form).Items.Count -eq 0) 'Server queried networking before the maintenance choice.'
+            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Network') 'Server did not advance directly to adapter selection.'
+            Assert-True ($null -eq $formType.GetField('installChoice',$instanceFlags)) 'Redundant installation mode choices remain.'
         } finally { $form.Dispose() }
     }
     Test-Case 'Native pages fit their content across display scales and constrained desktops' {
@@ -1129,7 +1168,7 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
             $review = $formType.GetField('reviewText',$instanceFlags).GetValue($form).Text
             Assert-True ($review -match 'NDI Tools' -and $review -match 'PC Agent' -and $review -notmatch 'KiloLink Server|Discovery Server|Server IPv4') 'Client review contains server configuration.'
             $links = @($formType.GetField('reviewPanel',$instanceFlags).GetValue($form).Controls | Where-Object { $_ -is [Windows.Forms.LinkLabel] -and $_.Visible })
-            Assert-True ($links.Count -eq 2 -and @($links | Where-Object Name -eq 'kiloTerms').Count -eq 0) 'Client showed the wrong vendor licences.'
+            Assert-True ($links.Count -eq 3 -and @($links | Where-Object Name -eq 'kiloTerms').Count -eq 0) 'Client showed the wrong vendor licences.'
             $arguments = $formType.GetMethod('BuildOperationArguments',$instanceFlags)
             Assert-Throws { $arguments.Invoke($form,@()) } 'NDI Tools licence acceptance'
             $formType.GetField('acceptanceBox',$instanceFlags).GetValue($form).Checked = $true
@@ -1159,8 +1198,8 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
     Test-Case 'Native uninstall reaches review without requiring network configuration' {
         $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
         try {
-            $formType.GetField('uninstallChoice',$instanceFlags).GetValue($form).Checked = $true
-            [void]$formType.GetMethod('BeginSelectedAction',$instanceFlags).Invoke($form,@())
+            $formType.GetField('selectedAction',$instanceFlags).SetValue($form,'Uninstall')
+            [void]$formType.GetMethod('ReviewSelectedAction',$instanceFlags).Invoke($form,@())
             Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Review') 'Uninstall was blocked by the network page.'
             $execute = $formType.GetField('executeButton',$instanceFlags).GetValue($form)
             Assert-True (-not $execute.Enabled) 'Data removal is enabled before confirmation.'
@@ -1196,7 +1235,7 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
             Assert-Throws { $arguments.Invoke($form,@()) } 'licence acceptance'
             $formType.GetField('acceptanceBox',$instanceFlags).GetValue($form).Checked = $true
             $value = $arguments.Invoke($form,@())
-            Assert-True ($value -like ' -Action Install -AcceptLicenses -ConfigurationPath *') 'The worker still launches an interactive menu.'
+            Assert-True ($value -like ' -Action Setup -AcceptLicenses -ConfigurationPath *') 'The worker still launches an interactive menu.'
             $request = $formType.GetField('requestPath',$instanceFlags).GetValue($form)
             $json = Get-Content -Raw -LiteralPath $request | ConvertFrom-Json
             Assert-True ($json.PrimaryInterfaceAlias -eq 'Ethernet "AV"' -and $json.WebPort -eq 8088 -and $json.LinkPort -eq 50000 -and $json.NdiDiscoveryPort -eq 5959 -and $json.PublicIp -eq '192.0.2.10') 'Request serialization lost or changed a setting.'
@@ -1204,53 +1243,27 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
             Assert-True (-not (Test-Path -LiteralPath $request)) 'The completed request was not cleaned up.'
         } finally { $form.Dispose() }
     }
-    $networkMocks = {
-        $script:NetworkApplied = $false
-        $script:Rollback = $false
-        $script:AddressReads = 0
-        $script:Seconds = 0
-        function Get-Date { [datetime]'2026-09-05T00:00:00Z' + [timespan]::FromSeconds($script:Seconds) }
-        function Start-Sleep { $script:Seconds++ }
-        function Get-NetAdapter { [pscustomobject]@{ifIndex=7;Name='Ethernet';InterfaceGuid='ad9a9da3-91e9-4e10-92d0-6776f244fc22'} }
-        function Get-ItemProperty {
-            param($LiteralPath)
-            Assert-True ($LiteralPath -eq 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{ad9a9da3-91e9-4e10-92d0-6776f244fc22}') 'Unexpected DNS settings key.'
-            [pscustomobject]@{NameServer=''}
-        }
-        function Get-NetIPInterface { [pscustomobject]@{Dhcp='Enabled'} }
-        function Get-NetIPAddress {
-            if ($script:NetworkApplied) {
-                $script:AddressReads++
-                [pscustomobject]@{IPAddress='192.0.2.20';PrefixLength=24;PrefixOrigin='Manual';AddressState=$script:AddressState}
-            } else { [pscustomobject]@{IPAddress='192.0.2.10';PrefixLength=24;PrefixOrigin='Dhcp';AddressState='Preferred'} }
-        }
-        function Get-NetRoute { }
-        function Get-DnsClientServerAddress { [pscustomobject]@{ServerAddresses=@('192.0.2.1')} }
-        function Set-NetIPInterface { param($InterfaceIndex,$AddressFamily,$Dhcp,$ErrorAction) if ($Dhcp -eq 'Enabled') { $script:Rollback = $true } }
-        function Remove-NetRoute { }
-        function Remove-NetIPAddress { }
-        function New-NetIPAddress { $script:NetworkApplied = $true }
-        function Set-DnsClientServerAddress { }
-    }
     . (Join-Path $PSScriptRoot 'Remediation.Launcher.Regression.ps1')
-    Test-Case 'Generated network script parses and accepts a preferred address' {
-        . $networkMocks
-        $script:AddressState = 'Preferred'
-        $output = & ([scriptblock]::Create($networkScript))
-        Assert-True ($output -match 'Configured 192.0.2.20') 'Preferred address was rejected.'
-        Assert-True (-not $script:Rollback) 'A usable address was rolled back.'
-    }
-    Test-Case 'Duplicate static address triggers rollback' {
-        . $networkMocks
-        $script:AddressState = 'Duplicate'
-        Assert-Throws { & ([scriptblock]::Create($networkScript)) } 'already in use'
-        Assert-True $script:Rollback 'DHCP was not restored after a duplicate address.'
-    }
-    Test-Case 'Tentative address times out and rolls back' {
-        . $networkMocks
-        $script:AddressState = 'Tentative'
-        Assert-Throws { & ([scriptblock]::Create($networkScript)) } 'did not become usable'
-        Assert-True ($script:Seconds -eq 30 -and $script:Rollback) 'Timeout did not restore DHCP.'
+    . (Join-Path $PSScriptRoot 'SingleWindow.Regression.ps1')
+    Test-Case 'Adapter selection is read-only and goes directly to review with saved ports' {
+        $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
+        try {
+            $choiceType = $assembly.GetType('KiloLink.Setup.NetworkAdapterChoice')
+            $choice = [Activator]::CreateInstance($choiceType,$true)
+            foreach ($entry in @{Alias='Fixture Ethernet';Address='192.0.2.50';PrefixLength=24;Connected=$true;Dhcp=$true}.GetEnumerator()) { $choiceType.GetField($entry.Key,$instanceFlags).SetValue($choice,$entry.Value) }
+            $box = $formType.GetField('networkAdapterBox',$instanceFlags).GetValue($form)
+            [void]$box.Items.Add($choice); $box.SelectedIndex = 0
+            $formType.GetField('webPortBox',$instanceFlags).GetValue($form).Value = 8088
+            [void]$formType.GetMethod('ContinueNetworkButtonClick',$instanceFlags).Invoke($form,@($null,[EventArgs]::Empty))
+            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Review') 'Adapter selection added an unnecessary configuration step.'
+            Assert-True ($formType.GetField('preferredIpAddress',$instanceFlags).GetValue($form) -eq '192.0.2.50') 'Existing address was not selected.'
+            Assert-True ($formType.GetField('webPortBox',$instanceFlags).GetValue($form).Value -eq 8088) 'Saved port was overwritten.'
+            Assert-True ($null -eq $formType.GetMethod('BuildStaticNetworkScript',$staticFlags) -and $null -eq $formType.GetField('ipAddressBox',$instanceFlags)) 'Static network mutation code or fields remain.'
+            $choiceType.GetField('Connected',$instanceFlags).SetValue($choice,$false)
+            [void]$formType.GetMethod('ShowHome',$instanceFlags).Invoke($form,@())
+            [void]$formType.GetMethod('ContinueNetworkButtonClick',$instanceFlags).Invoke($form,@($null,[EventArgs]::Empty))
+            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Role') 'Disconnected adapter was accepted.'
+        } finally { $form.Dispose() }
     }
     Test-Case 'Launcher distinguishes completion, failure, cancellation and restart' {
         $form = $formType.GetConstructor($instanceFlags,$null,@([bool]),$null).Invoke(@($false))
@@ -1302,12 +1315,12 @@ echo SERVICE_OK
 '@
         $docker = "#!/bin/sh`nif [ `"`$1`" = inspect ]; then echo true; fi`n"
         $sleep = "#!/bin/sh`necho KEEPALIVE_TICK`nprintf tick > `"`$MOCK_MARKER`"`n"
-        foreach ($stub in @(@('systemctl',$systemctl),@('docker',$docker),@('sleep',$sleep))) {
+        foreach ($stub in @(@('systemctl',$systemctl),@('docker',$docker),@('sleep',$sleep),@('flock',"#!/bin/sh`nexit 0`n"))) {
             [IO.File]::WriteAllText((Join-Path $stubRoot $stub[0]),$stub[1].Replace("`r`n","`n"),$utf8)
         }
         $unixRoot = '/' + $stubRoot.Substring(0,1).ToLowerInvariant() + $stubRoot.Substring(2).Replace('\','/')
         foreach ($mode in @('startup','later')) {
-            $probe = "export PATH='$unixRoot':/usr/bin:/bin`nexport MOCK_MODE='$mode'`nexport MOCK_MARKER='$unixRoot/$mode.marker'`n" + (Get-KiloWatchdogCommand)
+            $probe = "export PATH='$unixRoot':/usr/bin:/bin`nexport MOCK_MODE='$mode'`nexport MOCK_MARKER='$unixRoot/$mode.marker'`n" + (Get-KiloWatchdogCommand).Replace('/var/lib/kilolink', "$unixRoot/state")
             $probePath = Join-Path $stubRoot "$mode.sh"
             [IO.File]::WriteAllText($probePath,$probe,$utf8)
             $output = & $BashPath --noprofile --norc $probePath

@@ -29,7 +29,14 @@ try {
     if ($other.HasExited) { throw 'Disposal affected another process tree.' }
     $second.Dispose(); $second = $null
     if (-not $other.WaitForExit(5000)) { throw 'The second fixture did not clean up.' }
-    if ([KiloLink.Setup.QuietInstaller]::GetLockingApplications(@($exe)).Length -ne 0) { throw 'Restart Manager retained stale locks after fixture cleanup.' }
+    # Restart Manager can briefly return its previous snapshot after process exit.
+    $deadline = [datetime]::UtcNow.AddSeconds(5)
+    do {
+        $remainingLocks = [KiloLink.Setup.QuietInstaller]::GetLockingApplications(@($exe))
+        if ($remainingLocks.Length -eq 0) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([datetime]::UtcNow -lt $deadline)
+    if ($remainingLocks.Length -ne 0) { throw 'Restart Manager retained stale locks after fixture cleanup.' }
     $failed = $false
     try { [KiloLink.Setup.QuietInstaller]::Start((Join-Path $fixtureRoot 'missing.exe'), '') | Out-Null } catch { $failed = $true }
     if (-not $failed) { throw 'A failed hidden start silently succeeded.' }

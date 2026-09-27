@@ -2,8 +2,15 @@
 
 See [current suite deployment behavior](INTEROPERABILITY.md) for role receipts, download gates, offline Client packages, port restrictions and shared-runtime removal.
 
-Kiloview Environment Setup is a single-file Windows installer with a native
-Windows Forms interface. Its first screen lets you choose **Server** or **Client**.
+Version 3.0.2 is a single Windows setup wizard. Choose **Server** or **Client**,
+review the settings and licences, then set up or update the platform in the same
+window. WiX/MSI installs the reusable configuration app silently in the background.
+Windows and WSL are retained. Full NDI Tools supplies Discovery Server.
+
+The installer is **unsigned**. Automated checks do not replace full deployment
+and reboot testing on the intended Windows machine. See
+[the v3 design and acceptance checklist](docs/V3-DEPLOYMENT.md) and
+[backup/recovery instructions](docs/RECOVERY.md).
 
 **Client** installs the latest official NDI Tools and
 [NDI Configurator PC Agent](https://github.com/JohnDevAc/Kiloview-PC-Onboarding).
@@ -17,37 +24,34 @@ Windows Forms interface. Its first screen lets you choose **Server** or **Client
 
 ## Run
 
-Download `Kiloview-Environment-Setup.exe`, double-click it and approve the
-Windows Administrator prompt. All setup choices use native Windows controls;
-there are no embedded PowerShell menus or text responses to type.
+Run the release `Kiloview-Environment-Setup.exe` and approve elevation when prompted.
+There is no preliminary installation wizard or separate Launch step. The installer is
+copyright (c) 2026 John Lightfoot and free for personal and commercial use under
+MIT; downloaded products retain their separate licences. The EULA and notices
+are also available from the configuration application's first page.
 
-1. Choose **Server** or **Client**, then **Next**, before any networking decisions.
-   **Client** goes directly to the client review described below.
-2. For **Server**, choose **Install**, **Repair / reconfigure**, **Check for and install
-   updates**, or **Uninstall**. Existing and partial installations are detected
-   from saved configuration, the dedicated WSL registration and NDI Tools.
-3. For server install, repair or update, select a physical Ethernet or Wi-Fi adapter.
-   Review the prefilled IPv4 address, prefix length, gateway and DNS servers.
-   Apply a static address, or use **Skip for now** for an existing stable address
-   or DHCP reservation. Applying the address can briefly interrupt networking.
-4. Set the KiloLink web port, even device-link port pair and NDI Discovery port.
-   Repair and update prefill saved values. When saved settings are missing,
-   review the displayed port defaults; repair preserves any detected existing
-   KiloLink data mount and vendor image.
-5. Review the settings and vendor licence links, tick the acceptance checkbox,
-   then choose **Install**, **Apply repair** or **Install updates**.
-6. Follow the native progress bar and status messages. At completion,
+1. Choose **Server** or **Client**, then **Next**. Client goes directly to review.
+2. For Server, select the existing physical Ethernet or Wi-Fi adapter/address.
+   IP addressing, gateway, DNS and DHCP reservations are the user's responsibility;
+   setup contains no controls or commands to change them.
+3. Review the detected settings and licences. Saved service ports are retained;
+   new installations use defaults. **Change service ports** is available if needed.
+4. Accept the installer EULA and applicable vendor licences, then choose
+   **Set up / update server** or **Set up / update client**. Server setup installs
+   missing components and checks WSL, Ubuntu/Docker, KiloLink and NDI updates.
+   Existing KiloLink data is backed up before runtime updates or container replacement.
+5. Follow the progress and status messages in the same window. At completion,
    open KiloLink, return to setup, or finish. When Windows needs a restart,
    choose **Restart Windows** or **Restart later**.
 
-Server uninstall goes straight to a removal review, without requiring a working
+Server uninstall, reached through its Windows Installed apps entry, goes straight to a removal review, without requiring a working
 network adapter. Its confirmation checkbox explicitly acknowledges deletion
 of KiloLink application data before **Uninstall** is enabled.
 
 ### Client setup
 
 Client review lists NDI Tools and PC Agent, with their licence links. Accept the
-NDI Tools licence and choose **Install client tools**. Setup obtains the current
+installer EULA and NDI Tools licence and choose **Set up / update client**. Setup obtains the current
 Windows package from [NDI's official download page](https://ndi.video/tools/),
 checks its Windows signature and installs it. Re-running Client updates older
 NDI Tools or reinstalls the current package to restore missing files. A newer
@@ -62,7 +66,9 @@ including its .NET runtime, verifies the release SHA-256 digest, size, archive p
 and binary product/version, then opens the agent's own native Windows setup.
 Review its licence and select the production adapter there. Close that window
 when it reports the agent is ready to return to this installer's completion view.
-A configured PC Agent at the current or a newer version is retained.
+A configured PC Agent at the current or a newer version is retained. Its current
+licence permits unmodified non-commercial use; commercial use requires separate
+permission. The installer's free MIT licence does not relicense PC Agent.
 
 If the GitHub API is unavailable or returns a rate-limit error such as HTTP 403,
 setup uses the repository's public latest-release redirect and published `.sha256`
@@ -75,7 +81,7 @@ rules. Job onboarding is initiated from NDI Job Configurator. Cancelling agent
 setup is reported as incomplete client setup; NDI Tools remains installed and
 Client can be run again to finish.
 
-Client skips this installer's static-IP page and server port settings. It does
+Client skips adapter selection and server port settings. It does
 not deploy KiloLink, WSL, Docker, the dedicated Discovery Server startup task,
 server firewall rules, server maintenance registration or server configuration.
 It can also be selected on a PC with an existing server configuration without
@@ -83,13 +89,9 @@ changing that configuration. If NDI Tools needs a restart, the Windows UI offers
 **Restart Windows** or **Restart later**; no server continuation is scheduled.
 An internet connection and 64-bit Windows are required for the client packages.
 
-Server static-address setup waits for Windows to confirm that the address is usable.
-A duplicate address or a 30-second readiness timeout triggers an attempt to
-restore the previous network settings and prevents proceeding with that address.
-Rollback retains manual DNS even when the previous IPv4 address used DHCP;
-an unreadable DNS snapshot prevents changes, and a failed restoration is reported.
-Navigation and new operations are blocked until network configuration finishes.
-Only one copy of the installer can be open at a time.
+Adapter selection reads existing Windows settings. A disconnected adapter or
+unusable IPv4 address cannot proceed. Only one copy of setup can be open at a
+time, and navigation is blocked while installation is running.
 
 The executable contains the deployment script, application artwork, licence,
 and third-party notices, so no other downloaded project files are required.
@@ -120,18 +122,27 @@ Alternatively, open PowerShell and run:
 
 The script requests Administrator elevation if needed.
 
-## Building Kiloview-Environment-Setup.exe
+## Building the application and installer
 
-`Kiloview-Environment-Setup.exe` is built with the .NET Framework compiler
-included with Windows 11. After changing `Install-KiloLinkSuite.ps1` or the
-launcher source, run:
+Edit `src/Provisioner/*.ps1`, not the generated root `Install-KiloLinkSuite.ps1`.
+The build concatenates and parses these modules, embeds the application policy
+from `packages/applications.json`, and takes all product versions from
+`version.json`. The application uses Windows' .NET Framework compiler. The MSI
+and bundle use the .NET SDK from `global.json` and WiX 5.0.2 restored by NuGet.
 
 ```powershell
 .\Build-Setup.ps1
+.\Build-Installer.ps1
 ```
 
-The build embeds the current PowerShell script into the executable. Launcher
-source (`SetupLauncher.cs`, `SetupWizard.cs`, `SetupLayout.cs` and the embedded
+The release bundle is `artifacts/installer/Kiloview-Environment-Setup.exe`, with a
+SHA-256 sidecar. `artifacts/msi/Kiloview-Configuration.msi` contains only owned
+application files and a shortcut. The root EXE remains a portable development
+launcher; it is not the new setup bundle. `Build-Provisioner.ps1 -Check` verifies
+that generated source is current. No build step installs or configures services.
+
+The build embeds the current PowerShell script into the application. Launcher
+source (`SetupLauncher.cs`, `SetupWizard.cs`, `SetupLayout.cs`, `SetupPackage.cs` and the embedded
 `QuietInstaller.cs` helper) and its Administrator manifest are under `launcher`. The Windows icon
 source and multi-resolution `.ico` file are under `assets` and are embedded by
 the same build. The MIT licence and third-party notices are also embedded;
@@ -142,11 +153,14 @@ Run the regression checks after building:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Installer.Regression.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-QuietInstaller.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Packaging.Regression.ps1
 ```
 
 The checks use isolated configuration files, fake Windows services and network
 adapters, and the compiled launcher. Git for Windows Bash is required to test
-the generated Linux watchdog; use `-BashPath` if it is installed elsewhere.
+the generated Linux watchdog and replacement/recovery scripts; use `-BashPath`
+if it is installed elsewhere. Windows tests mock Docker and Linux flock; they
+exercise actual archives, data restoration and interrupted-operation guards.
 These checks do not install software, change network settings, or register
 scheduled tasks. A complete installation and reboot should also be tested on
 a disposable Windows 11 machine before release.
@@ -158,7 +172,7 @@ operations use the application's granular progress view. Detailed
 WSL, APT, Docker, and installer output is written to diagnostic files, including
 `C:\ProgramData\KiloLink\installer.log`, and is not displayed inside the app.
 
-For a clean server PC, choose **Server**, then **Install**. Missing or disabled WSL is treated as the normal
+For a clean server PC, choose **Server**, select its existing network adapter and choose **Set up / update server**. Missing or disabled WSL is treated as the normal
 clean-install state. Setup enables and verifies WSL and Virtual Machine
 Platform, installs and updates the WSL runtime without an unrelated default
 distribution, and waits for each prerequisite to become healthy before moving
@@ -197,17 +211,25 @@ interactive prompt sequence.
 
 ## Repair, updates and removal
 
-Rerun the same EXE and choose **Server** to repair, reconfigure, update or uninstall
-the server suite. Choose **Client** to check/install the client tools again.
+Open **Kiloview Configuration** and choose **Server** to set up or update the
+server, or **Client** for the client tools. Setup selects the required install,
+repair and update work automatically. Rerunning the release EXE first updates
+the configuration application silently, then performs the reviewed work in the
+same window. Removing the server remains a separate, explicitly confirmed
+operation through its Windows Installed apps entry or the script interface.
 Once an installation, repair or update begins, setup also creates a **Kiloview
 Environment Setup** Start menu shortcut and registers an uninstall entry in
 Windows **Installed apps**. Maintenance is registered for the installing
 Windows account because WSL distributions belong to that account. Use that
 same account for subsequent maintenance and reboot continuation.
 
-Repair restores missing components and reconciles the actual container with
-the requested settings. Updates check NDI Tools, Ubuntu/Docker packages and
-the official KiloLink container image. Both preserve existing KiloLink data.
+The main setup action restores missing components, applies the selected address
+and ports, and updates the runtime and applications. Advanced script actions
+`Repair`, `Update`, `MaintainRuntime` and `Backup` remain available for targeted
+maintenance. Downloads record verified versions/hashes;
+KiloLink replacement uses the resolved image identity and backs up its data first.
+An unhealthy replacement attempts to restore the old container and data. See
+[RECOVERY.md](docs/RECOVERY.md) for interruption handling and limits.
 
 Repair leaves a distribution with systemd already running in place. If systemd
 needs to be activated, only the selected KiloLink distribution is restarted.
@@ -255,8 +277,9 @@ Change the default password immediately after the first login. Existing
 installations retain their previously configured password. NDI Tools and NDI
 Discovery Server do not provide a web login.
 
-Update checks the official current NDI Tools package, Ubuntu and Docker
-packages, and the Kiloview KiloLink container image.
+The main setup action checks the current official NDI Tools package, Kiloview
+container image and runtime packages. The advanced `Update` script action is
+limited to application updates.
 For NDI Tools, server updates first read the version advertised on the official
 download page. A current or newer installation with Discovery Service present
 skips the installer download. Older installations and missing Discovery files
@@ -273,34 +296,45 @@ NDI installer diagnostics are saved under `C:\ProgramData\KiloLink\Logs`; a fail
 installation reports its specific log path. A required Windows restart defers
 the remaining server configuration until setup resumes after sign-in.
 
-Uninstall removes KiloLink and its persisted application data, NDI Tools and
-Discovery Server, the scheduled tasks, installer firewall rules, legacy port
+Server-role uninstall removes KiloLink and its persisted application data,
+restores managed Discovery settings, and removes scheduled tasks, firewall rules, legacy port
 proxies associated with the saved configuration, shortcuts, and the dedicated
-`KiloLink-Ubuntu` distribution. It retains WSL, unrelated distributions, and
-the shared `.wslconfig` file so unrelated Linux data is not destroyed.
+`KiloLink-Ubuntu` distribution. It retains shared NDI Tools, PC Agent, WSL,
+unrelated distributions, prior Windows backups and the shared `.wslconfig` file.
+Back up before confirming destructive server removal. Removing **Kiloview
+Environment Setup** through Windows Apps removes only the configuration app;
+its MSI does not delete the running server or its data.
 
 ## Multi-NIC behavior
 
-After choosing an operation, the network screen lists physical Ethernet and Wi-Fi adapters. Docker,
+After choosing Server, the network screen lists physical Ethernet and Wi-Fi adapters. Docker,
 WSL, Hyper-V, tunnel, VPN, and loopback adapters are excluded. Connected wired
 adapters are listed first. The selected adapter and address are passed into the
 deployment engine so the same adapter does not need to be selected again.
 
 The selected address is the primary address advertised to KiloLink devices.
 Local browser shortcuts use `127.0.0.1` so their targets survive address changes.
+Service readiness also checks `127.0.0.1`; the server's own request to its LAN
+address is not used to decide whether KiloLink has started. Verify the displayed
+LAN address from another device on the intended network.
+
+The selected server network must have a Private or Domain authenticated Windows
+profile because the suite's Windows firewall rules apply to those profiles.
+Setup checks this before provisioning. For a trusted home/office network marked
+Public, change its profile to Private in Windows Network settings. Keep public
+or guest networks marked Public and select a trusted server network instead.
+
 WSL mirrored networking and host networking
 inside Docker allow KiloLink to listen through all active physical adapters.
 NDI Discovery Server binds to 0.0.0.0 for the same reason.
 
-Use a static address that is excluded from the DHCP pool, or reserve it on the
-DHCP server before choosing **Skip for now**. If an address later changes,
-rerun the launcher, correct the static configuration, and choose Repair /
-reconfigure.
+Configure a stable address or DHCP reservation outside this installer. If the
+address changes, rerun setup and select the current adapter/address.
 
-Update also applies the adapter and address selected in the launcher, including
-static addresses. Unattended repair and update refresh the saved adapter's
+Setup uses the adapter and existing address selected in the launcher.
+Unattended repair and update refresh the saved adapter's
 address when it has changed; if several addresses make the choice ambiguous,
-setup asks you to use Repair / reconfigure.
+setup asks you to select the address in the wizard.
 
 ## Defaults
 

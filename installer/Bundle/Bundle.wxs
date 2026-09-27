@@ -1,0 +1,11 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle Name="Kiloview Environment Setup" Manufacturer="John Lightfoot" Version="$(var.ProductVersion)"
+          UpgradeCode="08255618-82C9-42BE-A952-895D91DD4D8E" IconSourceFile="$(var.PayloadDir)\setup.ico">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="rtfLicense" LicenseFile="$(var.PayloadDir)\EULA.rtf" SuppressOptionsUI="yes" ShowVersion="yes" />
+    </BootstrapperApplication>
+    <Chain>
+      <MsiPackage SourceFile="$(var.ApplicationMsi)" Visible="no" Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

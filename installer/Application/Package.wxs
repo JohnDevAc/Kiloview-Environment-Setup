@@ -1,0 +1,49 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Kiloview Configuration" Manufacturer="John Lightfoot" Version="$(var.ProductVersion)"
+           UpgradeCode="EB15F79D-6598-4AB1-8E39-B8D927B05862" Scope="perMachine" Language="1033">
+    <MajorUpgrade DowngradeErrorMessage="A newer Kiloview Configuration is installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPCOMMENTS" Value="Configures the WSL KiloLink server and NDI Tools. Removing this application retains server data and vendor software; remove the server role in Kiloview Configuration first." />
+    <Property Id="ARPHELPLINK" Value="https://github.com/JohnDevAc/Kiloview-Environment-Setup" />
+    <Icon Id="SetupIcon.exe" SourceFile="$(var.PayloadDir)\Kiloview-Environment-Setup.exe" />
+    <Property Id="ARPPRODUCTICON" Value="SetupIcon.exe" />
+    <Property Id="ACTUALWINDOWSBUILD">
+      <RegistrySearch Id="BuildNumberSearch" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion" Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND ACTUALWINDOWSBUILD &gt;= 22621)" Message="Windows 11 22H2 or later (64-bit) is required." />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="KiloviewFolder" Name="Kiloview">
+        <Directory Id="INSTALLFOLDER" Name="Environment Setup">
+          <Component Id="ConfigurationApplication" Guid="814AB535-A135-4898-B8F7-099A06B758B7">
+            <File Id="ConfigurationExe" Source="$(var.PayloadDir)\Kiloview-Environment-Setup.exe" KeyPath="yes">
+              <Shortcut Id="ConfigurationShortcut" Name="Kiloview Configuration" Directory="ApplicationMenuFolder" Advertise="yes" WorkingDirectory="INSTALLFOLDER" Icon="SetupIcon.exe" />
+            </File>
+            <RemoveFolder Id="RemoveMenuFolder" Directory="ApplicationMenuFolder" On="uninstall" />
+            <File Source="$(var.PayloadDir)\Install-KiloLinkSuite.ps1" />
+            <File Source="$(var.PayloadDir)\QuietInstaller.cs" />
+            <File Source="$(var.PayloadDir)\managed-installation.json" />
+            <File Source="$(var.PayloadDir)\LICENSE" />
+            <File Source="$(var.PayloadDir)\EULA.md" />
+            <File Source="$(var.PayloadDir)\EULA.rtf" />
+            <File Source="$(var.PayloadDir)\THIRD_PARTY_NOTICES.md" />
+            <File Source="$(var.PayloadDir)\RECOVERY.md" />
+            <File Source="$(var.PayloadDir)\applications.json" />
+          </Component>
+          <Directory Id="LicenseDirectory" Name="licenses">
+            <Component Id="WiXNotices" Guid="E4FBF821-9871-4708-A586-225DBB20872E">
+              <File Source="$(var.PayloadDir)\licenses\WiX-5.0.2.txt" KeyPath="yes" />
+              <File Source="$(var.PayloadDir)\licenses\wix-5.0.2-source.zip" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationMenuFolder" Name="Kiloview" />
+    </StandardDirectory>
+    <Feature Id="Configuration" Title="Kiloview Configuration" Level="1">
+      <ComponentRef Id="ConfigurationApplication" />
+      <ComponentRef Id="WiXNotices" />
+    </Feature>
+  </Package>
+</Wix>

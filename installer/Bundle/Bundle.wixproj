@@ -1,0 +1,11 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputName>Kiloview-Environment-Setup</OutputName>
+    <OutputType>Bundle</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <DefineConstants>ProductVersion=$(ProductVersion);PayloadDir=$(PayloadDir);ApplicationMsi=$(ApplicationMsi);RepoRoot=$(RepoRoot)</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Bal.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>
