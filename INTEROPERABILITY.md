@@ -1,5 +1,15 @@
 # Suite deployment behavior
 
+## Version 3 candidate — 27 September 2026
+
+See [the v3 deployment design](docs/V3-DEPLOYMENT.md) for MSI/Burn packaging,
+single-window setup, automatic runtime/application updates, durable
+operation journals and guarded KiloLink backup/recovery. Windows, WSL, full NDI
+Tools, owner checks and shared-component behavior below are retained. The setup
+EULA names John Lightfoot and keeps the installer's MIT free-use rights separate
+from vendor terms, including PC Agent's non-commercial licence. The historical
+test counts below describe earlier versions, not the current candidate.
+
 ## Client update diagnostics and validation — 7 September 2026
 
 Client setup records the staged PC Agent Setup path and process exit code. A failure after NDI Tools finishes now reports the surviving Agent/Setup versions and configured-state evidence, retaining the original error and any NDI restart requirement. Updated application files are not sufficient to suppress a genuine setup failure: configuration, startup or firewall work may fail after replacement.
@@ -24,7 +34,7 @@ Server setup runs from the signed-in administrator account that will own WSL/sta
 
 The backend checks required download sources before install, update, repair and resumed operations. Client stages and verifies both packages before starting either installer. GitHub metadata alone is insufficient: the selected asset must be accessible. NDI signatures and publishers, Agent package hashes/sizes/product versions, and archive safety remain mandatory. Reused loose files are extracted again from the verified archive before launch.
 
-The static-address action performs a source-only prerequisite check before its separate, explicitly confirmed network change. After licence review, the install action acquires and verifies payloads and rechecks readiness. A successful source probe cannot guarantee that connectivity will persist through a later operation; network changes have their own rollback and failed setup can be retried.
+The 3.0.2 wizard only reads adapter/address information. The user configures IP, gateway and DNS settings outside setup. After licence review, setup acquires and verifies payloads and rechecks readiness. Fresh, partial and existing server installations use the same Setup action, which installs missing components and checks runtime and application updates; failed setup can be retried.
 
 Windows checks resolve WSL and Ubuntu download endpoints before enabling features. WSL uses its web-download path; healthy-runtime repair avoids an unnecessary update. Linux package/repository checks run inside the actual WSL distribution. First-time Linux checks necessarily follow WSL/distro installation; failure leaves those prerequisites available for a later retry. Container pulls still complete before replacing the running container. Existing services may need a restart for prerequisite changes; failure does not mean the entire installation was rolled back.
 

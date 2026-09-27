@@ -1,3 +1,5 @@
 # Embedded resources must match a fresh checkout byte-for-byte on every host.
 Install-KiloLinkSuite.ps1 text eol=crlf
 launcher/QuietInstaller.cs text eol=crlf
+src/Provisioner/*.ps1 text eol=lf
+packages/*.json text eol=lf

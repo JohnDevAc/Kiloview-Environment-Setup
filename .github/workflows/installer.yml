@@ -1,0 +1,38 @@
+name: Installer validation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.425'
+      - name: Check generated provisioner
+        shell: powershell
+        run: .\Build-Provisioner.ps1 -Check
+      - name: Build configuration app and setup bundle
+        shell: powershell
+        run: |
+          .\Build-Setup.ps1
+          .\Build-Installer.ps1
+      - name: Isolated provisioning and native launcher regressions
+        shell: powershell
+        run: .\tests\Installer.Regression.ps1
+      - name: Native vendor process isolation
+        shell: powershell
+        run: .\tests\Test-QuietInstaller.ps1
+      - name: Package and licence verification
+        shell: powershell
+        run: .\tests\Packaging.Regression.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installer
+          path: |
+            artifacts/installer/*.exe
+            artifacts/installer/*.sha256

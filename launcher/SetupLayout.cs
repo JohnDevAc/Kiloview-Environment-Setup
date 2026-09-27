@@ -277,6 +277,14 @@ namespace KiloLink.Setup
             int borderHeight = Height - ClientSize.Height;
             int maximumWidth = Math.Max(1, work.Width - borderWidth - Px(24));
             int maximumHeight = Math.Max(1, work.Height - borderHeight - Px(24));
+            // Form.SetBoundsCore also applies these native limits. Account for
+            // them before measuring text; ClientSize may retain the requested
+            // size until the pending Windows layout has completed.
+            Size nativeMaximum = SystemInformation.MaxWindowTrackSize;
+            maximumWidth = Math.Min(maximumWidth, Math.Max(1, nativeMaximum.Width - borderWidth));
+            maximumHeight = Math.Min(maximumHeight, Math.Max(1, nativeMaximum.Height - borderHeight));
+            if (MaximumSize.Width > 0) { maximumWidth = Math.Min(maximumWidth, Math.Max(1, MaximumSize.Width - borderWidth)); }
+            if (MaximumSize.Height > 0) { maximumHeight = Math.Min(maximumHeight, Math.Max(1, MaximumSize.Height - borderHeight)); }
             int width = Math.Min(Px(680), maximumWidth);
             SuspendLayout();
             try
@@ -289,6 +297,20 @@ namespace KiloLink.Setup
                 if (scrolling) { contentHeight = LayoutPage(page, width - SystemInformation.VerticalScrollBarWidth); }
                 ClientSize = new Size(width, Math.Min(maximumHeight, contentHeight + headerHeight));
                 page.AutoScrollMinSize = new Size(0, contentHeight);
+                ResumeLayout(true);
+                // Windows can clamp a requested form size to the desktop or
+                // MaximumSize. Reflow against the actual docked viewport, also
+                // allowing scrollbars to settle after the height changes.
+                for (int pass = 0; pass < 3; pass++)
+                {
+                    headerHeight = LayoutHeader(ClientSize.Width);
+                    PerformLayout();
+                    page.AutoScrollPosition = Point.Empty;
+                    contentHeight = LayoutPage(page, page.ClientSize.Width);
+                    ClientSize = new Size(ClientSize.Width, Math.Min(maximumHeight, contentHeight + headerHeight));
+                    page.AutoScrollMinSize = new Size(0, contentHeight);
+                    PerformLayout();
+                }
                 if (center)
                 {
                     Location = new Point(work.Left + Math.Max(0, (work.Width - Width) / 2), work.Top + Math.Max(0, (work.Height - Height) / 2));

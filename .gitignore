@@ -1,1 +1,6 @@
 KiloLink-Environment-Setup-*-VM-Test.zip
+.build-cache/
+artifacts/
+**/bin/
+**/obj/
+.wix/

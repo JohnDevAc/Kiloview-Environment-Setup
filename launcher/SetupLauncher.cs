@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 John Lightfoot
+// Copyright (c) 2026 John Lightfoot
 // SPDX-License-Identifier: MIT
 
 using System;
@@ -22,8 +22,6 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("John Lightfoot")]
 [assembly: AssemblyProduct("Kiloview Environment Setup")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 John Lightfoot")]
-[assembly: AssemblyVersion("2.1.6.0")]
-[assembly: AssemblyFileVersion("2.1.6.0")]
 
 namespace KiloLink.Setup
 {
@@ -292,9 +290,6 @@ namespace KiloLink.Setup
         internal string Description;
         internal string Address;
         internal int PrefixLength;
-        internal string Gateway;
-        internal string PrimaryDns;
-        internal string SecondaryDns;
         internal bool Dhcp;
         internal bool Wired;
         internal bool Connected;
@@ -328,25 +323,15 @@ namespace KiloLink.Setup
         }
 
         private const int WmDpiChanged = 0x02E0;
-        private const int NetworkConfigurationTimeoutMilliseconds = 120000;
 
         private readonly Panel networkPanel;
         private readonly Label singleFileBadge;
         private readonly ComboBox networkAdapterBox;
-        private readonly TextBox ipAddressBox;
-        private readonly TextBox prefixLengthBox;
-        private readonly TextBox gatewayBox;
-        private readonly TextBox primaryDnsBox;
-        private readonly TextBox secondaryDnsBox;
-        private readonly Button applyNetworkButton;
         private readonly Button refreshNetworkButton;
-        private readonly Button skipNetworkButton;
+        private readonly Button continueNetworkButton;
         private readonly Button networkCloseButton;
         private readonly Label networkAdapterDetailsLabel;
         private readonly Label networkStatusLabel;
-        private Button startButton;
-        private Button closeButton;
-        private Label welcomeStatusLabel;
         private Panel welcomePanel;
         private readonly Panel progressPanel;
         private readonly InstallerProgressBar progressBar;
@@ -357,16 +342,20 @@ namespace KiloLink.Setup
         private readonly JavaScriptSerializer eventSerializer;
         private Process installerProcess;
         private readonly string launcherDirectory;
-        private readonly string persistentLauncherPath;
+        private string persistentLauncherPath;
         private readonly string legacyPersistentLauncherPath;
-        private readonly string installerPath;
+        private string installerPath;
         private readonly string logPath;
+        private bool managedInstallation;
+        private bool configurationPackageInProgress;
+        private bool configurationPackageReady;
+        private bool packageRestartRequired;
+        private string pendingOperationArguments;
+        private string configurationPackagePath;
         private bool autoResume;
         private LauncherView currentView;
-        private bool networkConfigurationInProgress;
         private bool installerOperationInProgress;
-        private int networkOperationGeneration;
-        private bool IsOperationInProgress { get { return networkConfigurationInProgress || installerOperationInProgress; } }
+        private bool IsOperationInProgress { get { return installerOperationInProgress; } }
         private string preferredInterfaceAlias;
         private string preferredIpAddress;
         private bool progressViewVisible;
@@ -386,6 +375,14 @@ namespace KiloLink.Setup
             persistentLauncherPath = Path.Combine(launcherDirectory, "Kiloview-Environment-Setup.exe");
             legacyPersistentLauncherPath = Path.Combine(launcherDirectory, "KiloLink-Environment-Setup.exe");
             installerPath = Path.Combine(launcherDirectory, "Install-KiloLinkSuite.ps1");
+            string assemblyLocation = Assembly.GetExecutingAssembly().Location;
+            string applicationDirectory = String.IsNullOrEmpty(assemblyLocation) ? null : Path.GetDirectoryName(assemblyLocation);
+            managedInstallation = !String.IsNullOrEmpty(applicationDirectory) && File.Exists(Path.Combine(applicationDirectory, "managed-installation.json"));
+            if (managedInstallation)
+            {
+                persistentLauncherPath = Assembly.GetExecutingAssembly().Location;
+                installerPath = Path.Combine(applicationDirectory, "Install-KiloLinkSuite.ps1");
+            }
             logPath = Path.Combine(programData, "KiloLink", "setup-launcher.log");
             currentView = LauncherView.Role;
 
@@ -452,14 +449,14 @@ namespace KiloLink.Setup
             networkPanel.Visible = false;
 
             Label networkTitle = new Label();
-            networkTitle.Text = "Set a static IP address";
+            networkTitle.Text = "Choose the server network";
             networkTitle.Font = new Font("Segoe UI Semibold", 15F);
             networkTitle.ForeColor = SetupTheme.Text;
             networkTitle.AutoSize = true;
             networkTitle.Location = new Point(30, 17);
 
             Label networkIntro = new Label();
-            networkIntro.Text = "Choose the physical network adapter this server will use. Current values are prefilled\r\nso its existing address can be made static without guessing.";
+            networkIntro.Text = "Choose the existing network adapter and address to use for this server.\r\nYou are responsible for configuring its IP address, gateway and DNS outside setup.";
             networkIntro.Font = new Font("Segoe UI", 9.5F);
             networkIntro.ForeColor = SetupTheme.Muted;
             networkIntro.AutoSize = true;
@@ -486,41 +483,15 @@ namespace KiloLink.Setup
             networkAdapterDetailsLabel.Location = new Point(34, 161);
             networkAdapterDetailsLabel.Size = new Size(694, 20);
 
-            Label ipAddressLabel = CreateFieldLabel("STATIC IPV4 ADDRESS", 32, 193);
-            Label prefixLabel = CreateFieldLabel("PREFIX LENGTH", 270, 193);
-            Label gatewayLabel = CreateFieldLabel("DEFAULT GATEWAY", 398, 193);
-
-            ipAddressBox = CreateNetworkTextBox(32, 214, 220);
-            prefixLengthBox = CreateNetworkTextBox(270, 214, 110);
-            gatewayBox = CreateNetworkTextBox(398, 214, 330);
-
-            Label primaryDnsLabel = CreateFieldLabel("PRIMARY DNS (OPTIONAL)", 32, 263);
-            Label secondaryDnsLabel = CreateFieldLabel("SECONDARY DNS (OPTIONAL)", 398, 263);
-
-            primaryDnsBox = CreateNetworkTextBox(32, 284, 348);
-            secondaryDnsBox = CreateNetworkTextBox(398, 284, 330);
-
-            Label networkGuidance = new Label();
-            networkGuidance.Text = "Reserve or exclude this address in DHCP first. Applying it may briefly interrupt this PC's network connection.";
-            networkGuidance.ForeColor = SetupTheme.Muted;
-            networkGuidance.AutoSize = true;
-            networkGuidance.Location = new Point(34, 327);
-
-            applyNetworkButton = CreateButton("Apply static IP and continue", true);
-            applyNetworkButton.Location = new Point(32, 365);
-            applyNetworkButton.Size = new Size(300, 44);
-            applyNetworkButton.Enabled = false;
-            applyNetworkButton.Click += ApplyNetworkButtonClick;
-
-            skipNetworkButton = CreateButton("Skip for now", false);
-            skipNetworkButton.Location = new Point(344, 365);
-            skipNetworkButton.Size = new Size(200, 44);
-            skipNetworkButton.Click += SkipNetworkButtonClick;
+            continueNetworkButton = CreateButton("Continue", true);
+            continueNetworkButton.Location = new Point(344, 365);
+            continueNetworkButton.Size = new Size(200, 44);
+            continueNetworkButton.Click += ContinueNetworkButtonClick;
 
             networkCloseButton = CreateButton("Back", false);
             networkCloseButton.Location = new Point(556, 365);
             networkCloseButton.Size = new Size(172, 44);
-            networkCloseButton.Click += delegate { ShowServerHome(); };
+            networkCloseButton.Click += delegate { ShowHome(); };
 
             networkStatusLabel = new Label();
             networkStatusLabel.Text = "Select the adapter that will carry KiloLink and NDI traffic.";
@@ -530,34 +501,15 @@ namespace KiloLink.Setup
             networkStatusLabel.Location = new Point(34, 426);
             networkStatusLabel.Size = new Size(694, 22);
 
-            Label serverWarningLabel = new Label();
-            serverWarningLabel.Text = "This computer will operate as a server. A changing DHCP address can make its services unreachable.";
-            serverWarningLabel.ForeColor = SetupTheme.Error;
-            serverWarningLabel.AutoSize = true;
-            serverWarningLabel.Location = new Point(34, 458);
-
             networkPanel.Controls.Add(networkTitle);
             networkPanel.Controls.Add(networkIntro);
             networkPanel.Controls.Add(adapterLabel);
             networkPanel.Controls.Add(networkAdapterBox);
             networkPanel.Controls.Add(refreshNetworkButton);
             networkPanel.Controls.Add(networkAdapterDetailsLabel);
-            networkPanel.Controls.Add(ipAddressLabel);
-            networkPanel.Controls.Add(prefixLabel);
-            networkPanel.Controls.Add(gatewayLabel);
-            networkPanel.Controls.Add(ipAddressBox);
-            networkPanel.Controls.Add(prefixLengthBox);
-            networkPanel.Controls.Add(gatewayBox);
-            networkPanel.Controls.Add(primaryDnsLabel);
-            networkPanel.Controls.Add(secondaryDnsLabel);
-            networkPanel.Controls.Add(primaryDnsBox);
-            networkPanel.Controls.Add(secondaryDnsBox);
-            networkPanel.Controls.Add(networkGuidance);
-            networkPanel.Controls.Add(applyNetworkButton);
-            networkPanel.Controls.Add(skipNetworkButton);
+            networkPanel.Controls.Add(continueNetworkButton);
             networkPanel.Controls.Add(networkCloseButton);
             networkPanel.Controls.Add(networkStatusLabel);
-            networkPanel.Controls.Add(serverWarningLabel);
 
             InitializeWizard();
 
@@ -604,6 +556,10 @@ namespace KiloLink.Setup
 
             Shown += SetupFormShown;
 
+            if (!autoResume && SetupLauncher.InitialAction == "Uninstall")
+            {
+                Shown += delegate { selectedAction = "Uninstall"; ReviewSelectedAction(); };
+            }
             if (autoResume)
             {
                 Shown += delegate
@@ -645,15 +601,6 @@ namespace KiloLink.Setup
             label.AutoSize = true;
             label.Location = new Point(x, y);
             return label;
-        }
-
-        private static TextBox CreateNetworkTextBox(int x, int y, int width)
-        {
-            TextBox textBox = new TextBox();
-            textBox.Location = new Point(x, y);
-            textBox.Size = new Size(width, 25);
-            textBox.Font = new Font("Segoe UI", 9.5F);
-            return textBox;
         }
 
         private static bool IsPhysicalNetworkType(NetworkInterfaceType type)
@@ -745,26 +692,6 @@ namespace KiloLink.Setup
                         break;
                     }
 
-                    string gateway = String.Empty;
-                    foreach (GatewayIPAddressInformation gatewayAddress in properties.GatewayAddresses)
-                    {
-                        if (gatewayAddress.Address.AddressFamily == AddressFamily.InterNetwork)
-                        {
-                            gateway = gatewayAddress.Address.ToString();
-                            break;
-                        }
-                    }
-
-                    List<string> dns = new List<string>();
-                    foreach (IPAddress dnsAddress in properties.DnsAddresses)
-                    {
-                        if (dnsAddress.AddressFamily == AddressFamily.InterNetwork
-                            && !IPAddress.IsLoopback(dnsAddress))
-                        {
-                            dns.Add(dnsAddress.ToString());
-                        }
-                    }
-
                     bool dhcp = false;
                     try
                     {
@@ -781,9 +708,6 @@ namespace KiloLink.Setup
                         PrefixLength = selectedAddress == null
                             ? 24
                             : PrefixLengthFromMask(selectedAddress.IPv4Mask),
-                        Gateway = gateway,
-                        PrimaryDns = dns.Count > 0 ? dns[0] : String.Empty,
-                        SecondaryDns = dns.Count > 1 ? dns[1] : String.Empty,
                         Dhcp = dhcp,
                         Wired = adapter.NetworkInterfaceType != NetworkInterfaceType.Wireless80211,
                         Connected = adapter.OperationalStatus == OperationalStatus.Up
@@ -805,7 +729,7 @@ namespace KiloLink.Setup
 
         private void LoadNetworkAdapters()
         {
-            if (networkConfigurationInProgress)
+            if (IsOperationInProgress)
             {
                 return;
             }
@@ -830,7 +754,7 @@ namespace KiloLink.Setup
 
             if (choices.Count == 0)
             {
-                applyNetworkButton.Enabled = false;
+                continueNetworkButton.Enabled = false;
                 networkAdapterDetailsLabel.Text = "No physical Ethernet or Wi-Fi adapter was detected.";
                 networkStatusLabel.Text = "Connect or enable a network adapter, then choose Refresh.";
                 networkStatusLabel.ForeColor = SetupTheme.Error;
@@ -848,7 +772,7 @@ namespace KiloLink.Setup
                 }
             }
             networkAdapterBox.SelectedIndex = selectedIndex;
-            networkStatusLabel.Text = "Review the values, then apply a static address to the selected adapter.";
+            networkStatusLabel.Text = "Select the existing address this server will advertise to devices.";
             networkStatusLabel.ForeColor = SetupTheme.Accent;
         }
 
@@ -857,23 +781,17 @@ namespace KiloLink.Setup
             NetworkAdapterChoice choice = networkAdapterBox.SelectedItem as NetworkAdapterChoice;
             if (choice == null)
             {
-                applyNetworkButton.Enabled = false;
+                continueNetworkButton.Enabled = false;
                 return;
             }
 
-            ipAddressBox.Text = choice.Address;
-            prefixLengthBox.Text = choice.PrefixLength.ToString();
-            gatewayBox.Text = choice.Gateway;
-            primaryDnsBox.Text = choice.PrimaryDns;
-            secondaryDnsBox.Text = choice.SecondaryDns;
             networkAdapterDetailsLabel.Text = choice.Description
                 + " — "
                 + (choice.Dhcp ? "currently using DHCP" : "currently static/manual")
                 + (choice.Connected ? String.Empty : " — adapter is disconnected");
-            applyNetworkButton.Text = choice.Dhcp
-                ? "Make this address static and continue"
-                : "Confirm static address and continue";
-            applyNetworkButton.Enabled = !networkConfigurationInProgress;
+            string address;
+            continueNetworkButton.Enabled = !IsOperationInProgress && choice.Connected
+                && TryParseIpv4(choice.Address, true, out address) && IsUsableServerAddress(address, choice.PrefixLength);
         }
 
         private static bool TryParseIpv4(string text, bool required, out string normalized)
@@ -903,18 +821,6 @@ namespace KiloLink.Setup
                 | bytes[3];
         }
 
-        private static bool IsSameSubnet(string first, string second, int prefixLength)
-        {
-            if (prefixLength >= 31)
-            {
-                return true;
-            }
-            uint mask = prefixLength == 0
-                ? 0
-                : UInt32.MaxValue << (32 - prefixLength);
-            return (Ipv4Number(first) & mask) == (Ipv4Number(second) & mask);
-        }
-
         private static bool IsUsableServerAddress(string address, int prefixLength)
         {
             byte[] bytes = IPAddress.Parse(address).GetAddressBytes();
@@ -940,436 +846,20 @@ namespace KiloLink.Setup
             return true;
         }
 
-        private bool TryReadNetworkSettings(
-            out string address,
-            out int prefixLength,
-            out string gateway,
-            out string primaryDns,
-            out string secondaryDns,
-            out string error)
-        {
-            address = String.Empty;
-            gateway = String.Empty;
-            primaryDns = String.Empty;
-            secondaryDns = String.Empty;
-            prefixLength = 0;
-            error = String.Empty;
-
-            if (!TryParseIpv4(ipAddressBox.Text, true, out address))
-            {
-                error = "Enter a valid IPv4 address, for example 192.168.1.50.";
-                return false;
-            }
-            if (!Int32.TryParse(prefixLengthBox.Text.Trim(), out prefixLength)
-                || prefixLength < 1
-                || prefixLength > 32)
-            {
-                error = "Enter a prefix length between 1 and 32. Most local networks use 24.";
-                return false;
-            }
-            if (!IsUsableServerAddress(address, prefixLength))
-            {
-                error = "The IPv4 address is not a usable host address for the selected prefix.";
-                return false;
-            }
-            if (!TryParseIpv4(gatewayBox.Text, false, out gateway))
-            {
-                error = "Enter a valid default gateway or leave it blank for an isolated network.";
-                return false;
-            }
-            if (!String.IsNullOrWhiteSpace(gateway)
-                && (!IsSameSubnet(address, gateway, prefixLength)
-                    || String.Equals(address, gateway, StringComparison.Ordinal)))
-            {
-                error = "The default gateway must be a different address in the same subnet.";
-                return false;
-            }
-            if (!TryParseIpv4(primaryDnsBox.Text, false, out primaryDns))
-            {
-                error = "Enter a valid primary DNS server or leave it blank.";
-                return false;
-            }
-            if (!TryParseIpv4(secondaryDnsBox.Text, false, out secondaryDns))
-            {
-                error = "Enter a valid secondary DNS server or leave it blank.";
-                return false;
-            }
-            if (!String.IsNullOrWhiteSpace(secondaryDns)
-                && String.IsNullOrWhiteSpace(primaryDns))
-            {
-                error = "Enter a primary DNS server before adding a secondary DNS server.";
-                return false;
-            }
-            return true;
-        }
-
-        private static string PowerShellLiteral(string value)
-        {
-            return "'" + (value ?? String.Empty).Replace("'", "''") + "'";
-        }
-
-        private static string BuildStaticNetworkScript(
-            string adapterAlias,
-            string address,
-            int prefixLength,
-            string gateway,
-            string primaryDns,
-            string secondaryDns)
-        {
-            List<string> dns = new List<string>();
-            if (!String.IsNullOrWhiteSpace(primaryDns)) { dns.Add(PowerShellLiteral(primaryDns)); }
-            if (!String.IsNullOrWhiteSpace(secondaryDns)) { dns.Add(PowerShellLiteral(secondaryDns)); }
-
-            StringBuilder script = new StringBuilder();
-            script.AppendLine("$ErrorActionPreference = 'Stop'");
-            script.AppendLine("$ProgressPreference = 'SilentlyContinue'");
-            script.AppendLine("$adapter = Get-NetAdapter -Name " + PowerShellLiteral(adapterAlias) + " -ErrorAction Stop");
-            script.AppendLine("$index = [uint32]$adapter.ifIndex");
-            script.AppendLine("$previousInterface = Get-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4 -ErrorAction Stop");
-            script.AppendLine("$previousDhcp = [string]$previousInterface.Dhcp");
-            script.AppendLine("$previousAddresses = @(Get-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | Select-Object IPAddress, PrefixLength)");
-            script.AppendLine("$previousRoutes = @(Get-NetRoute -InterfaceIndex $index -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Select-Object NextHop, RouteMetric)");
-            // IPv4 address DHCP and the DNS assignment mode are independent.
-            // Read the saved override before mutation; inaccessible state must not
-            // be mistaken for automatic DNS. Restore through the DNS cmdlet.
-            script.AppendLine("$interfaceGuid = ([guid]$adapter.InterfaceGuid).ToString('B')");
-            script.AppendLine("$dnsSettings = Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\' + $interfaceGuid) -ErrorAction Stop");
-            script.AppendLine("$dnsOverride = $dnsSettings.PSObject.Properties['NameServer']");
-            script.AppendLine("$previousDnsAutomatic = $null -eq $dnsOverride -or [string]::IsNullOrWhiteSpace([string]$dnsOverride.Value)");
-            script.AppendLine("$previousDns = if ($previousDnsAutomatic) { @() } else { @(([string]$dnsOverride.Value) -split '[,\\s]+' | Where-Object { $_ }) }");
-            script.AppendLine("function Clear-CurrentIpv4 {");
-            script.AppendLine("  Get-NetRoute -InterfaceIndex $index -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue");
-            script.AppendLine("  Get-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue");
-            script.AppendLine("}");
-            script.AppendLine("try {");
-            script.AppendLine("  Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4 -Dhcp Disabled -ErrorAction Stop");
-            script.AppendLine("  Clear-CurrentIpv4");
-            script.Append("  $parameters = @{ InterfaceIndex = $index; AddressFamily = 'IPv4'; IPAddress = ");
-            script.Append(PowerShellLiteral(address));
-            script.Append("; PrefixLength = ");
-            script.Append(prefixLength);
-            script.AppendLine("; ErrorAction = 'Stop' }");
-            if (!String.IsNullOrWhiteSpace(gateway))
-            {
-                script.AppendLine("  $parameters.DefaultGateway = " + PowerShellLiteral(gateway));
-            }
-            script.AppendLine("  New-NetIPAddress @parameters | Out-Null");
-            if (dns.Count > 0)
-            {
-                script.AppendLine("  $dns = @(" + String.Join(", ", dns.ToArray()) + ")");
-                script.AppendLine("  Set-DnsClientServerAddress -InterfaceIndex $index -ServerAddresses $dns -ErrorAction Stop");
-            }
-            else
-            {
-                script.AppendLine("  Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses -ErrorAction Stop");
-            }
-            script.AppendLine("  $addressDeadline = (Get-Date).AddSeconds(30)");
-            script.AppendLine("  do {");
-            script.AppendLine("    $configured = Get-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -IPAddress " + PowerShellLiteral(address) + " -ErrorAction SilentlyContinue");
-            script.AppendLine("    if ($configured -and $configured.AddressState -eq 'Duplicate') { throw 'The requested IPv4 address is already in use on this network. Choose a unique address.' }");
-            script.AppendLine("    if ($configured -and $configured.AddressState -eq 'Preferred') { break }");
-            script.AppendLine("    Start-Sleep -Milliseconds 250");
-            script.AppendLine("  } while ((Get-Date) -lt $addressDeadline)");
-            script.AppendLine("  if (-not $configured -or $configured.AddressState -ne 'Preferred') { throw 'The static IPv4 address did not become usable within 30 seconds. Check the adapter connection and address.' }");
-            script.AppendLine("  Write-Output ('Configured {0} on {1}' -f $configured.IPAddress, $adapter.Name)");
-            script.AppendLine("} catch {");
-            script.AppendLine("  $configurationFailure = $_");
-            script.AppendLine("  try {");
-            script.AppendLine("    Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4 -Dhcp Disabled -ErrorAction SilentlyContinue");
-            script.AppendLine("    Clear-CurrentIpv4");
-            script.AppendLine("    if ($previousDhcp -eq 'Enabled') {");
-            script.AppendLine("      Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4 -Dhcp Enabled -ErrorAction Stop");
-            script.AppendLine("    } else {");
-            script.AppendLine("      foreach ($oldAddress in $previousAddresses) {");
-            script.AppendLine("        New-NetIPAddress -InterfaceIndex $index -AddressFamily IPv4 -IPAddress $oldAddress.IPAddress -PrefixLength $oldAddress.PrefixLength -ErrorAction Stop | Out-Null");
-            script.AppendLine("      }");
-            script.AppendLine("      foreach ($oldRoute in $previousRoutes) {");
-            script.AppendLine("        if ($oldRoute.NextHop -and $oldRoute.NextHop -ne '0.0.0.0') {");
-            script.AppendLine("          New-NetRoute -InterfaceIndex $index -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -NextHop $oldRoute.NextHop -RouteMetric $oldRoute.RouteMetric -ErrorAction SilentlyContinue | Out-Null");
-            script.AppendLine("        }");
-            script.AppendLine("      }");
-            script.AppendLine("    }");
-            script.AppendLine("    if ($previousDnsAutomatic) {");
-            script.AppendLine("      Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses -ErrorAction Stop");
-            script.AppendLine("    } else {");
-            script.AppendLine("      Set-DnsClientServerAddress -InterfaceIndex $index -ServerAddresses $previousDns -ErrorAction Stop");
-            script.AppendLine("    }");
-            script.AppendLine("  } catch { throw ('Network configuration failed: ' + $configurationFailure.Exception.Message + ' Rollback also failed: ' + $_.Exception.Message + ' Review the adapter settings before retrying.') }");
-            script.AppendLine("  throw $configurationFailure");
-            script.AppendLine("}");
-            return script.ToString();
-        }
-
-        private static string RunHiddenPowerShell(string script)
-        {
-            string systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
-            string powershellPath = Path.Combine(
-                systemDirectory,
-                "WindowsPowerShell",
-                "v1.0",
-                "powershell.exe");
-            if (!File.Exists(powershellPath))
-            {
-                powershellPath = "powershell.exe";
-            }
-
-            ProcessStartInfo startInfo = new ProcessStartInfo();
-            startInfo.FileName = powershellPath;
-            startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand "
-                + Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-            startInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            startInfo.UseShellExecute = false;
-            startInfo.CreateNoWindow = true;
-            startInfo.RedirectStandardOutput = true;
-            startInfo.RedirectStandardError = true;
-            startInfo.WindowStyle = ProcessWindowStyle.Hidden;
-
-            using (Process process = new Process())
-            {
-                process.StartInfo = startInfo;
-                StringBuilder output = new StringBuilder();
-                StringBuilder error = new StringBuilder();
-                object outputLock = new object();
-                object errorLock = new object();
-                process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs eventArgs)
-                {
-                    if (eventArgs.Data != null)
-                    {
-                        lock (outputLock)
-                        {
-                            output.AppendLine(eventArgs.Data);
-                        }
-                    }
-                };
-                process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs eventArgs)
-                {
-                    if (eventArgs.Data != null)
-                    {
-                        lock (errorLock)
-                        {
-                            error.AppendLine(eventArgs.Data);
-                        }
-                    }
-                };
-                if (!process.Start())
-                {
-                    throw new InvalidOperationException("Windows did not start the network configuration task.");
-                }
-
-                // Both redirected pipes must be drained concurrently. Reading
-                // one stream to completion before the other can deadlock when
-                // PowerShell or a network cmdlet fills the unattended pipe.
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-
-                if (!process.WaitForExit(NetworkConfigurationTimeoutMilliseconds))
-                {
-                    try
-                    {
-                        process.Kill();
-                        process.WaitForExit(5000);
-                    }
-                    catch { }
-                    throw new InvalidOperationException(
-                        "Windows did not finish applying the static network settings within two minutes. "
-                        + "The worker was stopped. Choose Refresh and review the adapter before trying again.");
-                }
-
-                // The parameterless wait lets the asynchronous stream readers
-                // deliver any final lines after the process handle is signaled.
-                process.WaitForExit();
-                string outputText;
-                string errorText;
-                lock (outputLock) { outputText = output.ToString().Trim(); }
-                lock (errorLock) { errorText = error.ToString().Trim(); }
-                if (process.ExitCode != 0)
-                {
-                    throw new InvalidOperationException(
-                        String.IsNullOrWhiteSpace(errorText)
-                            ? "Windows rejected the static network configuration."
-                            : errorText);
-                }
-                return outputText;
-            }
-        }
-
-        private void SetNetworkControlsEnabled(bool enabled)
-        {
-            networkAdapterBox.Enabled = enabled;
-            ipAddressBox.Enabled = enabled;
-            prefixLengthBox.Enabled = enabled;
-            gatewayBox.Enabled = enabled;
-            primaryDnsBox.Enabled = enabled;
-            secondaryDnsBox.Enabled = enabled;
-            refreshNetworkButton.Enabled = enabled;
-            skipNetworkButton.Enabled = enabled;
-            networkCloseButton.Enabled = enabled;
-            applyNetworkButton.Enabled = enabled && networkAdapterBox.SelectedItem != null;
-        }
-
-        private void ApplyNetworkButtonClick(object sender, EventArgs eventArgs)
-        {
-            if (IsOperationInProgress) { return; }
-            NetworkAdapterChoice choice = networkAdapterBox.SelectedItem as NetworkAdapterChoice;
-            if (choice == null)
-            {
-                MessageBox.Show("Choose a physical network adapter first.", Text);
-                return;
-            }
-
-            string address;
-            int prefixLength;
-            string gateway;
-            string primaryDns;
-            string secondaryDns;
-            string validationError;
-            if (!TryReadNetworkSettings(
-                out address,
-                out prefixLength,
-                out gateway,
-                out primaryDns,
-                out secondaryDns,
-                out validationError))
-            {
-                networkStatusLabel.Text = validationError;
-                networkStatusLabel.ForeColor = SetupTheme.Error;
-                MessageBox.Show(
-                    validationError,
-                    "Check the static IP settings",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-                return;
-            }
-
-            string summary = String.Format(
-                "Adapter: {0}\r\nStatic IPv4: {1}/{2}\r\nGateway: {3}\r\nDNS: {4}\r\n\r\n"
-                + "This disables DHCP on the selected adapter and may briefly interrupt the network. Continue?",
-                choice.Alias,
-                address,
-                prefixLength,
-                String.IsNullOrWhiteSpace(gateway) ? "(none)" : gateway,
-                String.IsNullOrWhiteSpace(primaryDns)
-                    ? "(default)"
-                    : primaryDns + (String.IsNullOrWhiteSpace(secondaryDns) ? String.Empty : ", " + secondaryDns));
-            if (MessageBox.Show(
-                summary,
-                "Apply static server address",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
-            {
-                return;
-            }
-
-            networkConfigurationInProgress = true;
-            int generation = ++networkOperationGeneration;
-            SetNetworkControlsEnabled(false);
-            networkStatusLabel.Text = "Checking required download sources before changing the network...";
-            networkStatusLabel.ForeColor = SetupTheme.Accent;
-
-            string adapterAlias = choice.Alias;
-            string script = BuildStaticNetworkScript(
-                adapterAlias,
-                address,
-                prefixLength,
-                gateway,
-                primaryDns,
-                secondaryDns);
-            System.Threading.ThreadPool.QueueUserWorkItem(delegate
-            {
-                string result = String.Empty;
-                Exception failure = null;
-                try
-                {
-                    Directory.CreateDirectory(launcherDirectory);
-                    SetupLauncher.ExtractInstaller(installerPath);
-                    RunHiddenPowerShell("& " + PowerShellLiteral(installerPath) + " -Action CheckDownloads -LauncherMode; if ($LASTEXITCODE -ne 0) { throw 'Download readiness failed. Network settings were retained; restore source access and retry.' }");
-                    result = RunHiddenPowerShell(script);
-                }
-                catch (Exception exception)
-                {
-                    failure = exception;
-                }
-
-                if (IsDisposed || !IsHandleCreated)
-                {
-                    return;
-                }
-                try
-                {
-                    BeginInvoke((MethodInvoker)delegate
-                    {
-                        CompleteNetworkConfiguration(generation, adapterAlias, address, result, failure);
-                    });
-                }
-                catch (InvalidOperationException) { }
-            });
-        }
-
-        private void SkipNetworkButtonClick(object sender, EventArgs eventArgs)
+        private void ContinueNetworkButtonClick(object sender, EventArgs eventArgs)
         {
             if (IsOperationInProgress) { return; }
             NetworkAdapterChoice choice = networkAdapterBox.SelectedItem as NetworkAdapterChoice;
             string usableAddress;
-            if (choice == null || !choice.Connected || !TryParseIpv4(choice.Address, true, out usableAddress))
+            if (choice == null || !choice.Connected || !TryParseIpv4(choice.Address, true, out usableAddress) || !IsUsableServerAddress(usableAddress, choice.PrefixLength))
             {
                 networkStatusLabel.Text = "Select a connected physical adapter with a usable IPv4 address, then continue.";
                 networkStatusLabel.ForeColor = SetupTheme.Error;
                 return;
             }
-            string selected = choice == null
-                ? "No adapter is currently selected."
-                : "Selected adapter: " + choice.Alias
-                    + (String.IsNullOrWhiteSpace(choice.Address)
-                        ? String.Empty
-                        : " (" + choice.Address + ")");
-            string warning = "This computer will run KiloLink and NDI services as a server.\r\n\r\n"
-                + "If DHCP later changes its address, devices, shortcuts, and Discovery Server endpoints may stop working.\r\n\r\n"
-                + selected
-                + "\r\n\r\nOnly skip if the adapter already has a stable static address or a DHCP reservation. Skip anyway?";
-            if (MessageBox.Show(
-                warning,
-                "Static IP strongly recommended",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
-            {
-                return;
-            }
-
-            if (choice != null)
-            {
-                preferredInterfaceAlias = choice.Alias;
-                preferredIpAddress = choice.Address;
-            }
-            ShowWelcomeView("Static IP setup was skipped. Confirm this server has a stable address before deployment.");
-        }
-
-        private void ShowWelcomeView(string status)
-        {
-            ShowSettings(status);
-        }
-
-        private void CompleteNetworkConfiguration(int generation, string adapterAlias, string address, string result, Exception failure)
-        {
-            if (IsDisposed || !networkConfigurationInProgress || installerOperationInProgress
-                || generation != networkOperationGeneration) { return; }
-            networkConfigurationInProgress = false;
-            SetNetworkControlsEnabled(true);
-            if (currentView != LauncherView.Network) { return; }
-            if (failure != null)
-            {
-                networkStatusLabel.Text = "Static IP configuration failed. Review the settings and try again.";
-                networkStatusLabel.ForeColor = SetupTheme.Error;
-                MessageBox.Show("The static IP address could not be applied.\r\n\r\n" + failure.Message,
-                    "Network configuration failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            preferredInterfaceAlias = adapterAlias;
-            preferredIpAddress = address;
-            ShowWelcomeView(String.IsNullOrWhiteSpace(result)
-                ? "Static IPv4 configured. Ready to begin setup."
-                : result + ". Ready to begin setup.");
+            preferredInterfaceAlias = choice.Alias;
+            preferredIpAddress = usableAddress;
+            ReviewSelectedAction();
         }
 
         private static void AddButtonToTable(TableLayoutPanel table, Button button, int column, int left, int right)
@@ -1451,7 +941,7 @@ namespace KiloLink.Setup
 
         private void ShowProgressView()
         {
-            if (networkConfigurationInProgress) { return; }
+            if (IsOperationInProgress) { return; }
             if (progressViewVisible)
             {
                 return;
@@ -1484,8 +974,23 @@ namespace KiloLink.Setup
             try
             {
                 Directory.CreateDirectory(launcherDirectory);
+                if (pendingOperationArguments == null) { pendingOperationArguments = BuildOperationArguments(); }
+                if (SetupPackage.IsEmbedded && !configurationPackageReady)
+                {
+                    if (!acceptanceBox.Checked) { throw new InvalidOperationException("Accept the installer licence and review the operation before continuing."); }
+                    string packageLog = Path.Combine(Path.GetDirectoryName(logPath), "configuration-package.log");
+                    installerProcess = new Process { StartInfo = SetupPackage.CreateStartInfo(launcherDirectory, packageLog) };
+                    configurationPackagePath = installerProcess.StartInfo.FileName;
+                    configurationPackageInProgress = true;
+                    installerProcess.Exited += InstallerProcessExited;
+                    if (!installerProcess.Start()) { throw new InvalidOperationException("Windows did not start the configuration package."); }
+                    activityLabel.Text = "Preparing setup";
+                    progressStatusLabel.Text = "Installing or updating the setup application. Your selected components will follow automatically.";
+                    installerProcess.EnableRaisingEvents = true;
+                    return;
+                }
                 string currentLauncher = Assembly.GetExecutingAssembly().Location;
-                if (!String.Equals(
+                if (!managedInstallation && !String.Equals(
                     Path.GetFullPath(currentLauncher),
                     Path.GetFullPath(persistentLauncherPath),
                     StringComparison.OrdinalIgnoreCase))
@@ -1504,7 +1009,7 @@ namespace KiloLink.Setup
                     catch (UnauthorizedAccessException) { }
                 }
 
-                SetupLauncher.ExtractInstaller(installerPath);
+                EnsureProvisionerFiles();
 
                 string systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
                 string powershellPath = Path.Combine(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -1517,7 +1022,7 @@ namespace KiloLink.Setup
                 startInfo.FileName = powershellPath;
                 startInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "
                     + SetupLauncher.Quote(installerPath)
-                    + BuildOperationArguments()
+                    + pendingOperationArguments
                     + " -LauncherMode -LogPath "
                     + SetupLauncher.Quote(logPath);
                 // WSL inherits the Windows process directory before applying its
@@ -1565,6 +1070,7 @@ namespace KiloLink.Setup
                     if (installerOperationInProgress) { installerProcess.EnableRaisingEvents = true; }
                     else { installerProcess.Dispose(); installerProcess = null; }
                 }
+                if (!installerOperationInProgress) { configurationPackageInProgress = false; pendingOperationArguments = null; }
                 Environment.ExitCode = 1;
                 FinishWizardOperation(1);
                 pulseTimer.Stop();
@@ -1578,6 +1084,15 @@ namespace KiloLink.Setup
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
+        }
+
+        private void EnsureProvisionerFiles()
+        {
+            if (managedInstallation)
+            {
+                if (!File.Exists(installerPath)) { throw new FileNotFoundException("Provisioner is missing. Repair Kiloview Environment Setup in Windows Apps.", installerPath); }
+            }
+            else { SetupLauncher.ExtractInstaller(installerPath); }
         }
 
         private void InstallerOutputReceived(object sender, DataReceivedEventArgs eventArgs)
@@ -1711,7 +1226,7 @@ namespace KiloLink.Setup
                 Environment.ExitCode = 3010;
                 activityLabel.Text = "Restart required";
                 activityLabel.ForeColor = SetupTheme.Accent;
-                progressStatusLabel.Text = selectedAction == "InstallClient"
+                progressStatusLabel.Text = selectedAction == "InstallClient" || packageRestartRequired
                     ? operationMessage
                     : "Restart Windows and sign back in to continue setup.";
             }
@@ -1757,6 +1272,12 @@ namespace KiloLink.Setup
                 BeginInvoke((MethodInvoker)delegate
                 {
                     if (!Object.ReferenceEquals(installerProcess, completedProcess)) { completedProcess.Dispose(); return; }
+                    if (configurationPackageInProgress)
+                    {
+                        CompleteConfigurationPackage(completedProcess, exitCode);
+                        return;
+                    }
+                    pendingOperationArguments = null;
                     installerOperationInProgress = false;
                     pulseTimer.Stop();
                     FinishWizardOperation(exitCode);
@@ -1766,7 +1287,7 @@ namespace KiloLink.Setup
                     if (Environment.ExitCode != 0 && Environment.ExitCode != 3010)
                     {
                         MessageBox.Show(
-                            "The installer exited before completing.\r\n\r\n"
+                            "Setup needs attention.\r\n\r\n"
                             + progressStatusLabel.Text + "\r\n"
                             + "Diagnostic log: " + logPath,
                             "Kiloview Environment Setup",
@@ -1788,20 +1309,43 @@ namespace KiloLink.Setup
             if (diagnosticOutput.Length > 1024 * 1024) { diagnosticOutput.Remove(0, diagnosticOutput.Length - 1024 * 1024); }
         }
 
+        private void CompleteConfigurationPackage(Process completedProcess, int exitCode)
+        {
+            completedProcess.Dispose();
+            installerProcess = null;
+            configurationPackageInProgress = false;
+            installerOperationInProgress = false;
+            try { if (configurationPackagePath != null) { File.Delete(configurationPackagePath); } } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            if (exitCode == 0)
+            {
+                try
+                {
+                    SetupPackage.ValidateInstallation(SetupPackage.InstalledDirectory);
+                    managedInstallation = true;
+                    persistentLauncherPath = Path.Combine(SetupPackage.InstalledDirectory, "Kiloview-Environment-Setup.exe");
+                    installerPath = Path.Combine(SetupPackage.InstalledDirectory, "Install-KiloLinkSuite.ps1");
+                    configurationPackageReady = true;
+                    StartInstaller();
+                    return;
+                }
+                catch (Exception exception) { operationMessage = exception.Message; exitCode = 1; }
+            }
+            else
+            {
+                operationMessage = exitCode == 3010
+                    ? "Restart Windows, then reopen this installer to finish setting up your selected components."
+                    : "The setup application could not be installed or updated (code " + exitCode + "). See " + Path.Combine(Path.GetDirectoryName(logPath), "configuration-package.log");
+            }
+            pendingOperationArguments = null;
+            packageRestartRequired = exitCode == 3010;
+            operationOutcome = packageRestartRequired ? "RestartRequired" : "Failed";
+            pulseTimer.Stop();
+            FinishWizardOperation(exitCode);
+            ApplyInstallerOutcome(exitCode);
+        }
+
         private void SetupFormClosing(object sender, FormClosingEventArgs eventArgs)
         {
-            if (networkConfigurationInProgress)
-            {
-                eventArgs.Cancel = true;
-                MessageBox.Show(
-                    "Windows is applying the static network settings.\r\n\r\n"
-                    + "Wait for this operation to finish before closing the application.",
-                    Text,
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-                return;
-            }
-
             if (installerProcess != null)
             {
                 try

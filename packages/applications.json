@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "policy": "latest-stable",
+  "ndiTools": {
+    "source": "https://ndi.video/tools/",
+    "url": "https://downloads.ndi.tv/Tools/NDI%206%20Tools.exe",
+    "verification": "Authenticode signature from NDI, Vizrt or NewTek; record downloaded SHA-256"
+  },
+  "pcAgent": {
+    "source": "https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/latest",
+    "verification": "production release, published SHA-256, archive paths, binary identity and versions"
+  },
+  "kiloLink": {
+    "image": "kiloview/klnk-pro:latest",
+    "verification": "Docker content digest; retain original container and backup before replacement"
+  },
+  "runtime": {
+    "ubuntuDistribution": "Ubuntu-24.04",
+    "maintenance": "explicit MaintainRuntime action; Windows/WSL and apt repositories supply runtime packages"
+  }
+}
