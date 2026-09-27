@@ -12,6 +12,9 @@ Add-Type -AssemblyName System.IO.Compression
 $root = Split-Path -Parent $PSScriptRoot
 $testRoot = Join-Path $env:TEMP ('kilolink-tests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
+# Match the full paths returned by FileInfo/DirectoryInfo on hosts whose TEMP
+# uses an 8.3 alias (for example GitHub's RUNNER~1 account).
+$testRoot = [IO.Path]::GetFullPath($testRoot)
 $originalTemp = $env:TEMP
 $originalProgramData = $env:ProgramData
 $liveReceiptPath = Join-Path $originalProgramData 'KiloLink\installation-components.json'
@@ -1127,6 +1130,9 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
             $formType.GetField('preferredInterfaceAlias',$instanceFlags).SetValue($form,'Production Ethernet')
             $formType.GetField('preferredIpAddress',$instanceFlags).SetValue($form,'192.0.2.10')
             foreach ($scale in @([single]1, [single]1.25, [single]1.5, [single]2, [single]2.5, [single]1)) {
+                # Reproduce Windows constraining the actual form size on a
+                # smaller desktop than the requested layout rectangle.
+                $form.MaximumSize = [Drawing.Size]::new(1024,768)
                 [void]$formType.GetMethod('ApplyDisplayScale',$instanceFlags).Invoke($form,@($scale))
                 [void]$formType.GetMethod('ApplyDisplayScale',$instanceFlags).Invoke($form,@($scale))
                 foreach ($method in @('ShowHome','ShowServerHome','ShowNetworkPage','ShowSettings','ReviewSelectedAction','ShowProgressView')) {

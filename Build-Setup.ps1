@@ -2,10 +2,11 @@
 # Copyright (c) 2026 John Lightfoot
 # SPDX-License-Identifier: MIT
 [CmdletBinding()]
-param([string]$OutputDirectory = $PSScriptRoot, [string]$ConfigurationPackage)
+param([string]$OutputDirectory, [string]$ConfigurationPackage)
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+if (-not $OutputDirectory) { $OutputDirectory = $root }
 & (Join-Path $root 'Build-Provisioner.ps1')
 $version = (Get-Content -LiteralPath (Join-Path $root 'version.json') -Raw | ConvertFrom-Json).version
 $generated = Join-Path $root 'artifacts\generated'

@@ -2,7 +2,7 @@
 
 See [current suite deployment behavior](INTEROPERABILITY.md) for role receipts, download gates, offline Client packages, port restrictions and shared-runtime removal.
 
-Version 3.0.2 is a single Windows setup wizard. Choose **Server** or **Client**,
+Version 3.0.3 is a single Windows setup wizard. Choose **Server** or **Client**,
 review the settings and licences, then set up or update the platform in the same
 window. WiX/MSI installs the reusable configuration app silently in the background.
 Windows and WSL are retained. Full NDI Tools supplies Discovery Server.
