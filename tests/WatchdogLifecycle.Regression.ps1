@@ -58,17 +58,20 @@ export -f flock systemctl docker sleep
 '@
 function New-ShellCase {
     $dir=Join-Path $testRoot ([guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $dir|Out-Null
+    # GitHub's TEMP can use an 8.3 alias; /proc/fd reports the expanded path.
+    $dir=[IO.Path]::GetFullPath($dir)
     $unix='/'+$dir.Substring(0,1).ToLowerInvariant()+$dir.Substring(2).Replace('\','/')
+    $stateRoot=Convert-ToBashLiteral "$unix/state"
     Save-Text (Join-Path $dir 'fixture.sh') $fixtureFunctions
     $legacy=Get-LegacyKiloWatchdogCommand;$current=Get-KiloWatchdogCommand
-    $oldMapped=$legacy.Replace('/var/lib/kilolink',"$unix/state")
-    $newMapped=$current.Replace('/var/lib/kilolink',"$unix/state")
+    $oldMapped=$legacy.Replace('/var/lib/kilolink',$stateRoot)
+    $newMapped=$current.Replace('/var/lib/kilolink',$stateRoot)
     Save-Text (Join-Path $dir 'legacy-direct.sh') $oldMapped
     $legacy64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($legacy));$current64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($current))
     $old64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($oldMapped));$new64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($newMapped))
     foreach($mode in @('Quiesce','Activate','Retain','Reactivate')){
         $script=if($mode -eq 'Reactivate'){Get-KiloWatchdogTransitionScript -Mode Activate -Reactivate}else{Get-KiloWatchdogTransitionScript -Mode $mode}
-        $script=$script.Replace('/var/lib/kilolink',"$unix/state").Replace($legacy64,$old64).Replace($current64,$new64).Replace('SECONDS+45','SECONDS+3').Replace('flock -w 45','flock -w 3')
+        $script=$script.Replace('/var/lib/kilolink',$stateRoot).Replace($legacy64,$old64).Replace($current64,$new64).Replace('SECONDS+45','SECONDS+3').Replace('flock -w 45','flock -w 3')
         Save-Text (Join-Path $dir ($mode+'.sh')) $script
     }
     [pscustomobject]@{Directory=$dir;Unix=$unix;Legacy="printf '%s' '$old64' | base64 -d | bash";Current="printf '%s' '$new64' | base64 -d | bash"}
