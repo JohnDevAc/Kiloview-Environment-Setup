@@ -18,8 +18,15 @@ function Ensure-WslFeatures {
         }
         if ($feature.State -ne 'Enabled') {
             Write-Detail "Enabling $name"
+            $featureLabel = if ($name -eq 'Microsoft-Windows-Subsystem-Linux') { 'Windows Subsystem for Linux' } else { 'Virtual Machine Platform' }
+            $featureStatus = "Enabling $featureLabel. This can take several minutes."
+            Set-SuiteProgress -Percent $script:ProgressPercent -Status $featureStatus
+            Write-LifecycleResult 'running' $featureStatus -Stage 'Windows prerequisites'
             $result = Enable-WindowsOptionalFeature -Online -FeatureName $name -All -NoRestart
             if ($result.RestartNeeded) { $restart = $true }
+            $featureStatus = "Verifying $featureLabel"
+            Set-SuiteProgress -Percent $script:ProgressPercent -Status $featureStatus
+            Write-LifecycleResult 'running' $featureStatus -Stage 'Windows prerequisites'
             $verified = Get-WindowsOptionalFeature -Online -FeatureName $name
             if ($verified.State -notin @('Enabled', 'EnablePending')) {
                 throw "Windows feature $name did not enter an enabled state. Current state: $($verified.State)."
@@ -38,9 +45,27 @@ function Ensure-WslFeatures {
     }
     if (-not (Test-WslRuntime)) {
         Write-Step 'Installing the Windows Subsystem for Linux runtime'
-        Invoke-Native wsl.exe @('--install', '--no-distribution', '--web-download')
+        Write-InstallerLog 'Starting WSL runtime bootstrap: wsl.exe --install --no-distribution --web-download'
+        try {
+            $bootstrapCode=Invoke-WslRuntimeBootstrap
+            if ($bootstrapCode -eq 3010) {
+                Request-RestartAndResume 'The WSL runtime installation requires a Windows restart.'
+                return $false
+            }
+        } catch {
+            # Keep supervisor/producer-persistence diagnostics and ownership intact.
+            if ($script:LifecycleRecoveryRequired -or $script:LifecycleErrorCode -in @('command-timeout','lifecycle-result-write-failed')) { throw }
+            $script:LifecycleErrorCode = 'wsl-runtime-install-failed'
+            $script:LifecycleNextAction = "Check Windows Update and access to Microsoft's WSL downloads, then retry Server setup. Runtime installation help: https://learn.microsoft.com/windows/wsl/install"
+            throw "WSL runtime could not be installed. $($_.Exception.Message) $script:LifecycleNextAction"
+        }
         Set-SuiteProgress -Percent ([Math]::Min(14, $script:ProgressPercent + 2)) -Status 'Waiting for the WSL runtime to become ready'
         if (-not (Wait-WslRuntime -TimeoutSeconds 120)) {
+            if (-not (Test-WslRuntimeInstalled)) {
+                $script:LifecycleErrorCode='wsl-runtime-install-failed'
+                $script:LifecycleNextAction='The WSL runtime was not detected after its bootstrap completed. Check Windows Update and Microsoft WSL installation diagnostics before retrying Server setup.'
+                throw $script:LifecycleNextAction
+            }
             Request-RestartAndResume 'The WSL runtime was installed but has not become ready in the current Windows session.'
             return $false
         }
@@ -105,7 +130,7 @@ function Ensure-MirroredNetworking {
     $path = Join-Path $env:USERPROFILE '.wslconfig'
     $lines = New-Object Collections.Generic.List[string]
     if (Test-Path -LiteralPath $path) {
-        foreach ($line in Get-Content -LiteralPath $path) { $lines.Add([string]$line) }
+        foreach ($line in Get-Content -Encoding UTF8 -LiteralPath $path) { $lines.Add([string]$line) }
     }
     $changed = $false
     $changed = (Set-IniKey $lines 'wsl2' 'networkingMode' 'mirrored') -or $changed
@@ -137,12 +162,12 @@ function Ensure-Ubuntu {
     Write-Step "Verifying $distro as a working WSL 2 distribution"
     $probe = Get-WslDistroLaunchProbe $distro
     if (-not $probe.Success) {
-        $message = Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output
-        if ($message -match 'nested virtualization') { throw $message }
+        $message = Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output -TimedOut:([bool]$probe.TimedOut)
+        if (-not $probe.TimedOut -and $message -match 'nested virtualization') { throw $message }
         Set-SuiteProgress -Percent ([Math]::Min(28, $script:ProgressPercent + 1)) -Status "Waiting for $distro to finish its first launch"
-        if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 180)) {
-            $probe = Get-WslDistroLaunchProbe $distro
-            throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output)
+        if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 180 -LastProbe ([ref]$probe))) {
+            $script:LifecycleErrorCode='wsl-distro-readiness-timeout'
+            throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output -TimedOut:([bool]$probe.TimedOut))
         }
     }
     $version = Get-WslDistroVersion $distro
@@ -150,9 +175,9 @@ function Ensure-Ubuntu {
         Write-Step "Converting $distro to WSL 2"
         Invoke-Native wsl.exe @('--set-version', $distro, '2')
     }
-    if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 60)) {
-        $probe = Get-WslDistroLaunchProbe $distro
-        throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output)
+    if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 60 -LastProbe ([ref]$probe))) {
+        $script:LifecycleErrorCode='wsl-distro-readiness-timeout'
+        throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output -TimedOut:([bool]$probe.TimedOut))
     }
     return $distro
 }
@@ -221,8 +246,10 @@ fi
     if ($systemdState -contains 'KILOLINK_SYSTEMD_RESTART_REQUIRED') {
         Set-SuiteProgress -Percent ([Math]::Min(42, $script:ProgressPercent + 2)) -Status "Restarting $Distro with systemd enabled"
         Invoke-Native wsl.exe @('--terminate', $Distro)
-        if (-not (Wait-WslDistroReady -Distro $Distro -TimeoutSeconds 120)) {
-            throw "$Distro did not restart with systemd within 120 seconds."
+        $probe=$null
+        if (-not (Wait-WslDistroReady -Distro $Distro -TimeoutSeconds 120 -LastProbe ([ref]$probe))) {
+            $script:LifecycleErrorCode='wsl-distro-readiness-timeout'
+            throw ("$Distro did not restart with systemd within 120 seconds. " + (Get-WslLaunchFailureMessage -Distro $Distro -Output $probe.Output -TimedOut:([bool]$probe.TimedOut)))
         }
     } elseif ($systemdState -notcontains 'KILOLINK_SYSTEMD_READY') {
         throw "Could not verify the systemd state in $Distro. No distribution was restarted."

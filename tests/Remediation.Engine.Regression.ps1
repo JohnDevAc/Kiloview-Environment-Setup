@@ -53,7 +53,11 @@ Test-Case 'Failed targeted restart stops Docker installation and remains retryab
     function Invoke-Native { throw 'Targeted termination failed' }
     Assert-Throws { Ensure-Docker 'Fixture-Distro' } 'Targeted termination failed'
     function Invoke-Native { }
-    function Wait-WslDistroReady { $false }
+    function Wait-WslDistroReady {
+        param($Distro,$TimeoutSeconds,[ref]$LastProbe)
+        $LastProbe.Value=[pscustomobject]@{Success=$false;ExitCode=1;TimedOut=$false;Output=@('Fixture distro failed to restart')}
+        $false
+    }
     Assert-Throws { Ensure-Docker 'Fixture-Distro' } 'did not restart with systemd'
 }
 
@@ -68,6 +72,7 @@ Test-Case 'Custom registered NDI paths participate in Discovery, current-version
         New-Item -ItemType Directory -Path $discoveryDir,$env:ProgramFiles,${env:ProgramFiles(x86)} -Force | Out-Null
         function Get-NdiRegistration { [pscustomobject]@{DisplayName='NDI 6 Tools';DisplayVersion='6.3.2.0';InstallLocation=$customRoot} }
         function Get-CurrentNdiToolsVersion { [version]'6.3.2.0' }
+        function Get-NdiToolsMetadata { [pscustomobject]@{Url=$script:NdiToolsUrl;Version='6.3.2.0'} }
         function Download-FileWithProgress { throw 'A healthy current custom installation must not download Tools' }
         $exe = Join-Path $customRoot 'Fixture.exe'
         & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /reference:System.Windows.Forms.dll ("/out:$exe") (Join-Path $root 'tests\QuietInstaller.Fixture.cs')
@@ -126,7 +131,10 @@ Test-Case 'NDI roots retain default and service fallbacks and reject unsafe broa
         $defaultExe = Join-Path $env:ProgramFiles 'NDI\NDI 6 Tools\Discovery\NDI Discovery Service.exe'
         $x86Exe = Join-Path ${env:ProgramFiles(x86)} 'NDI\NDI 5 Tools\Discovery\NDI Discovery Service.exe'
         foreach ($path in @($defaultExe,$x86Exe)) { New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null; [IO.File]::WriteAllText($path,'fixture') }
-        Assert-True ((Get-NdiDiscoveryExe) -eq $defaultExe) 'Default Discovery fallback regressed.'
+        Assert-Throws {Get-NdiDiscoveryExe} 'ambiguous'
+        function Get-NdiDiscoveryService { [pscustomobject]@{Name='Fixture Discovery'} }
+        function Get-CimInstance { [pscustomobject]@{Name='Fixture Discovery';PathName=('"'+$defaultExe+'"')} }
+        Assert-True ((Get-NdiDiscoveryExe) -eq $defaultExe) 'The active service identity was not used to resolve side-by-side executables.'
         Assert-True (@(Get-NdiToolsFiles | Where-Object Name -eq 'NDI Discovery Service.exe').Count -eq 2) 'Both installed default versions must be inspected.'
         function Get-NdiRegistration { @([pscustomobject]@{InstallLocation=$customRoot},[pscustomobject]@{InstallLocation=(Split-Path -Parent (Split-Path -Parent $x86Exe))}) }
         Assert-True (@(Get-NdiToolsRoots).Count -eq 3) 'Multiple registered roots were not retained and deduplicated.'

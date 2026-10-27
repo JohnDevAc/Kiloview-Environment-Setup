@@ -17,15 +17,15 @@ function Test-ServerOwnershipEvidence {
     if (Get-SavedConfig) { return $true }
     $discoveryPath = Join-Path $script:StateRoot 'discovery-ownership.json'
     if (Test-Path -LiteralPath $discoveryPath) {
-        $discovery = Get-Content -LiteralPath $discoveryPath -Raw | ConvertFrom-Json
+        $discovery = Get-Content -Encoding UTF8 -LiteralPath $discoveryPath -Raw | ConvertFrom-Json
         if ($discovery.schemaVersion -ne 1) { throw 'Unsupported Discovery ownership receipt.' }
         if (-not (Get-PropertyValue $discovery 'restoreCompleted' $false)) { return $true }
     }
     $path = Join-Path $script:StateRoot 'installation-components.json'
     if (Test-Path -LiteralPath $path) {
-        $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $receipt = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json
         if ($receipt.schemaVersion -ne 1) { throw 'Unsupported component receipt. Server ownership cannot be verified.' }
-        if ('server' -in @($receipt.roles)) { return $true }
+        if ('server' -in @($receipt.roles) -or (Get-PropertyValue $receipt 'retainedServer' $false)) { return $true }
     }
     return [bool](Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue)
 }
@@ -33,7 +33,7 @@ function Test-ServerOwnershipEvidence {
 function Save-DiscoveryOwnership {
     $path = Join-Path $script:StateRoot 'discovery-ownership.json'
     if (Test-Path -LiteralPath $path) {
-        $previous = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $previous = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json
         if ($previous.schemaVersion -ne 1) { throw 'Unsupported Discovery ownership receipt.' }
         if (-not (Get-PropertyValue $previous 'restoreCompleted' $false)) { return }
         Remove-Item -LiteralPath $path -Force
@@ -58,7 +58,7 @@ function Save-DiscoveryOwnership {
 
 function Restore-DiscoveryOwnership {
     $path = Join-Path $script:StateRoot 'discovery-ownership.json'
-    $receipt = if (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } else { $null }
+    $receipt = if (Test-Path -LiteralPath $path) { Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json } else { $null }
     if (-not $receipt -and -not (Test-ServerOwnershipEvidence)) { return }
     if ($receipt -and $receipt.schemaVersion -ne 1) { throw 'Unsupported Discovery ownership receipt. No Discovery settings were changed.' }
     if ($receipt -and (Get-PropertyValue $receipt 'restoreCompleted' $false)) { return }
@@ -127,7 +127,7 @@ function Configure-NdiServer {
 
     if ($service) {
         $ownershipPath = Join-Path $script:StateRoot 'discovery-ownership.json'
-        $ownership = Get-Content -LiteralPath $ownershipPath -Raw | ConvertFrom-Json
+        $ownership = Get-Content -Encoding UTF8 -LiteralPath $ownershipPath -Raw | ConvertFrom-Json
         $ownership.managedServiceName = $service.Name
         $ownership | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($ownershipPath + '.tmp') -Encoding UTF8
         Move-Item -LiteralPath ($ownershipPath + '.tmp') -Destination $ownershipPath -Force

@@ -27,6 +27,42 @@ jobs:
       - name: Native vendor process isolation
         shell: powershell
         run: .\tests\Test-QuietInstaller.ps1
+      - name: Truthful Client progress and terminal outcomes
+        shell: powershell
+        run: .\tests\Progress.Regression.ps1
+      - name: Lifecycle result persistence and partial cancellation
+        shell: powershell
+        run: .\tests\LifecyclePersistence.Regression.ps1
+      - name: Lifecycle writer ownership and concurrent snapshots
+        shell: powershell
+        run: .\tests\LifecycleConcurrency.Regression.ps1
+      - name: Lifecycle Client and Server retry routing
+        shell: powershell
+        run: .\tests\LifecycleRoles.Regression.ps1
+      - name: Bounded native NDI metadata and preflight progress
+        shell: powershell
+        run: .\tests\NdiMetadata.Regression.ps1
+      - name: Native WSL arguments and missing-runtime bootstrap
+        shell: powershell
+        run: .\tests\WslBootstrap.Regression.ps1
+      - name: WSL console bootstrap, descendants and durable recovery
+        shell: powershell
+        run: .\tests\WslConsole.Regression.ps1
+      - name: Actual PowerShell native PATH resolution and readiness diagnostics
+        shell: powershell
+        run: .\tests\NativeResolution.Regression.ps1
+      - name: Bounded WSL distro launch and shared readiness deadlines
+        shell: powershell
+        run: .\tests\WslReadiness.Regression.ps1
+      - name: Concurrent diagnostic readers and interrupted native ownership
+        shell: powershell
+        run: .\tests\InstallerLogging.Regression.ps1
+      - name: Cooperative Linux watchdog shutdown and retained-role reactivation
+        shell: powershell
+        run: .\tests\WatchdogLifecycle.Regression.ps1
+      - name: Terminal resume failure and automatic continuation ownership
+        shell: powershell
+        run: .\tests\ResumeContinuation.Regression.ps1
       - name: Package and licence verification
         shell: powershell
         run: .\tests\Packaging.Regression.ps1
@@ -36,3 +72,5 @@ jobs:
           path: |
             artifacts/installer/*.exe
             artifacts/installer/*.sha256
+            artifacts/installer/toolbox-lifecycle.json
+            artifacts/Kiloview-Environment-Setup-Lifecycle.zip*

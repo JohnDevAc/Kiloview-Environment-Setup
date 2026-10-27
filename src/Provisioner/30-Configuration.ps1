@@ -13,6 +13,11 @@ function Get-NdiRegistration {
         $name -match '^NDI\s+\d+\s+Tools' -or ($name -match 'NDI.*Tools' -and $publisher -match 'NDI|Vizrt|NewTek')
     })
     if ($All) { return $registrations }
+    $registrations=@($registrations|Sort-Object @{Expression={Convert-ToNdiToolsVersion ([string](Get-PropertyValue $_ 'DisplayVersion' ''))};Descending=$true})
+    if($registrations.Count -gt 1) {
+        $locations=@($registrations|ForEach-Object{[string](Get-PropertyValue $_ 'InstallLocation' '')}|Where-Object{$_}|Select-Object -Unique)
+        if($locations.Count -gt 1){throw 'Multiple NDI Tools installations are registered at different locations. Resolve the intended installation in Windows Apps before updating shared NDI files.'}
+    }
     return @($registrations | Select-Object -First 1)[0]
 }
 
@@ -76,15 +81,37 @@ function Get-NdiToolsFiles {
 }
 
 function Get-NdiDiscoveryExe {
-    $found = Get-NdiToolsFiles | Where-Object Name -eq 'NDI Discovery Service.exe' | Select-Object -First 1
-    if ($found) { return $found.FullName }
+    # Bridge ships a private helper with the same filename. It is not the
+    # standalone Discovery service component managed by Environment.
+    $found = @(Get-NdiToolsFiles | Where-Object { $_.Name -eq 'NDI Discovery Service.exe' -and $_.Directory.Name -in @('Discovery','Discovery Service') })
+    if($found.Count -gt 1){
+        $service=Get-NdiDiscoveryService
+        if($service){
+            $native=@(Get-CimInstance Win32_Service -ErrorAction Stop|Where-Object Name -eq $service.Name)
+            if($native.Count -eq 1 -and $native[0].PathName -match '^\s*(?:"(?<exe>[A-Za-z]:\\[^"]+\.exe)"|(?<exe>[A-Za-z]:\\.+?\.exe))(?:\s|$)'){
+                $matchesService=@($found|Where-Object{$_.FullName -ieq $Matches['exe']})
+                if($matchesService.Count -eq 1){return $matchesService[0].FullName}
+            }
+        }
+        throw 'Multiple NDI Discovery executables were found and the active service identity is ambiguous.'
+    }
+    if ($found.Count -eq 1) { return $found[0].FullName }
     return $null
 }
 
+function Test-NdiClientToolsReady {
+    $files=@(Get-NdiToolsFiles)
+    $access=@($files|Where-Object{$_.Directory.Name -eq 'Access Manager' -and $_.Name -in @('Application.NdiGroupEditor.exe','NDI Access Manager.exe')})
+    $monitor=@($files|Where-Object{$_.Directory.Name -eq 'Studio Monitor' -and $_.Name -in @('Application.Network.StudioMonitor.x64.exe','NDI Studio Monitor.exe')})
+    return $access.Count -gt 0 -and $monitor.Count -gt 0
+}
+
 function Get-NdiDiscoveryService {
-    return @(Get-Service -ErrorAction SilentlyContinue | Where-Object {
+    $services=@(Get-Service -ErrorAction SilentlyContinue | Where-Object {
         $_.Name -match 'NDI.*Discovery' -or $_.DisplayName -match 'NDI.*Discovery'
-    } | Select-Object -First 1)[0]
+    })
+    if($services.Count -gt 1){throw 'Multiple NDI Discovery services are registered. Resolve the intended shared service before maintenance.'}
+    return @($services|Select-Object -First 1)[0]
 }
 
 function Get-InstallState {

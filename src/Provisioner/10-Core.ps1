@@ -1,23 +1,34 @@
 function Set-OperationOutcome {
     param(
-        [ValidateSet('Idle', 'Running', 'Completed', 'Cancelled', 'RestartRequired', 'Failed')]
+        [ValidateSet('Idle', 'Running', 'Completed', 'NoChange', 'Cancelled', 'RestartRequired', 'Failed', 'Partial', 'Blocked')]
         [string]$Outcome,
         [string]$Message
     )
     $script:OperationOutcome = $Outcome
     $script:OperationMessage = $Message
-    if ($Outcome -eq 'Failed') { $script:OperationFailed = $true }
-    if ($Outcome -eq 'Completed') { $script:OperationFailed = $false }
+    if ($Outcome -in @('Failed','Partial','Blocked')) { $script:OperationFailed = $true }
+    if ($Outcome -in @('Completed','NoChange')) { $script:OperationFailed = $false }
     if ($Outcome -eq 'Running' -and $script:ActiveJournal -and $script:ActiveJournal.outcome -ne 'Running') { $script:ActiveJournal = $null }
     if ($script:ActiveJournal) {
         $script:ActiveJournal.outcome = $Outcome
+        $script:ActiveJournal['recoveryRequired']=$script:LifecycleRecoveryRequired
         Save-DeploymentJournal
     }
+    if($script:Lifecycle -and $Outcome -notin @('Idle','Running')){
+        try{$script:LifecycleComponents=@(Get-ObservedComponents)}catch{Write-InstallerLog ('Final component inspection failed: '+$_.Exception.Message)}
+    }
     Write-LauncherEvent -Type 'outcome' -Data @{ outcome = $Outcome; message = $Message }
+    Write-LifecycleResult (Get-LifecycleResultOutcome $Outcome) $Message
+    if ($Outcome -notin @('Idle','Running') -and $script:ProgressActive) {
+        $finalPercent = if ($Outcome -in @('Completed','NoChange')) { 100 } else { $script:ProgressPercent }
+        Set-SuiteProgress -Percent $finalPercent -Status $Message
+    }
 }
 
 function Get-InstallerExitCode {
     if ($script:OperationOutcome -eq 'RestartRequired') { return 3010 }
+    if ($script:LifecycleErrorCode -eq 'operation-conflict') { return 1618 }
+    if ($script:OperationOutcome -eq 'Cancelled') { if ($script:LifecycleEffects.Count) { return 1 }; return 1602 }
     if ($script:OperationFailed -or $script:OperationOutcome -eq 'Running') { return 1 }
     return 0
 }
@@ -26,6 +37,7 @@ function Write-LauncherEvent {
     param([string]$Type, [hashtable]$Data = @{})
     if (-not $LauncherMode) { return }
     $payload = [ordered]@{ type = $Type }
+    if ($script:Lifecycle) { $payload['operationId']=$script:Lifecycle.OperationId }
     foreach ($key in $Data.Keys) {
         $payload[$key] = $Data[$key]
     }
@@ -43,12 +55,46 @@ function Read-InstallerInput {
 
 function Write-InstallerLog {
     param([string]$Message)
-    if (-not (Test-Path -LiteralPath $script:StateRoot)) { return }
     # wsl.exe can emit UTF-16 text through a native pipeline. Strip embedded
     # NUL characters so diagnostics remain readable in Notepad and on screen.
     $cleanMessage = ([string]$Message -replace [char]0, '').TrimEnd()
     $line = '{0} {1}' -f (Get-Date).ToString('o'), $cleanMessage
-    Add-Content -LiteralPath $script:InstallerLogPath -Value $line -Encoding UTF8
+    $previous=Get-Variable InstallerLogFailure -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $now=[datetime]::UtcNow
+    $failure=$null
+    $deferRetry=$previous -and $previous.path -eq $script:InstallerLogPath -and $now -lt $previous.retryAfterUtc
+    if($deferRetry){$failure=$previous.message}
+    else {
+        $clock=[Diagnostics.Stopwatch]::StartNew()
+        do {
+            $stream=$null;$writer=$null
+            try {
+                if (-not (Test-Path -LiteralPath $script:StateRoot)) { return }
+                # PS5.1 Add-Content can reject even a ReadWrite|Delete reader.
+                # Diagnostics must coexist with readers and never abort servicing.
+                $stream=[IO.FileStream]::new($script:InstallerLogPath,[IO.FileMode]::Append,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                $writer=[IO.StreamWriter]::new($stream,[Text.UTF8Encoding]::new($false))
+                $writer.WriteLine($line);$writer.Flush()
+                return
+            } catch {
+                $errorDetails=$_.Exception.GetBaseException()
+                $failure=$errorDetails.Message
+                $retry=($errorDetails.HResult -band 0xffff) -in @(32,33) -and $clock.ElapsedMilliseconds -lt 250
+            } finally {
+                if($writer){try{$writer.Dispose()}catch{}}
+                elseif($stream){try{$stream.Dispose()}catch{}}
+            }
+            if($retry){Start-Sleep -Milliseconds 50}
+        } while($retry)
+    }
+    # Avoid a fresh retry delay for every native output line during a persistent
+    # lock. Keep fallback output in the host/transcript without changing outcome.
+    $warn=-not $previous -or $previous.path -ne $script:InstallerLogPath -or $previous.message -ne $failure -or ($now-$previous.warnedUtc).TotalSeconds -ge 30
+    $script:InstallerLogFailure=@{path=$script:InstallerLogPath;message=$failure;retryAfterUtc=$(if($deferRetry){$previous.retryAfterUtc}else{[datetime]::UtcNow.AddSeconds(1)});warnedUtc=$(if($warn){$now}else{$previous.warnedUtc})}
+    try {
+        if($warn){Write-Warning -Message "Could not append the diagnostic log '$($script:InstallerLogPath)': $failure Diagnostic output is being sent to the setup host/transcript." -WarningAction Continue}
+        Write-Host $line
+    } catch { } # A secondary diagnostic sink must not replace the real error.
 }
 
 function Start-SuiteProgress {
@@ -65,7 +111,9 @@ function Start-SuiteProgress {
 function Set-SuiteProgress {
     param([int]$Percent, [string]$Status)
     if (-not $script:ProgressActive) { return }
-    $script:ProgressPercent = [Math]::Max($script:ProgressPercent, [Math]::Min(100, $Percent))
+    # Completion belongs to the operation outcome, never a finished download.
+    $maximum = if ($script:OperationOutcome -in @('Completed','NoChange')) { 100 } else { 99 }
+    $script:ProgressPercent = [Math]::Min($maximum, [Math]::Max($script:ProgressPercent, [Math]::Max(0, $Percent)))
     if ($Status) { $script:ProgressStatus = $Status }
     if (-not $LauncherMode) {
         Write-Progress -Id 1 -Activity $script:ProgressActivity -Status ("{0} ({1}%)" -f $script:ProgressStatus, $script:ProgressPercent) -PercentComplete $script:ProgressPercent
@@ -79,6 +127,7 @@ function Set-SuiteProgress {
 }
 
 function Update-SuiteProgressPulse {
+    Write-LifecycleHeartbeat
     if (-not $script:ProgressActive) { return }
     $now = Get-Date
     if (($now - $script:ProgressLastPulse).TotalMilliseconds -lt 250) { return }
@@ -160,6 +209,7 @@ function Test-Administrator {
 }
 
 function Ensure-Administrator {
+    try { Initialize-Lifecycle } catch { if($script:Lifecycle){Write-LifecycleResult 'blocked' $_.Exception.Message -Stage 'preflight' -ErrorCode 'request-rejected'}; Write-Error $_ -ErrorAction Continue; exit 1 }
     if ($Action -in @('Inspect','Plan')) { return }
     if (Test-Administrator) {
         return
@@ -177,11 +227,21 @@ function Ensure-Administrator {
     if ($ConfigurationPath) { $elevationArguments += " -ConfigurationPath `"$ConfigurationPath`"" }
     if ($PackageDirectory) { $elevationArguments += " -PackageDirectory `"$PackageDirectory`"" }
     if ($ConfirmRemoval) { $elevationArguments += ' -ConfirmRemoval' }
+    if ($LifecycleRequestPath) { $elevationArguments += " -LifecycleRequestPath `"$LifecycleRequestPath`"" }
+    if ($Role) { $elevationArguments += " -Role $Role" }
+    if ($PurgeData) { $elevationArguments += ' -PurgeData' }
+    if ($ForceComponentRepair) { $elevationArguments += ' -ForceComponentRepair' }
     if ($PreferredInterfaceAlias) { $elevationArguments += " -PreferredInterfaceAlias `"$PreferredInterfaceAlias`"" }
     if ($PreferredIpAddress) { $elevationArguments += " -PreferredIpAddress `"$PreferredIpAddress`"" }
-    if ($LauncherMode) { Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs -WindowStyle Hidden | Out-Null }
-    else { Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs | Out-Null }
-    exit 0
+    try {
+        Write-LifecycleResult 'running' 'Waiting for Windows administrator approval.' -Stage 'waiting-elevation'
+        $elevated = Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs -WindowStyle Hidden -PassThru -Wait
+        exit $elevated.ExitCode
+    } catch {
+        if ((Get-PropertyValue $_.Exception 'NativeErrorCode' 0) -eq 1223) { Set-OperationOutcome 'Cancelled' 'Windows administrator approval was cancelled.'; exit 1602 }
+        Set-OperationOutcome 'Failed' $_.Exception.Message
+        exit 1
+    }
 }
 
 function Get-SavedConfig {
@@ -189,7 +249,7 @@ function Get-SavedConfig {
         return $null
     }
     try {
-        return Get-Content -Raw -LiteralPath $script:ConfigPath | ConvertFrom-Json
+        return Get-Content -Encoding UTF8 -Raw -LiteralPath $script:ConfigPath | ConvertFrom-Json
     } catch {
         Write-Warning "Saved configuration is unreadable: $($_.Exception.Message)"
         return $null
@@ -205,11 +265,12 @@ function Save-Config {
         $Config.UpdatedAt = (Get-Date).ToString('o')
     }
     Write-StateJson $script:ConfigPath $Config
+    Add-LifecycleEffect 'Server configuration saved.'
 }
 
 function Get-RequestedSuiteConfig {
     param([string]$Path)
-    $request = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+    $request = Get-Content -Encoding UTF8 -Raw -LiteralPath $Path | ConvertFrom-Json
     if ([int](Get-PropertyValue $request 'SchemaVersion' 0) -ne 1) {
         throw 'Unsupported setup configuration. Reopen the current installer.'
     }
@@ -288,74 +349,88 @@ function Register-MaintenanceEntry {
 }
 
 function Remove-MaintenanceEntry {
-    Remove-Item -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup' -Recurse -Force -ErrorAction SilentlyContinue
+    $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
+    if(Test-Path -LiteralPath $key){Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction Stop}
+    if(Test-Path -LiteralPath $key){throw 'Server role maintenance registration remains after removal.'}
     $programs = Join-Path ([Environment]::GetFolderPath('Programs')) 'Kiloview'
-    Remove-Item -LiteralPath (Join-Path $programs 'Kiloview Environment Setup.lnk') -Force -ErrorAction SilentlyContinue
+    Remove-OwnedFile (Join-Path $programs 'Kiloview Environment Setup.lnk')
 }
 
 function Invoke-Native {
-    param(
-        [string]$FilePath,
-        [string[]]$Arguments = @(),
-        [switch]$IgnoreExitCode,
-        [switch]$Capture
-    )
-    $previousErrorActionPreference = $ErrorActionPreference
-    $recentOutput = New-Object Collections.Generic.List[string]
+    param([string]$FilePath, [string[]]$Arguments=@(), [switch]$IgnoreExitCode, [switch]$Capture,
+        [double]$TimeoutSeconds=$script:NativeTimeoutSeconds, [double]$StallSeconds=$script:NativeStallSeconds, [switch]$ReadOnly)
+    Initialize-LifecycleProtocol
+    # -CommandType Application can return every PATH match even without -All.
+    # Preserve command precedence and pass exactly one path to ProcessStartInfo.
+    $command=Get-Command $FilePath -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $resolvedFile=$command.Source
+    if ($resolvedFile -isnot [string] -or -not [IO.Path]::IsPathRooted($resolvedFile) -or -not [IO.File]::Exists($resolvedFile)) {
+        throw "The selected native executable is missing or is not a single absolute file path: $FilePath"
+    }
+    $process=New-Object KiloLink.Lifecycle.NativeProcess($resolvedFile, $Arguments)
+    $output=New-Object 'Collections.Generic.List[string]'
+    $recent=New-Object 'Collections.Generic.List[string]'
+    $exitObserved=$false
     try {
-        # Windows PowerShell 5.1 converts native stderr into non-terminating
-        # PowerShell errors. With the script-wide preference set to Stop, normal
-        # progress written to stderr (for example by systemctl enable) would
-        # otherwise terminate the operation even when the process exits 0.
-        $ErrorActionPreference = 'Continue'
-        if ($Capture -and $script:ProgressActive) {
-            # Some checks need their output returned to the caller (for example,
-            # docker pull/image comparison). Stream those lines into a list so
-            # long-running captured commands still animate the progress display.
-            $captured = New-Object Collections.Generic.List[string]
-            & $FilePath @Arguments 2>&1 | ForEach-Object {
-                $line = ([string]$_ -replace [char]0, '').TrimEnd()
-                $captured.Add($line)
-                if ($line) { $recentOutput.Add($line) }
+        do {
+            foreach($line in $process.Drain()) {
+                if($Capture){$output.Add($line)}
+                if($line){$recent.Add($line);if($recent.Count -gt 12){$recent.RemoveAt(0)}}
                 Write-InstallerLog $line
-                Update-SuiteProgressPulse
             }
-            $output = @($captured)
-        } elseif ($Capture) {
-            $output = @(& $FilePath @Arguments 2>&1 | ForEach-Object {
-                $line = ([string]$_ -replace [char]0, '').TrimEnd()
-                if ($line) { $recentOutput.Add($line) }
-                $line
-            })
-        } else {
-            # Interactive mode sends verbose native output to the installer log
-            # while keeping a frequently refreshed progress bar on screen.
-            & $FilePath @Arguments 2>&1 | ForEach-Object {
-                $line = ([string]$_ -replace [char]0, '').TrimEnd()
-                if ($line) {
-                    $recentOutput.Add($line)
-                    if ($recentOutput.Count -gt 12) { $recentOutput.RemoveAt(0) }
+            Update-SuiteProgressPulse
+            if($process.HasExited){break}
+            if(([datetime]::UtcNow-$process.StartedUtc).TotalSeconds -gt $TimeoutSeconds -or
+                ($StallSeconds -gt 0 -and ([datetime]::UtcNow-$process.LastOutputUtc).TotalSeconds -gt $StallSeconds)) {
+                if($ReadOnly){
+                    $process.StopProbe()
+                    if(-not $process.HasExited){throw 'The owned read-only CLI could not be confirmed stopped after its deadline.'}
                 }
-                if ($script:ProgressActive) {
-                    Write-InstallerLog $line
-                    Update-SuiteProgressPulse
-                } else {
-                    Write-Host $line
+                else {
+                    $script:LifecycleRecoveryRequired=$true
+                    $script:LifecycleNextAction='An unattended command exceeded its deadline and may still be running. Wait for that command, inspect recovery records, then use Verify before retrying.'
                 }
+                $script:LifecycleErrorCode='command-timeout'
+                $failure=[TimeoutException]::new("Command exceeded its time limit: $FilePath. $($script:LifecycleNextAction)")
+                $failure.Data['NativeCommandTimeout']=$true
+                $failure.Data['NativeOutput']=$output.ToArray()
+                throw $failure
             }
-            $output = $null
+            Start-Sleep -Milliseconds 200
+        } while($true)
+        $code=$process.ExitCode
+        $exitObserved=$true
+        foreach($line in $process.Drain()){if($Capture){$output.Add($line)};if($line){$recent.Add($line)};Write-InstallerLog $line}
+        $global:LASTEXITCODE=$code
+        if(-not $IgnoreExitCode -and $code -ne 0){throw ('Command failed with exit code {0}: {1}. {2}' -f $code,$FilePath,(@($recent|Select-Object -Last 6)-join ' '))}
+        if($Capture){return $output.ToArray()}
+    } catch {
+        $originalFailure=$_
+        if(-not $ReadOnly -and -not $exitObserved) {
+            # A producer/heartbeat failure is not proof that the mutating child
+            # finished. Retain its identity without terminating it or servicing.
+            $script:LifecycleRecoveryRequired=$true
+            if(-not $script:LifecycleErrorCode){$script:LifecycleErrorCode='native-command-observation-failed'}
+            $guidance='Native command completion was not observed. Wait for the recorded command, inspect its package/recovery state, then use Verify before retrying. Do not start another operation while it may still be running.'
+            $script:LifecycleNextAction=(@($script:LifecycleNextAction,$guidance)|Where-Object {$_}) -join ' '
+            $pending=@{
+                processId=$process.Id;startedUtc=$process.StartedUtc.ToString('o');filePath=$resolvedFile;
+                reason=$(if($script:LifecycleErrorCode -eq 'command-timeout'){'Command exceeded its deadline'}else{'Native command completion was not observed'});
+                action=$Action;operationId=$(if($script:Lifecycle){$script:Lifecycle.OperationId}else{$null})}
+            if($script:ActiveJournal){$script:ActiveJournal['pendingNativeProcess']=$pending}
+            try {
+                Write-StateJson (Join-Path $script:StateRoot 'pending-process.json') $pending
+            } catch {
+                $recordFailure=$_.Exception.Message
+                $script:LifecycleNextAction+=' The pending command record could not be saved: '+$recordFailure
+                Write-InstallerLog ("Original command error: $($originalFailure.Exception.Message) Pending ownership write failed: $recordFailure")
+            }
         }
-        $code = $LASTEXITCODE
+        throw $originalFailure
     } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    if (-not $IgnoreExitCode -and $code -ne 0) {
-        $message = 'Command failed with exit code {0}: {1} {2}' -f $code, $FilePath, ($Arguments -join ' ')
-        $diagnostic = @($recentOutput | Where-Object { $_ } | Select-Object -Last 6) -join ' '
-        if ($diagnostic) { $message += [Environment]::NewLine + 'Reported by command: ' + $diagnostic }
-        throw $message
-    }
-    if ($Capture) {
-        return @($output | ForEach-Object { [string]$_ })
+        # A heartbeat/result-write error must not abandon a read-only probe.
+        # Mutating commands retain the existing recovery/ownership behavior.
+        try { if ($ReadOnly -and -not $process.HasExited) { $process.StopProbe() } }
+        finally { $process.Dispose() }
     }
 }

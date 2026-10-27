@@ -26,7 +26,7 @@ function Assert-NoPendingKiloRecovery {
     $root = Join-Path $script:StateRoot 'Backups'
     foreach ($directory in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
         $status = Join-Path $directory.FullName 'status'
-        if ((Test-Path -LiteralPath $status) -and (Get-Content -LiteralPath $status -Raw).Trim() -notin @('committed','rolled-back','backup-complete')) {
+        if ((Test-Path -LiteralPath $status) -and (Get-Content -Encoding UTF8 -LiteralPath $status -Raw).Trim() -notin @('committed','rolled-back','backup-complete')) {
             throw "An interrupted KiloLink operation needs recovery from $($directory.FullName). Follow docs/RECOVERY.md before retrying. Its data and previous container were retained."
         }
     }
@@ -148,25 +148,25 @@ function Invoke-KiloReplacement {
     if ($existing -and $existing.LinuxDataPath.TrimEnd('/') -ne $Config.LinuxDataPath.TrimEnd('/')) { throw 'Moving KiloLink data requires an explicit migration, not repair.' }
     Write-StateJson (Join-Path $directory 'deployment.json') ([ordered]@{schemaVersion=1; backupId=$id; createdUtc=[datetime]::UtcNow.ToString('o'); before=$existing; requested=$Config})
     $linux = Get-KiloReplacementScript $Config (Get-WslBackupPath $directory) $id -Pull:$Pull -BackupOnly:$BackupOnly -UpdateImage:$UpdateImage
-    # Older installed watchdogs do not know about the Linux lock. Disable their
-    # triggers as well as stopping the current instance during migration/backup.
+    # Preserve task policy, then confirm Linux watchdog quiescence as well as
+    # disabling Windows triggers before migration/backup.
     $watchdog = Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue
     $enabled = $watchdog -and [bool]$watchdog.Settings.Enabled
     $running = $watchdog -and $watchdog.State -eq 'Running'
     if ($watchdog) {
         Write-StateJson (Join-Path $directory 'watchdog.json') @{enabled=$enabled; running=$running; taskName=$script:StartupTaskName}
-        if ($enabled) { Disable-ScheduledTask -TaskName $script:StartupTaskName | Out-Null }
     }
     try {
-        Stop-ManagedTask $script:StartupTaskName
+        Set-KiloWatchdogState -Distro $Config.DistroName -Mode Activate
         Invoke-WslScript $Config.DistroName $linux
     } finally {
         $statusPath = Join-Path $directory 'status'
-        $status = if (Test-Path -LiteralPath $statusPath) { (Get-Content -LiteralPath $statusPath -Raw).Trim() } else { 'not-started' }
-        if ($enabled -and $status -in @('committed','rolled-back','backup-complete','not-started')) {
+        $status = if (Test-Path -LiteralPath $statusPath) { (Get-Content -Encoding UTF8 -LiteralPath $statusPath -Raw).Trim() } else { 'not-started' }
+        if ($enabled -and -not $script:LifecycleRecoveryRequired -and $status -in @('committed','rolled-back','backup-complete','not-started')) {
             Enable-ScheduledTask -TaskName $script:StartupTaskName | Out-Null
             if ($running) { Start-ScheduledTask -TaskName $script:StartupTaskName }
         }
     }
+    Add-LifecycleEffect "KiloLink backup/replacement state recorded under $directory."
     Write-Detail "KiloLink recovery files: $directory" Green
 }

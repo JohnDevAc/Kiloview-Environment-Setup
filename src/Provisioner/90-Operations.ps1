@@ -23,16 +23,16 @@ function Repair-Suite {
         Set-OperationOutcome 'Cancelled' 'Installation was cancelled before changes were applied.'
         return
     }
-    Assert-ServerDownloads $config
-    Start-DeploymentJournal $Action $config
-    Save-ComponentReceipt 'server'
-    Save-DiscoveryOwnership
-    Save-Config $config
-    Register-MaintenanceEntry
     $showProgress = $LauncherMode -or $Action -in @('Menu', 'Resume')
     $succeeded = $false
-    if ($showProgress) { Start-SuiteProgress -Activity 'Installing KiloLink Server Pro and NDI' -Status 'Preparing the saved configuration' }
+    if ($showProgress) { Start-SuiteProgress -Activity 'Installing KiloLink Server Pro and NDI' -Status 'Checking required server package sources' }
     try {
+        Assert-ServerDownloads $config
+        Start-DeploymentJournal $Action $config
+        Save-ComponentReceipt 'server'
+        Save-DiscoveryOwnership
+        Save-Config $config
+        Register-MaintenanceEntry
         Set-SuiteProgress -Percent 5 -Status 'Checking Windows and WSL prerequisites'
         if (-not (Invoke-DeploymentStep 'Windows prerequisites' { Ensure-WslFeatures })) { return }
         Set-SuiteProgress -Percent 15 -Status 'Configuring mirrored multi-adapter networking'
@@ -40,6 +40,7 @@ function Repair-Suite {
         Set-SuiteProgress -Percent 22 -Status 'Preparing the dedicated Ubuntu environment'
         $distro = Invoke-DeploymentStep 'Dedicated Ubuntu distribution' { Ensure-Ubuntu $config }
         if (-not $distro) { return }
+        Invoke-DeploymentStep 'Quiesce previous Server watchdogs' { Set-KiloWatchdogState -Distro $distro -Mode Activate -Reactivate }
         Set-SuiteProgress -Percent 30 -Status 'Preparing systemd, Docker Engine, and Avahi'
         Assert-LinuxDownloads $distro
         Invoke-DeploymentStep 'Docker and Avahi' { Ensure-Docker $distro }
@@ -96,7 +97,15 @@ function Wait-ResumeNetwork {
 function Resume-Suite {
     Assert-ServerOwner
     $continuation = Get-ResumeState
-    Remove-ResumeTask
+    if ($script:Lifecycle -and (Get-PropertyValue $continuation 'OperationId' '') -ne $script:Lifecycle.OperationId) { throw 'Restart continuation does not belong to this lifecycle operation.' }
+    if ((Get-PropertyValue $continuation 'Action' '') -eq 'InstallClient') { Install-ClientTools; if($script:OperationOutcome -in @('Completed','NoChange')){Clear-ResumeContinuation}; return }
+    $reviewedConfig=Get-PropertyValue $continuation 'ConfigurationPath' ''
+    if ($reviewedConfig -and -not (Get-SavedConfig)) {
+        $previousAction=$Action
+        try { $Action=Get-PropertyValue $continuation 'Action' 'Setup'; Repair-Suite -RequestedConfiguration (Get-RequestedSuiteConfig $reviewedConfig) -LicenseAccepted -BringCurrent:($Action -eq 'Setup') }
+        finally {$Action=$previousAction}
+        return
+    }
     if (-not (Get-SavedConfig)) {
         throw 'Setup cannot resume because its saved configuration is missing.'
     }
@@ -263,17 +272,21 @@ function Remove-LegacyPortProxies {
 
 function Uninstall-Suite {
     param([switch]$Confirmed)
+    $purge=[bool](Get-Variable PurgeData -ValueOnly -ErrorAction SilentlyContinue)
     Assert-ServerOwner
+    if(-not $purge -and -not(Get-SavedConfig) -and (Test-Path -LiteralPath (Join-Path $script:StateRoot 'retained-server.json'))){
+        Set-OperationOutcome 'NoChange' 'Server role is already inactive. Its data and dedicated Linux environment remain retained.';return
+    }
     if (-not (Test-ServerOwnershipEvidence)) {
         Set-OperationOutcome 'Completed' 'No Environment Server installation was found. Client components and shared NDI settings were retained.'
         return
     }
-    Set-OperationOutcome 'Running' 'Uninstalling the suite.'
+    Set-OperationOutcome 'Running' 'Removing Server role.'
     Start-DeploymentJournal 'Uninstall' (Get-SavedConfig)
     Write-Heading 'Uninstall KiloLink Suite'
-    Write-Host 'This removes KiloLink and its persisted data and managed Discovery Server settings,' -ForegroundColor Yellow
+    Write-Host $(if($purge){'This permanently removes KiloLink and its persisted data.'}else{'This stops managed services and keeps KiloLink data and its Linux environment.'}) -ForegroundColor Yellow
     Write-Host 'scheduled tasks, installer firewall rules, and browser shortcuts.' -ForegroundColor Yellow
-    Write-Host "The dedicated $($script:ManagedDistroName) distribution will be deleted." -ForegroundColor Yellow
+    Write-Host $(if($purge){"The dedicated $($script:ManagedDistroName) distribution will be deleted."}else{'The inactive distribution and its disk footprint are retained for recovery.'}) -ForegroundColor Yellow
     Write-Host 'NDI Tools, PC Agent, WSL, unrelated distributions, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
     if (-not $Confirmed -and (Read-InstallerInput 'Type UNINSTALL to continue') -cne 'UNINSTALL') {
         Write-Host 'Uninstall cancelled.' -ForegroundColor Yellow
@@ -284,20 +297,26 @@ function Uninstall-Suite {
     # Persist a verified legacy owner before removing its startup task. Keep the
     # owner until every removal step succeeds so a partial uninstall is retryable.
     Save-ComponentReceipt 'server'
+    Add-LifecycleEffect 'Server role removal started; ownership retained until postconditions pass.'
 
     $showProgress = $LauncherMode -or $Action -eq 'Menu'
-    if ($showProgress) { Start-SuiteProgress -Activity 'Uninstalling the KiloLink and NDI suite' -Status 'Preparing removal' }
+    if ($showProgress) { Start-SuiteProgress -Activity 'Removing Server role' -Status 'Preparing removal' }
     try {
     Set-SuiteProgress -Percent 8 -Status 'Stopping startup tasks and NDI services'
     $config = Get-SavedConfig
     $preferred = if ($config) { [string](Get-PropertyValue $config 'DistroName' '') } else { '' }
     $distro = Get-UbuntuDistro $preferred
-    Stop-ManagedTask $script:StartupTaskName
+    Invoke-DeploymentStep 'Stop Server watchdogs' { Set-KiloWatchdogState -Distro $distro -Mode Retain }
     Remove-ResumeTask
-    Unregister-ScheduledTask -TaskName $script:StartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-OwnedTask $script:StartupTaskName
     Restore-DiscoveryOwnership
 
-    if ($distro -and (Test-KiloContainer $distro)) {
+    if (-not $purge -and $distro -and (Test-KiloContainer $distro)) {
+        Invoke-Wsl $distro "docker update --restart=no '$script:ContainerName' >/dev/null && docker stop '$script:ContainerName' >/dev/null"
+        $remaining=Invoke-Wsl $distro "docker inspect -f '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' '$script:ContainerName'" -Capture
+        if(($remaining -join '').Trim() -ne 'false no'){throw 'The retained KiloLink container is not safely stopped with automatic restart disabled.'}
+    }
+    if ($purge -and $distro -and (Test-KiloContainer $distro)) {
         Set-SuiteProgress -Percent 24 -Status 'Removing the KiloLink container and application data'
         Write-Step 'Removing KiloLink container and data'
         $inspectLines = Invoke-Wsl $distro "docker inspect '$script:ContainerName'" -Capture
@@ -326,31 +345,50 @@ function Uninstall-Suite {
     Remove-LegacyPortProxies $config
     $desktop = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'KiloLink Server Pro.url'
     $programs = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Kiloview'
-    Remove-Item -LiteralPath $desktop -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path $programs 'KiloLink Server Pro.url') -Force -ErrorAction SilentlyContinue
+    Remove-OwnedFile $desktop
+    Remove-OwnedFile (Join-Path $programs 'KiloLink Server Pro.url')
     if (Test-Path -LiteralPath $programs) {
         if (@(Get-ChildItem -LiteralPath $programs -Force).Count -eq 0) {
             Remove-Item -LiteralPath $programs -Force
         }
     }
-    if ($distro -eq $script:ManagedDistroName -and (Get-WslDistroNames) -contains $script:ManagedDistroName) {
+    if ($purge -and $distro -eq $script:ManagedDistroName -and (Get-WslDistroNames) -contains $script:ManagedDistroName) {
         Set-SuiteProgress -Percent 90 -Status "Removing the dedicated $($script:ManagedDistroName) distribution"
         Write-Step "Removing dedicated WSL distribution '$($script:ManagedDistroName)'"
         Invoke-Native wsl.exe @('--unregister', $script:ManagedDistroName)
+        if((Get-WslDistroNames) -contains $script:ManagedDistroName){throw 'The dedicated Linux distribution is still registered after removal.'}
     }
+    if(@(Get-NetFirewallRule -Group $script:FirewallGroup -ErrorAction SilentlyContinue).Count){throw 'Owned firewall rules remain after removal.'}
+    if(Get-Command Get-NetFirewallHyperVRule -ErrorAction SilentlyContinue){
+        if(@(Get-NetFirewallHyperVRule -ErrorAction Stop|Where-Object{$_.Name -like "$($script:HyperVPrefix)*"}).Count){throw 'Owned Hyper-V firewall rules remain after removal.'}
+    }
+    if(-not $purge){Write-StateJson (Join-Path $script:StateRoot 'retained-server.json') @{
+        schemaVersion=1;serverOwnerSid=(Get-CurrentUserSid);configuration=$config;distro=$distro;active=$false;retainedUtc=[datetime]::UtcNow.ToString('o')
+    }}
+    else {Remove-OwnedFile (Join-Path $script:StateRoot 'retained-server.json')}
     Set-SuiteProgress -Percent 100 -Status 'Uninstall complete'
     Remove-MaintenanceEntry
     # Retain the reusable installer and logs, including the active transcript.
     foreach ($file in @($script:ConfigPath, $script:StartupScriptPath, $script:ResumeStatePath)) {
-        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        Remove-OwnedFile $file
     }
     Save-ComponentReceipt 'server' -Remove
-    Remove-Item -LiteralPath (Join-Path $script:StateRoot 'discovery-ownership.json') -Force -ErrorAction SilentlyContinue
+    Remove-OwnedFile (Join-Path $script:StateRoot 'discovery-ownership.json')
+    } catch {
+        $removalFailure=$_
+        $script:LifecycleRecoveryRequired=$true
+        if(-not $script:LifecycleErrorCode){$script:LifecycleErrorCode='server-role-removal-incomplete'}
+        $script:LifecycleNextAction='Server removal is incomplete. Preserve its data and watchdog inhibit. Run Verify to confirm watchdog shutdown, then retry removal or explicitly review Server setup/repair to reactivate it.'
+        $watchdogRecovery=@{schemaVersion=1;distro=$distro;action='Uninstall';mode='Retain';startedUtc=[datetime]::UtcNow.ToString('o')}
+        if($script:ActiveJournal){$script:ActiveJournal['pendingWatchdog']=$watchdogRecovery}
+        try { Write-StateJson (Join-Path $script:StateRoot 'pending-watchdog.json') $watchdogRecovery }
+        catch { Write-InstallerLog ('Could not save removal recovery record: '+$_.Exception.Message) }
+        throw $removalFailure
     } finally {
         if ($showProgress) { Stop-SuiteProgress }
     }
     Write-Host 'Uninstall complete. WSL and unrelated distributions were retained.' -ForegroundColor Green
-    Set-OperationOutcome 'Completed' 'Uninstall completed.'
+    Set-OperationOutcome 'Completed' $(if($purge){'Server role and dedicated data environment removed. Shared NDI Tools and PC Agent remain.'}else{'Server services removed and role inactive. KiloLink data and dedicated Linux environment (including disk footprint) are retained; see retained-server.json for recovery.'})
 }
 
 function Show-State {

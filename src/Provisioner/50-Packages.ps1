@@ -14,6 +14,9 @@ function Download-FileWithProgress {
         [int]$PercentSpan,
         [string]$Status
     )
+    # Reserve the final points for verification and the operation outcome.
+    $BasePercent = [Math]::Max(0, [Math]::Min(98, $BasePercent))
+    $PercentSpan = [Math]::Max(0, [Math]::Min(98 - $BasePercent, $PercentSpan))
     if ($PackageDirectory) {
         $name = if (([uri]$Uri).Host -eq 'downloads.ndi.tv') { 'NDI-Tools.exe' }
             elseif ($Uri -like 'https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/download/*') { 'PC-Agent.zip' }
@@ -50,7 +53,9 @@ function Download-FileWithProgress {
             # BITS reports UInt64.MaxValue until the server supplies the content length.
             # Treat that sentinel as unknown so the UI never displays an absurd total.
             if ($job.BytesTotal -gt 0 -and [uint64]$job.BytesTotal -ne [uint64]::MaxValue) {
-                $fraction = [Math]::Min(1, [double]$job.BytesTransferred / [double]$job.BytesTotal)
+                # Explicit doubles avoid PowerShell selecting Min(int,int) and
+                # rounding a half-complete transfer to one whole download.
+                $fraction = [Math]::Min([double]1, [double]$job.BytesTransferred / [double]$job.BytesTotal)
                 $percent = $BasePercent + [int]([Math]::Floor($fraction * $PercentSpan))
                 $downloaded = [Math]::Round($job.BytesTransferred / 1MB, 1)
                 $total = [Math]::Round($job.BytesTotal / 1MB, 1)
@@ -98,22 +103,9 @@ function Get-InstallerSignatureWithProgress {
 
 function Get-CurrentNdiToolsUrl {
     param($Page = $null)
-    if (-not $Page) {
-        $Page = Invoke-WebRequest -UseBasicParsing -Uri 'https://ndi.video/tools/' -TimeoutSec 60
-        $script:NdiDownloadPage = $Page
-    }
-    $candidates = @($page.Links | ForEach-Object {
-        $url = $null
-        if ([Uri]::TryCreate([string](Get-PropertyValue $_ 'href' ''), [UriKind]::Absolute, [ref]$url) -and
-            $url.Scheme -eq 'https' -and $url.Host -eq 'downloads.ndi.tv' -and
-            [Uri]::UnescapeDataString($url.AbsolutePath) -match '^/Tools/NDI[^/]*Tools\.exe$') {
-            $url.AbsoluteUri
-        }
-    } | Select-Object -Unique)
-    if ($candidates.Count -ne 1) {
-        throw 'The current Windows NDI Tools download could not be identified on ndi.video/tools/. Try again later.'
-    }
-    return $candidates[0]
+    $metadata = if ($Page) { ConvertFrom-NdiToolsHtml ([string]$Page.Content) } else { Get-NdiToolsMetadata }
+    $script:NdiDownloadPage = $metadata
+    return $metadata.Url
 }
 
 function Convert-ToNdiToolsVersion {
@@ -128,22 +120,12 @@ function Convert-ToNdiToolsVersion {
 
 function Get-CurrentNdiToolsVersion {
     param([string]$Uri)
-    try {
-        $page = if ($script:NdiDownloadPage) { $script:NdiDownloadPage } else { Invoke-WebRequest -UseBasicParsing -Uri 'https://ndi.video/tools/' -TimeoutSec 20 -Headers @{'Cache-Control'='no-cache'} }
-        $script:NdiDownloadPage = $null
-        # The advertised version must belong to the package this operation uses.
-        if ((Get-CurrentNdiToolsUrl -Page $page) -ne $Uri) { return $null }
-        $content = [string](Get-PropertyValue $page 'Content' '')
-        $content = [regex]::Replace($content, '(?is)<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>', '')
-        $versions = @([regex]::Matches($content, '(?i)>\s*Version\s+(\d+\.\d+\.\d+(?:\.\d+)?)\s*<') | ForEach-Object {
-            $version = Convert-ToNdiToolsVersion $_.Groups[1].Value
-            if ($version) { $version }
-        } | Select-Object -Unique)
-        if ($versions.Count -eq 1) { return $versions[0] }
-    } catch {
-        Write-InstallerLog "NDI version metadata is unavailable; checking the signed installer instead: $($_.Exception.Message)"
-    }
-    return $null
+    $metadata = if ($script:NdiDownloadPage) { $script:NdiDownloadPage } else { Get-NdiToolsMetadata }
+    $script:NdiDownloadPage = $null
+    # Missing/ambiguous labels still fall back to the signed installer, but a
+    # timed-out mandatory website lookup must fail before any package mutation.
+    if ($metadata.Url -ne $Uri) { return $null }
+    return Convert-ToNdiToolsVersion ([string]$metadata.Version)
 }
 
 function Initialize-QuietInstaller {
@@ -176,13 +158,15 @@ function Install-NdiTools {
     $preparedCheck = if (-not $PrepareOnly) { $script:PreparedNdiCheck } else { $null }
     $script:PreparedNdiCheck = $null
     $registration = Get-NdiRegistration
+    $forceRepair=[bool](Get-Variable ForceComponentRepair -ValueOnly -ErrorAction SilentlyContinue)
+    if ($ClientOnly -and $registration -and -not $forceRepair) { $UpdateOnly=$true }
     if ($EnsureLatest -and $registration) { $UpdateOnly = $true }
     if ($UpdateOnly -and -not $registration) {
         throw 'NDI Tools is missing. Choose Repair / Reconfigure to install it.'
     }
-    $componentsMissing = -not $ClientOnly -and -not (Get-NdiDiscoveryExe)
+    $componentsMissing = if($ClientOnly){-not(Test-NdiClientToolsReady)}else{-not(Get-NdiDiscoveryExe)}
     $installedVersion = if ($registration) { Convert-ToNdiToolsVersion ([string](Get-PropertyValue $registration 'DisplayVersion' '')) } else { $null }
-    if ($registration -and -not $UpdateOnly -and -not $ClientOnly -and -not $componentsMissing) {
+    if ($registration -and -not $UpdateOnly -and -not $ClientOnly -and -not $componentsMissing -and -not $forceRepair) {
         Write-Detail "NDI Tools $installedVersion is already installed." Green
         return
     }
@@ -192,7 +176,7 @@ function Install-NdiTools {
         elseif ($preparedCheck) { $preparedCheck.Url }
         elseif (-not $PackageDirectory) { Get-CurrentNdiToolsUrl }
         else { $script:NdiToolsUrl }
-    if ($UpdateOnly -and -not $ClientOnly -and -not $componentsMissing -and $installedVersion -and
+    if ($UpdateOnly -and -not $forceRepair -and -not $componentsMissing -and $installedVersion -and
         -not $PackageDirectory -and -not $script:PreparedNdiInstaller) {
         $currentVersion = if ($preparedCheck -and $preparedCheck.Url -eq $downloadUrl) { $preparedCheck.Version } else { Get-CurrentNdiToolsVersion -Uri $downloadUrl }
         if ($currentVersion -and $installedVersion -ge $currentVersion) {
@@ -206,14 +190,16 @@ function Install-NdiTools {
     $downloadDir = Join-Path $env:TEMP 'KiloLinkSuite'
     $installer = Join-Path $downloadDir 'NDI-Tools.exe'
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-    $downloadSpan = if ($ClientOnly) { 35 } else { 8 }
+    $downloadBase = if ($ClientOnly) { 30 } else { $script:ProgressPercent }
+    $downloadSpan = if ($ClientOnly) { 30 } else { 8 }
     if ($script:PreparedNdiInstaller) { $installer = $script:PreparedNdiInstaller }
     else {
-        Download-FileWithProgress -Uri $downloadUrl -Destination $installer -BasePercent $script:ProgressPercent -PercentSpan $downloadSpan -Status 'Downloading NDI Tools'
+        Download-FileWithProgress -Uri $downloadUrl -Destination $installer -BasePercent $downloadBase -PercentSpan $downloadSpan -Status 'Downloading NDI Tools'
         $script:PreparedNdiSource = $downloadUrl
     }
 
-    Set-SuiteProgress -Percent ([Math]::Min(90, $script:ProgressPercent + 1)) -Status 'Verifying the NDI Tools signature'
+    $signaturePercent = if ($ClientOnly) { if ($PrepareOnly) { 62 } else { 67 } } else { [Math]::Min(90, $script:ProgressPercent + 1) }
+    Set-SuiteProgress -Percent $signaturePercent -Status 'Verifying the NDI Tools signature'
     $signature = Get-InstallerSignatureWithProgress -Path $installer
     if ([string]$signature.Status -ne 'Valid') {
         throw "NDI installer signature validation failed: $($signature.Status)"
@@ -225,8 +211,8 @@ function Install-NdiTools {
     Save-ResolvedPackage 'ndiTools' ([string]$packageVersion) $downloadUrl $installer
     if ($componentsMissing -and $installedVersion -and $packageVersion -and $installedVersion -gt $packageVersion) { throw 'A newer NDI Tools installation is incomplete. Repair it with its matching vendor installer.' }
     $install = $componentsMissing -or -not $registration -or -not $installedVersion -or -not $packageVersion -or $packageVersion -gt $installedVersion
-    # Re-running client setup repairs the current package without requiring any server components.
-    if ($ClientOnly -and $packageVersion -eq $installedVersion) { $install = $true }
+    if ($forceRepair -and $packageVersion -eq $installedVersion) { $install = $true }
+    if ($forceRepair -and $installedVersion -and $packageVersion -and $installedVersion -gt $packageVersion) { throw 'Repair requires the matching installed NDI version; a newer installed version will not be downgraded.' }
     if ($install) { Assert-NdiToolsFilesAvailable }
     if ($PrepareOnly) { $script:PreparedNdiInstaller = $installer; return }
     $script:PreparedNdiInstaller = $null
@@ -236,15 +222,22 @@ function Install-NdiTools {
         return
     }
 
-    Set-SuiteProgress -Percent ([Math]::Min(92, $script:ProgressPercent + 2)) -Status 'Installing NDI Tools'
+    Set-SuiteProgress -Percent $(if ($ClientOnly) { 70 } else { [Math]::Min(92, $script:ProgressPercent + 2) }) -Status 'Installing NDI Tools'
     $vendorLogDirectory = Join-Path $script:StateRoot 'Logs'
     New-Item -ItemType Directory -Path $vendorLogDirectory -Force | Out-Null
     $vendorLog = Join-Path $vendorLogDirectory ('ndi-tools-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N') + '.log')
     $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NORESTARTAPPLICATIONS', '/NOCLOSEAPPLICATIONS', '/RESTARTEXITCODE=3010', '/SP-', ('/LOG="' + $vendorLog + '"'))
     Write-InstallerLog "Starting NDI Tools setup. Vendor log: $vendorLog"
     $process = Start-QuietInstaller -FilePath $installer -ArgumentList $arguments
+    Add-LifecycleEffect 'NDI Tools vendor installation started; it may have changed shared files.'
+    $vendorDeadline=[datetime]::UtcNow.AddMinutes(30)
     try {
         while (-not $process.HasExited) {
+            if ([datetime]::UtcNow -gt $vendorDeadline) {
+                $script:LifecycleRecoveryRequired=$true
+                $script:LifecycleNextAction='Inspect the NDI vendor log and installed version before repairing shared NDI Tools.'
+                throw "NDI Tools unattended installation exceeded 30 minutes. Vendor log: $vendorLog"
+            }
             Update-SuiteProgressPulse
             Start-Sleep -Milliseconds 300
             $process.Refresh()
@@ -254,12 +247,16 @@ function Install-NdiTools {
         if ($exitCode -notin @(0, 3010)) { throw "NDI Tools installer failed with exit code $exitCode. Vendor log: $vendorLog" }
     } finally { $process.Dispose() }
     Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
-    if (-not (Get-NdiRegistration)) {
+    $observedRegistration=Get-NdiRegistration
+    if (-not $observedRegistration) {
         throw 'NDI Tools finished installing but was not detected in Programs and Features.'
     }
+    $observedVersion=Convert-ToNdiToolsVersion ([string](Get-PropertyValue $observedRegistration 'DisplayVersion' ''))
+    if ($packageVersion -and $observedVersion -ne $packageVersion) { throw 'NDI Tools finished but its registered version does not match the verified installer.' }
     if (-not $ClientOnly -and -not (Get-NdiDiscoveryExe)) {
         throw 'NDI Tools finished installing but its Discovery Service executable is still missing.'
     }
+    if($ClientOnly -and -not(Test-NdiClientToolsReady)){throw 'NDI Tools finished but required Client applications are still missing.'}
     $script:NdiRestartRequired = $exitCode -eq 3010
     Write-Detail 'NDI Tools installed or updated.' Green
 }
@@ -299,7 +296,7 @@ function Get-PcAgentPublicRelease {
 
 function Get-PcAgentRelease {
     try {
-        if ($PackageDirectory) { $release = Get-Content -LiteralPath (Join-Path $PackageDirectory 'pc-agent-release.json') -Raw | ConvertFrom-Json }
+        if ($PackageDirectory) { $release = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $PackageDirectory 'pc-agent-release.json') -Raw | ConvertFrom-Json }
         else { $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/JohnDevAc/Kiloview-PC-Onboarding/releases/latest' -TimeoutSec 15 -Headers @{
             'User-Agent' = 'Kiloview-Environment-Setup'; Accept = 'application/vnd.github+json'
         } }
@@ -402,7 +399,7 @@ function Test-PcAgentConfigured {
     $statePath = Join-Path $local 'NDI Configurator\PC Agent\agent-state.json'
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return $false }
     try {
-        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $state = Get-Content -Encoding UTF8 -LiteralPath $statePath -Raw | ConvertFrom-Json
         return Test-PcAgentState $state
     } catch { return $false }
 }
@@ -448,7 +445,7 @@ function Invoke-PcAgentSetup {
 function Install-PcAgent {
     param([switch]$PrepareOnly)
     if (-not [Environment]::Is64BitOperatingSystem) { throw 'NDI Configurator PC Agent requires 64-bit Windows.' }
-    Set-SuiteProgress -Percent 50 -Status 'Checking the PC Agent production release'
+    Set-SuiteProgress -Percent $(if ($PrepareOnly) { 2 } else { 85 }) -Status 'Checking the PC Agent production release'
     $release = if ($script:PreparedPcAgentRelease) { $script:PreparedPcAgentRelease } else { Get-PcAgentRelease }
     $installRoot = Join-Path $env:ProgramFiles 'NDI Configurator\PC Agent'
     $installedSetup = Join-Path $installRoot 'NDI Configurator PC Agent Setup.exe'
@@ -457,6 +454,18 @@ function Install-PcAgent {
     $agentVersion = Get-PcAgentBinaryVersion $installedAgent 'NDI Configurator PC Agent'
     if ($setupVersion -and $agentVersion -and (Compare-PcAgentVersion $setupVersion $agentVersion) -eq 0 -and (Compare-PcAgentVersion $agentVersion $release.Version) -ge 0) {
         if ($PrepareOnly) { $script:PreparedPcAgentRelease = $release; return $true }
+        $entry=Get-PcAgentLifecycleEntry $installRoot 'inspect'
+        if($entry){
+            $inspection=Invoke-PcAgentLifecycle $entry 'inspect'
+            $component=@($inspection.components|Where-Object productId -eq 'pc-agent')
+            if($inspection.outcome -ne 'succeeded' -or $component.Count -ne 1){throw 'PC Agent inspection did not return verified component evidence.'}
+            if(-not(Get-Variable ForceComponentRepair -ValueOnly -ErrorAction SilentlyContinue) -and $component[0].installed -eq $true -and
+                ($component[0].healthy -eq $true -or $component[0].configured -eq $false)){
+                Write-Detail "PC Agent $agentVersion files are current. Its configuration and onboarding are managed separately." Green
+                return $true
+            }
+            return Invoke-OwnedPcAgentSetup $installedSetup
+        }
         if (Test-PcAgentConfigured) {
             Write-Detail "PC Agent $agentVersion is already installed and configured." Green
             return $true
@@ -473,7 +482,9 @@ function Install-PcAgent {
     New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
     try {
         $archive = Join-Path $packageRoot 'PC-Agent.zip'
-        if (-not $script:PreparedPcAgentRoot) { Download-FileWithProgress -Uri $release.Url -Destination $archive -BasePercent 52 -PercentSpan 30 -Status 'Downloading NDI Configurator PC Agent' }
+        if (-not $script:PreparedPcAgentRoot) {
+            Download-FileWithProgress -Uri $release.Url -Destination $archive -BasePercent $(if ($PrepareOnly) { 4 } else { 86 }) -PercentSpan $(if ($PrepareOnly) { 21 } else { 6 }) -Status 'Downloading NDI Configurator PC Agent'
+        }
         if ((Get-Item -LiteralPath $archive).Length -ne $release.Size -or
             (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $release.Hash) {
             throw 'The PC Agent package size or SHA-256 did not match its production release.'
@@ -495,7 +506,7 @@ function Install-PcAgent {
             $prepared = $true
             return $true
         }
-        $completed = Invoke-PcAgentSetup $setup
+        $completed = Invoke-OwnedPcAgentSetup $setup
         if (-not $completed) { return $false }
         $setupVersion = Get-PcAgentBinaryVersion $installedSetup 'NDI Configurator PC Agent'
         $agentVersion = Get-PcAgentBinaryVersion $installedAgent 'NDI Configurator PC Agent'
@@ -508,7 +519,7 @@ function Install-PcAgent {
         if (-not $resolvedPackage.StartsWith($cacheRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
             throw 'PC Agent cleanup path is outside the download cache.'
         }
-        if (-not $prepared) {
+        if (-not $prepared -and -not $script:LifecycleRecoveryRequired) {
             Remove-Item -LiteralPath $resolvedPackage -Recurse -Force -ErrorAction SilentlyContinue
             $script:PreparedPcAgentRoot = $null
             $script:PreparedPcAgentRelease = $null

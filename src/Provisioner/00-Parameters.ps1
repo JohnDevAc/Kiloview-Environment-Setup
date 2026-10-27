@@ -14,7 +14,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Setup', 'Install', 'InstallClient', 'Repair', 'Update', 'MaintainRuntime', 'Uninstall', 'Resume', 'CheckDownloads', 'Inspect', 'Plan', 'Verify', 'Backup')]
+    [ValidateSet('Menu', 'Setup', 'Install', 'InstallClient', 'Repair', 'Update', 'MaintainRuntime', 'Uninstall', 'RemoveApp', 'Resume', 'CheckDownloads', 'Inspect', 'Plan', 'Verify', 'Backup')]
     [string]$Action = 'Menu',
     [switch]$AcceptLicenses,
     [switch]$AutoRestart,
@@ -24,7 +24,13 @@ param(
     [string]$PreferredIpAddress,
     [string]$ConfigurationPath,
     [switch]$ConfirmRemoval,
-    [string]$PackageDirectory
+    [string]$PackageDirectory,
+    [string]$LifecycleRequestPath,
+    [ValidateSet('client','server','')][string]$Role='',
+    [switch]$PreserveData = $true,
+    [switch]$PurgeData,
+    [switch]$PackageRestartContinuation,
+    [switch]$ForceComponentRepair
 )
 
 Set-StrictMode -Version 2.0
@@ -42,7 +48,18 @@ $script:ManagedDistroName = 'KiloLink-Ubuntu'
 $script:ContainerName = 'KLNKSVR-pro'
 $script:ApplicationManifest = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__APPLICATION_MANIFEST_BASE64__')) | ConvertFrom-Json
 $script:ProductVersion = '__PRODUCT_VERSION__'
+$script:ProductChannel = '__PRODUCT_CHANNEL__'
 $script:ActiveJournal = $null
+$script:Lifecycle = $null
+$script:LifecycleStage = 'preflight'
+$script:LifecycleEffects = @()
+$script:LifecycleRecoveryRequired = $false
+$script:LifecycleNextAction = ''
+$script:LifecycleErrorCode = ''
+$script:LifecycleComponents = @()
+$script:LifecycleLastHeartbeat = [datetime]::MinValue
+$script:NativeTimeoutSeconds = 1800
+$script:NativeStallSeconds = 300
 $script:KiloImage = $script:ApplicationManifest.kiloLink.image
 $script:LinuxDataPath = '/opt/kilolink-server'
 $script:NdiToolsUrl = $script:ApplicationManifest.ndiTools.url
@@ -50,10 +67,7 @@ $script:KiloInstallerUrl = 'https://www.kiloview.com/downloads/klnk-pro/install.
 $script:InstallerLogPath = Join-Path $script:StateRoot 'installer.log'
 $script:ResumeStatePath = Join-Path $script:StateRoot 'resume-state.json'
 $script:ResumeTaskName = 'KiloLink Suite Installation Resume'
-$script:PersistentLauncherPath = Join-Path $script:StateRoot 'Launcher\Kiloview-Environment-Setup.exe'
-if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'managed-installation.json'))) {
-    $script:PersistentLauncherPath = Join-Path $PSScriptRoot 'Kiloview-Environment-Setup.exe'
-}
+$script:PersistentLauncherPath = Join-Path $script:StateRoot 'Maintenance\Kiloview-Environment-Setup.exe'
 $script:RestartScheduled = $false
 $script:MaximumResumeAttempts = 3
 $script:KiloDefaultUsername = 'admin'
@@ -75,3 +89,4 @@ $script:PreparedNdiCheck = $null
 $script:NdiRestartRequired = $false
 $script:PreparedPcAgentRoot = $null
 $script:PreparedPcAgentRelease = $null
+$script:PcAgentRestartRequired = $false

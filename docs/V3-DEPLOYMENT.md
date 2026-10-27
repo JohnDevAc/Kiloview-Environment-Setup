@@ -29,9 +29,10 @@ There are no long-running WSL, apt, Docker or NDI custom actions inside the MSI
 transaction. A successful MSI installation means the configuration application
 was installed; server readiness is reported only by a successful provisioner run.
 The UI reports completion only after provisioning and health checks finish.
-Package failure stops provisioning. If package installation requires a restart,
-the user is instructed to restart and reopen setup; service-stage restarts retain
-the existing automatic continuation. Cached Windows packages retain normal
+Package failure stops provisioning. Lifecycle requests retain the reviewed role,
+licence acceptance and configuration through package and service-stage restarts,
+using the same operation ID. Standalone package restarts still instruct the user
+to reopen setup. Cached Windows packages retain normal
 repair/uninstall support without launching a second configuration window.
 
 The installer is free under MIT, copyright (c) 2026 John Lightfoot. The embedded
@@ -111,13 +112,16 @@ existing ProgramData configuration, receipts and tasks in the same wizard. Use
 `-Action Backup` before migration if a separate backup is wanted, then the main
 **Set up / update server** action to refresh the platform. Existing
 data paths and ports are retained. The provisioning engine points future
-maintenance/reboot continuation to the MSI-installed app when running from it.
+maintenance/reboot continuation to the protected retained executable under
+`ProgramData\KiloLink\Maintenance`.
 Keep the original account; changing WSL ownership is a separate migration.
 
-Removing the configuration MSI retains server services/data. Server-role removal
-through the Windows server-role entry remains explicitly destructive to the dedicated distro
-and live data, with a separate confirmation; previously created Windows backups
-are retained. Shared NDI Tools, PC Agent and unrelated WSL distributions remain.
+Removing the configuration MSI retains server services/data and maintenance.
+Server-role removal defaults to stopping owned services while preserving the
+dedicated distro, data and restore configuration. It records the role as inactive
+and discloses the retained disk footprint. A separate confirmed purge deletes
+the dedicated distro and data; existing Windows backups remain. Shared NDI Tools,
+PC Agent and unrelated WSL distributions remain.
 
 ## Qualification before production release
 

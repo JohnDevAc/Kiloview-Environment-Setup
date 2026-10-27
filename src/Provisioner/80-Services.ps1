@@ -48,7 +48,7 @@ function Stop-ManagedTask {
     throw "The scheduled task '$TaskName' did not stop. Its configuration has not been replaced."
 }
 
-function Get-KiloWatchdogCommand {
+function Get-LegacyKiloWatchdogCommand {
     $linux = @'
 set -euo pipefail
 while true; do
@@ -68,10 +68,24 @@ done
     return $linux.Replace('__CONTAINER__', $script:ContainerName).Replace("`r`n", "`n").Replace("`r", "`n")
 }
 
+function Get-KiloWatchdogCommand {
+    $prefix=@'
+set -euo pipefail
+mkdir -p /var/lib/kilolink
+exec 8>/var/lib/kilolink/watchdog.lock
+until flock -n -x 8; do
+    test ! -e /var/lib/kilolink/watchdog-stop || exit 0
+    sleep 1
+done
+'@
+    $body=(Get-LegacyKiloWatchdogCommand).Replace('    test ! -e /var/lib/kilolink/recovery-required',"    test ! -e /var/lib/kilolink/watchdog-stop || exit 0`n    test ! -e /var/lib/kilolink/recovery-required")
+    return ($prefix+"`n"+$body).Replace("`r`n","`n")
+}
+
 function Install-StartupTask {
     param($Config)
     Write-Step 'Installing the KiloLink startup and watchdog task'
-    Stop-ManagedTask $script:StartupTaskName
+    Set-KiloWatchdogState -Distro $Config.DistroName -Mode Activate
     New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
     $template = @'
 $ErrorActionPreference = 'Continue'

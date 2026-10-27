@@ -5,18 +5,22 @@ function Write-StateJson {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $temporary = Join-Path $directory ([IO.Path]::GetFileName($Path) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
-        [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Depth 15), [Text.UTF8Encoding]::new($false))
-        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
-        else { [IO.File]::Move($temporary, $Path) }
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth 15))
+        $stream=[IO.FileStream]::new($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+        Initialize-LifecycleProtocol
+        [KiloLink.Lifecycle.AtomicFile]::Commit($temporary,$Path,$null)
     } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
 }
 
 function Start-DeploymentJournal {
     param([string]$Operation, $Config)
-    $id = [guid]::NewGuid().ToString('N')
+    if ($script:ActiveJournal -and $script:ActiveJournal.outcome -eq 'Running') { $script:ActiveJournal.desired=$Config; Save-DeploymentJournal; return }
+    $id = if ($script:Lifecycle) { $script:Lifecycle.OperationId } else { [guid]::NewGuid().ToString('D') }
     $script:ActiveJournal = [ordered]@{schemaVersion=1; operationId=$id; action=$Operation; productVersion=$script:ProductVersion;
         policy=$script:ApplicationManifest.policy; ownerSid=(Get-CurrentUserSid); startedUtc=[datetime]::UtcNow.ToString('o');
-        updatedUtc=[datetime]::UtcNow.ToString('o'); outcome='Running'; desired=$Config; steps=@()}
+        updatedUtc=[datetime]::UtcNow.ToString('o'); outcome='Running'; desired=$Config; steps=@(); mutationStarted=$false;
+        attempt=$(if($script:Lifecycle){$script:Lifecycle.Attempt}else{1})}
     Save-DeploymentJournal
 }
 
@@ -37,14 +41,22 @@ function Save-DeploymentJournal {
 }
 
 function Invoke-DeploymentStep {
-    param([string]$Name, [scriptblock]$Body)
+    param([string]$Name, [scriptblock]$Body, [switch]$IncompleteOnFalse)
     if (-not $script:ActiveJournal) { & $Body; return }
     $step = [ordered]@{name=$Name; state='Running'; startedUtc=[datetime]::UtcNow.ToString('o'); finishedUtc=$null; error=$null}
     $script:ActiveJournal.steps += $step
+    $script:ActiveJournal.mutationStarted=$true
+    Write-LifecycleResult 'running' $Name -Stage $Name
     Save-DeploymentJournal
     try {
-        & $Body
-        $step.state = if ($script:OperationOutcome -eq 'RestartRequired') { 'RestartRequired' } else { 'Completed' }
+        if ($IncompleteOnFalse) {
+            $result = & $Body
+            $step.state = if ($result -is [bool] -and -not $result) { 'Incomplete' } elseif ($script:OperationOutcome -eq 'RestartRequired') { 'RestartRequired' } else { 'Completed' }
+            $result
+        } else {
+            & $Body
+            $step.state = if ($script:OperationOutcome -eq 'RestartRequired') { 'RestartRequired' } else { 'Completed' }
+        }
     } catch {
         $step.state = 'Failed'; $step.error = $_.Exception.Message
         $script:ActiveJournal.outcome = 'Failed'

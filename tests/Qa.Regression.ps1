@@ -139,7 +139,9 @@ Test-Case 'Failed server removal retains verified ownership for retry' {
     Save-ComponentReceipt 'server'
     Save-Config (New-Config)
     function Get-UbuntuDistro { $null }
-    function Stop-ManagedTask { throw 'Fixture interrupted removal' }
+    function Set-KiloWatchdogState { throw 'Fixture interrupted removal' }
     Assert-Throws { Uninstall-Suite -Confirmed } 'Fixture interrupted removal'
     Assert-True ((Get-ServerOwnerSid) -eq 'S-1-5-21-100') 'An interrupted uninstall erased server ownership.'
+    Assert-True ($script:ActiveJournal.mutationStarted -and $script:LifecycleRecoveryRequired -and $script:LifecycleNextAction -match 'Verify') 'Partial removal concealed mutation/recovery or omitted retry guidance.'
+    Assert-True (Test-Path -LiteralPath (Join-Path $script:StateRoot 'pending-watchdog.json')) 'Partial removal lost durable watchdog recovery ownership.'
 }

@@ -26,7 +26,7 @@ try {
     foreach ($row in (Read-Table 'SELECT `Property`, `Value` FROM `Property`')) { $properties[$row[0]] = $row[1] }
     Assert-Packaging ($properties.ProductVersion -eq $version -and $properties.Manufacturer -eq 'John Lightfoot') 'MSI version or publisher mismatch.'
     $files = @((Read-Table 'SELECT `FileName` FROM `File`' 1) | ForEach-Object { ($_ -join '').Split('|')[-1] })
-    foreach ($name in @('Kiloview-Environment-Setup.exe','Install-KiloLinkSuite.ps1','EULA.md','EULA.rtf','LICENSE','THIRD_PARTY_NOTICES.md','WiX-5.0.2.txt','wix-5.0.2-source.zip','managed-installation.json')) {
+    foreach ($name in @('Kiloview-Environment-Setup.exe','Install-KiloLinkSuite.ps1','EULA.md','EULA.rtf','LICENSE','THIRD_PARTY_NOTICES.md','WiX-5.0.2.txt','wix-5.0.2-source.zip','managed-installation.json','toolbox-lifecycle.json')) {
         Assert-Packaging ($files -contains $name) "Required installed file missing: $name"
     }
     $tables = @((Read-Table 'SELECT `Name` FROM `_Tables`' 1) | ForEach-Object { $_ -join '' })
@@ -70,3 +70,16 @@ foreach ($name in @('EULA.md','THIRD_PARTY_NOTICES.md')) {
     try { Assert-Packaging ($reader.ReadToEnd() -ceq [IO.File]::ReadAllText((Join-Path $root $name))) 'Native wizard licence is stale.' } finally { $reader.Dispose() }
 }
 Write-Output 'PASS: Single-window release, embedded Windows package, MSI ownership, payloads, version, publisher, EULA, source/licence delivery and checksum.'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zipPath=Join-Path $root 'artifacts\Kiloview-Environment-Setup-Lifecycle.zip'
+$zip=[IO.Compression.ZipFile]::OpenRead($zipPath)
+try {
+    $names=@($zip.Entries|Select-Object -ExpandProperty FullName)
+    Assert-Packaging ($names.Count -eq 3 -and $names -contains 'toolbox-lifecycle.json' -and $names -contains 'Kiloview-Environment-Setup.exe') 'Capability archive has unexpected or missing payloads.'
+    $reader=[IO.StreamReader]::new($zip.GetEntry('toolbox-lifecycle.json').Open())
+    try{$descriptor=$reader.ReadToEnd()|ConvertFrom-Json}finally{$reader.Dispose()}
+    Assert-Packaging ($descriptor.schemaVersion -eq 1 -and $descriptor.productId -eq 'environment' -and $descriptor.entryPoint -eq 'Kiloview-Environment-Setup.exe' -and $descriptor.supportedActions -contains 'inspect') 'Lifecycle descriptor is invalid.'
+} finally {$zip.Dispose()}
+$zipHash=(Get-Content -LiteralPath ($zipPath+'.sha256') -Raw).Split(' ')[0]
+Assert-Packaging ((Get-FileHash -LiteralPath $zipPath).Hash -ieq $zipHash) 'Lifecycle archive checksum is stale.'
+Write-Output 'PASS: Verified fresh-install lifecycle archive, descriptor and checksum.'

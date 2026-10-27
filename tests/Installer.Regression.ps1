@@ -75,6 +75,7 @@ $baseMocks = {
     function Invoke-Native { throw 'Unexpected native command in test' }
     function Invoke-Wsl { throw 'Unexpected WSL command in test' }
     function Invoke-WslScript { throw 'Unexpected WSL script in test' }
+    function Set-KiloWatchdogState { }
     function Start-Process { throw 'Unexpected process launch in test' }
     function Register-ScheduledTask { throw 'Unexpected task registration in test' }
     function Unregister-ScheduledTask { throw 'Unexpected task removal in test' }
@@ -152,6 +153,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 
 try {
     . (Join-Path $PSScriptRoot 'Deployment.Regression.ps1')
+    . (Join-Path $PSScriptRoot 'Lifecycle.Regression.ps1')
     . (Join-Path $PSScriptRoot 'Remediation.Engine.Regression.ps1')
     . (Join-Path $PSScriptRoot 'Qa.Regression.ps1')
     . (Join-Path $PSScriptRoot 'ClientUpdate.Regression.ps1')
@@ -305,12 +307,13 @@ try {
     }
     Test-Case 'Confirmed native uninstall removes managed components and retains reusable setup' {
         $Action = 'Uninstall'
+        $PurgeData = $true
         $LauncherMode = $true
         Save-Config (New-Config)
         $script:RemovedPaths = [Collections.Generic.List[string]]::new()
         $script:NativeArguments = ''
         function Get-UbuntuDistro { 'KiloLink-Ubuntu' }
-        function Get-WslDistroNames { 'KiloLink-Ubuntu' }
+        function Get-WslDistroNames { if(-not $script:NativeArguments){'KiloLink-Ubuntu'} }
         function Test-KiloContainer { $false }
         function Get-NdiRegistration { $null }
         function Get-NdiDiscoveryService { $null }
@@ -323,6 +326,7 @@ try {
         function Remove-NetFirewallHyperVRule { }
         function Remove-LegacyPortProxies { }
         function Remove-Item { param($LiteralPath,[switch]$Force,[switch]$Recurse,$ErrorAction) $script:RemovedPaths.Add($LiteralPath) }
+        function Remove-OwnedFile { param($Path) $script:RemovedPaths.Add($Path) }
         function Invoke-Native { param($FilePath,$Arguments) $script:NativeArguments = $FilePath + ' ' + ($Arguments -join ' ') }
         function Read-InstallerInput { throw 'Unexpected text prompt' }
         Uninstall-Suite -Confirmed
@@ -445,27 +449,23 @@ try {
         }
     }
     Test-Case 'NDI metadata reads the labelled Tools version for the selected official package' {
-        function Invoke-WebRequest {
-            param($Uri, $Headers, $TimeoutSec)
-            Assert-True ($Uri -eq 'https://ndi.video/tools/' -and $Headers['Cache-Control'] -eq 'no-cache' -and $TimeoutSec -le 20) 'NDI metadata did not use a bounded fresh official-page request.'
-            [pscustomobject]@{
-                Links=@([pscustomobject]@{href=$script:NdiToolsUrl})
-                Content='<a>NDI 6.3</a><div>Version 6.3.2</div><div>Version 6.3.2.0</div><script>"<div>Version 9.0.0</div>"</script><!-- <div>Version 8.0.0</div> -->'
-            }
+        function Get-NdiToolsMetadata {
+            ConvertFrom-NdiToolsHtml ('<a href="'+$script:NdiToolsUrl+'">NDI 6.3</a><div>Version 6.3.2</div><div>Version 6.3.2.0</div><script>"<div>Version 9.0.0</div>"</script><!-- <div>Version 8.0.0</div> -->')
         }
         Assert-True ((Get-CurrentNdiToolsVersion -Uri $script:NdiToolsUrl) -eq [version]'6.3.2.0') 'The advertised Tools version was not read correctly.'
     }
     Test-Case 'Missing ambiguous or unrelated NDI metadata cannot mark the package current' {
         foreach ($content in @('', '<div>NDI 6.3</div>', '<div>Version 6.3.2-preview</div>', '<div>Version 6.3.2</div><div>Version 6.3.3</div>')) {
-            function Invoke-WebRequest { [pscustomobject]@{Links=@([pscustomobject]@{href=$script:NdiToolsUrl});Content=$content} }
+            function Get-NdiToolsMetadata { ConvertFrom-NdiToolsHtml ('<a href="'+$script:NdiToolsUrl+'">Download</a>'+$content) }
             Assert-True ($null -eq (Get-CurrentNdiToolsVersion -Uri $script:NdiToolsUrl)) 'Uncertain metadata suppressed a package check.'
         }
-        function Invoke-WebRequest { [pscustomobject]@{Links=@([pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe'});Content='<div>Version 7.0.0</div>'} }
+        function Get-NdiToolsMetadata { ConvertFrom-NdiToolsHtml '<a href="https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe">Download</a><div>Version 7.0.0</div>' }
         Assert-True ($null -eq (Get-CurrentNdiToolsVersion -Uri $script:NdiToolsUrl)) 'A different package supplied the version.'
-        function Invoke-WebRequest { throw 'Fixture metadata unavailable' }
-        Assert-True ($null -eq (Get-CurrentNdiToolsVersion -Uri $script:NdiToolsUrl)) 'Unavailable metadata prevented the installer fallback.'
+        function Get-NdiToolsMetadata { throw 'Fixture metadata unavailable' }
+        Assert-Throws { Get-CurrentNdiToolsVersion -Uri $script:NdiToolsUrl } 'Fixture metadata unavailable'
     }
     $ndiMocks = {
+        function Test-NdiClientToolsReady { $true }
         $script:NdiInstalled = $false
         $script:NdiDownloads = 0
         $script:NdiInstallCalls = 0
@@ -521,7 +521,7 @@ try {
     Test-Case 'An older NDI installation stages one verified package and installs it' {
         . $ndiMocks
         $script:NdiInstalled = $true
-        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='5.0.0'} }
+        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion=$(if($script:NdiInstallCalls -gt 0){'6.0.0'}else{'5.0.0'})} }
         Install-NdiTools -UpdateOnly -PrepareOnly
         Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 0 -and $script:NdiSignatureChecks -eq 1) 'The update package was not verified before mutation.'
         Install-NdiTools -UpdateOnly
@@ -538,7 +538,7 @@ try {
     Test-Case 'An unknown installed NDI version cannot bypass the verified installer' {
         . $ndiMocks
         $script:NdiInstalled = $true
-        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='unknown'} }
+        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion=$(if($script:NdiInstallCalls -gt 0){'6.0.0'}else{'unknown'})} }
         Install-NdiTools -UpdateOnly
         Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 1 -and $script:NdiVersionChecks -eq 0) 'An unknown installation was marked current.'
     }
@@ -556,7 +556,7 @@ try {
         Install-NdiTools -UpdateOnly
         Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 1) 'Disappearing Discovery was hidden by a preflight result.'
         Install-NdiTools -UpdateOnly -PrepareOnly
-        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='5.0.0'} }
+        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion=$(if($script:NdiInstallCalls -gt 1){'6.0.0'}else{'5.0.0'})} }
         Install-NdiTools -UpdateOnly
         Assert-True ($script:NdiDownloads -eq 2 -and $script:NdiInstallCalls -eq 2) 'An older local replacement was hidden by a preflight result.'
     }
@@ -604,24 +604,15 @@ try {
     . (Join-Path $PSScriptRoot 'ServerUpdate.Regression.ps1')
 
     Test-Case 'Client resolves the current official NDI download including a future major version' {
-        function Invoke-WebRequest {
-            [pscustomobject]@{Links=@(
-                [pscustomobject]@{name='anchor-without-href'},
-                [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe'},
-                [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe'},
-                [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDIToolsInstaller.pkg'},
-                [pscustomobject]@{href='https://example.com/Tools/NDI%207%20Tools.exe'}
-            )}
+        function Get-NdiToolsMetadata {
+            ConvertFrom-NdiToolsHtml '<a>Anchor without href</a><a href="https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe">Windows</a><a href="https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe">Windows again</a><a href="https://downloads.ndi.tv/Tools/NDIToolsInstaller.pkg">Mac</a><a href="https://example.com/Tools/NDI%207%20Tools.exe">Untrusted</a>'
         }
         Assert-True ((Get-CurrentNdiToolsUrl) -eq 'https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe') 'The client download is tied to an old NDI major version.'
     }
     Test-Case 'An ambiguous or missing NDI download fails instead of using a stale URL' {
-        function Invoke-WebRequest { [pscustomobject]@{Links=@()} }
+        function Get-NdiToolsMetadata { ConvertFrom-NdiToolsHtml '' }
         Assert-Throws { Get-CurrentNdiToolsUrl } 'could not be identified'
-        function Invoke-WebRequest { [pscustomobject]@{Links=@(
-            [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe'},
-            [pscustomobject]@{href='https://downloads.ndi.tv/Tools/NDI%208%20Tools.exe'}
-        )} }
+        function Get-NdiToolsMetadata { ConvertFrom-NdiToolsHtml '<a href="https://downloads.ndi.tv/Tools/NDI%207%20Tools.exe">Seven</a><a href="https://downloads.ndi.tv/Tools/NDI%208%20Tools.exe">Eight</a>' }
         Assert-Throws { Get-CurrentNdiToolsUrl } 'could not be identified'
     }
     $clientNdiMocks = {
@@ -636,9 +627,12 @@ try {
         Install-NdiTools -ClientOnly
         Assert-True ($script:NdiInstallCalls -eq 1 -and $script:DownloadedNdiUrl -match 'NDI%207') 'Fresh client did not install the current package.'
     }
-    Test-Case 'Client reinstalls the current NDI package to repair missing files' {
+    Test-Case 'Current Client skips NDI download and installation unless repair is explicit' {
         . $clientNdiMocks
         $script:NdiInstalled = $true
+        Install-NdiTools -ClientOnly
+        Assert-True ($script:NdiDownloads -eq 0 -and $script:NdiInstallCalls -eq 0) 'Current Client downloaded or reinstalled NDI.'
+        $ForceComponentRepair=$true
         Install-NdiTools -ClientOnly
         Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiInstallCalls -eq 1) 'Client bypassed latest-package validation or repair.'
     }
@@ -646,6 +640,8 @@ try {
         . $clientNdiMocks
         $script:NdiInstalled = $true
         function Get-Item { [pscustomobject]@{VersionInfo=[pscustomobject]@{ProductVersion='7.0.0'}} }
+        function Get-CurrentNdiToolsVersion { [version]'7.0.0.0' }
+        function Get-NdiRegistration { [pscustomobject]@{DisplayVersion=$(if($script:NdiInstallCalls){'7.0.0'}else{'6.0.0'})} }
         Install-NdiTools -ClientOnly
         Assert-True ($script:NdiInstallCalls -eq 1) 'An older NDI installation was not updated.'
         $script:NdiInstallCalls = 0
@@ -655,12 +651,14 @@ try {
     }
     Test-Case 'Client refuses unsigned NDI downloads before launching a process' {
         . $clientNdiMocks
+        $ForceComponentRepair=$true
         function Get-InstallerSignatureWithProgress { [pscustomobject]@{Status='NotSigned'} }
         Assert-Throws { Install-NdiTools -ClientOnly } 'signature validation failed'
         Assert-True ($script:NdiInstallCalls -eq 0) 'An unverified NDI package was executed.'
     }
     Test-Case 'Client preserves the NDI restart exit code without scheduling a server resume' {
         . $clientNdiMocks
+        $ForceComponentRepair=$true
         function Start-QuietInstaller {
             param($ArgumentList)
             Assert-True ($ArgumentList -contains '/RESTARTEXITCODE=3010' -and $ArgumentList -contains '/NORESTART' -and $ArgumentList -contains '/NORESTARTAPPLICATIONS') 'NDI can restart Windows or applications without the Windows UI.'
@@ -778,6 +776,7 @@ try {
     }
     Test-Case 'NDI failure always disposes the private desktop and preserves its failure code' {
         . $clientNdiMocks
+        $ForceComponentRepair=$true
         $script:QuietDisposed = $false
         function Start-QuietInstaller {
             [pscustomobject]@{HasExited=$true;ExitCode=7} | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $script:QuietDisposed = $true } -PassThru
@@ -1083,6 +1082,7 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
     }
     Test-Case 'Generated watchdog task retries failures and preserves WSL exit codes' {
         $script:TaskEvents = New-Object Collections.Generic.List[string]
+        function Set-KiloWatchdogState { $script:TaskEvents.Add('Stop') }
         function Stop-ManagedTask { $script:TaskEvents.Add('Stop') }
         function New-ScheduledTaskAction { param($Execute,$Argument) [pscustomobject]@{Execute=$Execute;Argument=$Argument} }
         function New-ScheduledTaskTrigger { [pscustomobject]@{Delay=''} }
@@ -1119,7 +1119,8 @@ function Register-MaintenanceEntry { throw 'Client registered server maintenance
             Assert-True ($formType.GetField('networkAdapterBox',$instanceFlags).GetValue($form).Items.Count -eq 0) 'Network discovery ran before the role choice.'
             Assert-True ($form.AcceptButton -eq $formType.GetField('roleNextButton',$instanceFlags).GetValue($form)) 'Enter does not advance the role choice.'
             [void]$formType.GetMethod('ChooseRole',$instanceFlags).Invoke($form,@())
-            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -eq 'Network') 'Server did not advance directly to adapter selection.'
+            Assert-True ($formType.GetField('currentView',$instanceFlags).GetValue($form).ToString() -in @('Network','Review')) 'Server did not select a suitable adapter or request an ambiguous choice.'
+            Assert-True (-not $formType.GetField('ndiPortBox',$instanceFlags).GetValue($form).Enabled) 'Discovery port is incorrectly editable.'
             Assert-True ($null -eq $formType.GetField('installChoice',$instanceFlags)) 'Redundant installation mode choices remain.'
         } finally { $form.Dispose() }
     }

@@ -39,7 +39,8 @@ foreach ($resource in @(
     @((Join-Path $root 'THIRD_PARTY_NOTICES.md'),'THIRD_PARTY_NOTICES.md'),
     @((Join-Path $root 'assets\setup-icon.png'),'setup-icon.png'), @((Join-Path $root 'assets\setup.ico'),'setup.ico')
 )) { $argsList += '/resource:' + $resource[0] + ',KiloLink.Setup.' + $resource[1] }
-foreach ($name in @('SetupLauncher.cs','SetupWizard.cs','SetupLayout.cs')) { $argsList += Join-Path $root ('launcher\' + $name) }
+foreach ($name in @('SetupLauncher.cs','SetupWizard.cs','SetupLayout.cs','LifecycleProtocol.cs')) { $argsList += Join-Path $root ('launcher\' + $name) }
+$argsList += $fixtureLifecycleSource
 $argsList += $fixturePackageSource
 & $compiler @argsList
 Assert-True ($LASTEXITCODE -eq 0) 'Single-window fixture did not compile.'
@@ -89,4 +90,31 @@ Test-Case 'Installed payload mismatch is rejected before service provisioning' {
     Set-Content -LiteralPath $enginePath -Value 'wrong payload'
     try { Assert-Throws { $type.GetMethod('ValidateInstallation',$staticFlags).Invoke($null,@([string]$installedFixture)) } 'incomplete' }
     finally { Copy-Item -LiteralPath $fixtureEngine -Destination $enginePath -Force }
+}
+
+Test-Case 'Lifecycle package reboot retains the reviewed request and resumes the same operation' {
+    $fixture=New-LifecycleFixture 'install'
+    $hostType=$singleAssembly.GetType('KiloLink.Setup.SetupLauncher')
+    $requestType=$singleAssembly.GetType('KiloLink.Lifecycle.Request')
+    $request=$requestType.GetMethod('Load').Invoke($null,@([string]$fixture.Path))
+    $hostType.GetField('LifecycleRequest',$staticFlags).SetValue($null,$request)
+    $hostType.GetField('LifecycleRequestHash',$staticFlags).SetValue($null,$hostType.GetMethod('HashFile',$staticFlags).Invoke($null,@([string]$fixture.Path)))
+    Set-Content -LiteralPath (Join-Path $singleRoot 'exit-code.txt') -Value 3010
+    $form=New-OperationFixtureForm
+    try {
+        $operationFormType.GetField('clientChoice',$instanceFlags).GetValue($form).Checked=$true
+        [void]$operationFormType.GetMethod('ChooseRole',$instanceFlags).Invoke($form,@())
+        $operationFormType.GetField('acceptanceBox',$instanceFlags).GetValue($form).Checked=$true
+        $execute=$operationFormType.GetField('executeButton',$instanceFlags).GetValue($form)
+        $click.Invoke($execute,@([EventArgs]::Empty))|Out-Null
+        Wait-OperationFixture $form
+        $result=Get-Content -LiteralPath $fixture.Data.resultPath -Raw -Encoding UTF8|ConvertFrom-Json
+        Assert-True ($result.operationId -eq $fixture.Data.operationId -and $result.outcome -eq 'restart-required') 'MSI restart lost the operation or continued provisioning.'
+        $intent=Get-Content -LiteralPath (Join-Path $fixture.Directory 'intent.json') -Raw -Encoding UTF8|ConvertFrom-Json
+        Assert-True ($intent.accepted -and $intent.role -eq 'client' -and $intent.operationId -eq $result.operationId) 'Reviewed role/acceptance were not retained.'
+        $operationFormType.GetField('autoResume',$instanceFlags).SetValue($form,$true)
+        $operationFormType.GetMethod('RestoreLifecycleIntent',$instanceFlags).Invoke($form,@())|Out-Null
+        $arguments=$operationFormType.GetMethod('BuildOperationArguments',$instanceFlags).Invoke($form,@())
+        Assert-True ($arguments -match '-Action Resume' -and $arguments -match '-AcceptLicenses') 'Continuation did not use the reviewed request.'
+    } finally {$form.Dispose();$hostType.GetField('LifecycleRequest',$staticFlags).SetValue($null,$null);$hostType.GetField('LifecycleWorkerStarted',$staticFlags).SetValue($null,$false);[Environment]::ExitCode=0}
 }

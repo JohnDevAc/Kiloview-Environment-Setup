@@ -151,6 +151,8 @@ foreach ($replacementMode in @('success','repair','unhealthy','run-fail','backup
 foreach ($watchdogResult in @('committed','rolled-back','recovery-required')) {
     Test-Case "Legacy watchdog exclusion and restoration: $watchdogResult" {
         $script:TaskCalls = @()
+        $script:WatchdogQuiesced=$false
+        Invoke-Expression ($ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-KiloWatchdogState'},$true).Extent.Text)
         function Get-ScheduledTask { [pscustomobject]@{State='Running';Settings=[pscustomobject]@{Enabled=$true}} }
         function Test-KiloContainer { $true }
         function Get-LegacyKiloConfig { New-Config }
@@ -159,7 +161,10 @@ foreach ($watchdogResult in @('committed','rolled-back','recovery-required')) {
         function Enable-ScheduledTask { $script:TaskCalls += 'Enable' }
         function Start-ScheduledTask { $script:TaskCalls += 'Start' }
         function Invoke-WslScript {
+            param($Distro,$Content,[switch]$Capture)
             Assert-True (($script:TaskCalls -join ',') -eq 'Disable,Stop') 'Legacy watchdog was not disabled before replacement.'
+            if($Capture){$script:WatchdogQuiesced=$true;return 'KILOLINK_WATCHDOGS_QUIESCED'}
+            Assert-True $script:WatchdogQuiesced 'Replacement began before Linux watchdog quiescence.'
             $backup = Get-ChildItem (Join-Path $script:StateRoot 'Backups') -Directory | Select-Object -First 1
             Set-Content (Join-Path $backup.FullName 'status') $watchdogResult
             if ($watchdogResult -ne 'committed') { throw 'fixture replacement failure' }

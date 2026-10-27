@@ -27,6 +27,7 @@ namespace KiloLink.Setup
         private Label reviewTitle;
         private TextBox reviewText;
         private CheckBox acceptanceBox;
+        private CheckBox purgeBox;
         private Button executeButton;
         private Button returnButton;
         private Button restartButton;
@@ -83,15 +84,27 @@ namespace KiloLink.Setup
 
         private void InitializeWizard()
         {
-            rolePanel = CreatePage("How will this computer be used?", "Choose the setup you need for this computer.");
+            bool removingRole = SetupLauncher.LifecycleRequest != null
+                ? SetupLauncher.LifecycleRequest.Action == "uninstall" || SetupLauncher.LifecycleRequest.Action == "remove-role"
+                : SetupLauncher.InitialAction == "Uninstall";
+            rolePanel = CreatePage(removingRole ? "Which role do you want to remove?" : "How will this computer be used?",
+                removingRole ? "Choose a role, then review what will be removed and retained." : "Choose the setup you need for this computer.");
             rolePanel.Visible = true;
-            serverChoice = ActionChoice(rolePanel, "Server", "Set up or update KiloLink Server Pro, NDI Tools and Discovery Server.", 140);
-            clientChoice = ActionChoice(rolePanel, "Client", "Install the latest stable NDI Tools and NDI Configurator PC Agent.", 238);
+            serverChoice = ActionChoice(rolePanel, "Server", removingRole
+                ? "Stop KiloLink and managed Discovery startup. Keep data and the Linux environment by default."
+                : "Set up or update KiloLink Server Pro, NDI Tools and Discovery Server.", 140);
+            clientChoice = ActionChoice(rolePanel, "Client", removingRole
+                ? "Remove the Client role record. Keep shared NDI Tools and PC Agent installed."
+                : "Install the latest stable NDI Tools and NDI Configurator PC Agent.", 238);
             serverChoice.Checked = true;
             LinkLabel installerTerms = new LinkLabel { Text = "Installer licence and third-party notices", AutoSize = true,
                 Location = new Point(34, 366), LinkColor = SetupTheme.Accent };
             installerTerms.LinkClicked += delegate { ShowInstallerTerms(); };
             rolePanel.Controls.Add(installerTerms);
+            LinkLabel recovery = new LinkLabel { Text = "Verify after an interrupted operation", AutoSize = true, Location = new Point(410, 366), LinkColor = SetupTheme.Accent };
+            recovery.LinkClicked += delegate { selectedAction="Verify";ReviewSelectedAction(); };
+            recovery.Visible=SetupLauncher.LifecycleRequest==null;
+            rolePanel.Controls.Add(recovery);
             roleNextButton = PageButton(rolePanel, "Next", 34, 436, 180, true, delegate { ChooseRole(); });
             PageButton(rolePanel, "Close", 580, 436, 170, false, delegate { Close(); });
             Controls.Add(rolePanel);
@@ -106,6 +119,8 @@ namespace KiloLink.Setup
             linkPortBox.Minimum = 2;
             linkPortBox.Increment = 2;
             ndiPortBox = PortField(settingsPanel, "NDI DISCOVERY PORT (TCP)", "Set this endpoint in NDI Access Manager. Default: 5959.", 326, 5959, 65535);
+            ndiPortBox.Enabled = false;
+            ndiPortBox.ReadOnly = true;
             settingsErrorLabel = new Label { ForeColor = SetupTheme.Error, Location = new Point(34, 395), Size = new Size(710, 32) };
             settingsPanel.Controls.Add(settingsErrorLabel);
             PageButton(settingsPanel, "Back to review", 34, 446, 180, false, delegate { ReviewSelectedAction(); });
@@ -133,6 +148,9 @@ namespace KiloLink.Setup
                 Location = new Point(360, 376), LinkColor = SetupTheme.Accent };
             changePorts.LinkClicked += delegate { ShowSettings(String.Empty); };
             reviewPanel.Controls.Add(changePorts);
+            purgeBox = new CheckBox { Text = "Permanently delete KiloLink data and its dedicated Linux environment", Location = new Point(34, 376), Size = new Size(716, 30), Visible = false };
+            purgeBox.CheckedChanged += delegate { purgeConfirmed = purgeBox.Checked; acceptanceBox.Checked = false; };
+            reviewPanel.Controls.Add(purgeBox);
             acceptanceBox = new CheckBox { Location = new Point(34, 408), Size = new Size(716, 54), ForeColor = SetupTheme.Text, FlatStyle = FlatStyle.Flat };
             acceptanceBox.FlatAppearance.CheckedBackColor = SetupTheme.Papaya;
             acceptanceBox.CheckedChanged += delegate { executeButton.Enabled = acceptanceBox.Checked && !IsOperationInProgress; };
@@ -199,6 +217,9 @@ namespace KiloLink.Setup
         private void LoadSavedSettings()
         {
             string configPath = Path.Combine(Path.GetDirectoryName(launcherDirectory), "installer-config.json");
+            bool retained=false;
+            string retainedPath=Path.Combine(Path.GetDirectoryName(launcherDirectory),"retained-server.json");
+            if(!File.Exists(configPath) && File.Exists(retainedPath)){configPath=retainedPath;retained=true;}
             savedSettings = null;
             webPortBox.Value = 80;
             linkPortBox.Value = 50000;
@@ -212,6 +233,7 @@ namespace KiloLink.Setup
                 if (File.Exists(configPath))
                 {
                     savedSettings = eventSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(configPath));
+                    if(retained){savedSettings=savedSettings["configuration"] as Dictionary<string,object>;}
                     if (savedSettings == null) { throw new InvalidDataException("Configuration is empty."); }
                     SetSavedPort(webPortBox, "WebPort", 80);
                     SetSavedPort(linkPortBox, "LinkPort", 50000);
@@ -299,6 +321,10 @@ namespace KiloLink.Setup
         private void ChooseRole()
         {
             if (IsOperationInProgress) { return; }
+            if (SetupLauncher.LifecycleRequest != null) {
+                selectedAction=LifecycleEngineAction();
+                if(selectedAction=="Uninstall" || selectedAction=="RemoveApp" || selectedAction=="Backup" || selectedAction=="MaintainRuntime") {ReviewSelectedAction();return;}
+            }
             if (clientChoice.Checked)
             {
                 selectedAction = "InstallClient";
@@ -312,7 +338,13 @@ namespace KiloLink.Setup
             if (IsOperationInProgress) { return; }
             try { LoadSavedSettings(); }
             catch (Exception exception) { MessageBox.Show(this, exception.Message, "Saved configuration needs attention", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-            selectedAction = "Setup";
+            selectedAction = LifecycleEngineAction();
+            List<NetworkAdapterChoice> suitable = GetNetworkAdapterChoices().FindAll(delegate(NetworkAdapterChoice choice) {
+                string address; return choice.Connected && TryParseIpv4(choice.Address,true,out address) && IsUsableServerAddress(address,choice.PrefixLength);
+            });
+            NetworkAdapterChoice saved = suitable.Find(delegate(NetworkAdapterChoice choice) {return String.Equals(choice.Alias,preferredInterfaceAlias,StringComparison.OrdinalIgnoreCase) && choice.Address==preferredIpAddress;});
+            NetworkAdapterChoice automatic = saved ?? (suitable.Count==1?suitable[0]:null);
+            if(automatic!=null) {preferredInterfaceAlias=automatic.Alias;preferredIpAddress=automatic.Address;ReviewSelectedAction();return;}
             ShowNetworkPage();
         }
 
@@ -350,16 +382,18 @@ namespace KiloLink.Setup
         {
             if (IsOperationInProgress) { return; }
             bool client = selectedAction == "InstallClient";
-            bool removal = selectedAction == "Uninstall";
-            bool maintenance = selectedAction == "MaintainRuntime" || selectedAction == "Backup";
+            bool removal = selectedAction == "Uninstall" || selectedAction == "RemoveApp";
+            bool purgeAvailable = selectedAction == "Uninstall" && !clientChoice.Checked
+                && (SetupLauncher.LifecycleRequest == null || !SetupLauncher.LifecycleRequest.PreserveData);
+            bool maintenance = selectedAction == "MaintainRuntime" || selectedAction == "Backup" || selectedAction == "Verify";
             if (!removal && !client && !maintenance)
             {
                 string error = ValidateServiceSettings();
                 if (error != null) { settingsErrorLabel.Text = error; return; }
             }
-            reviewTitle.Text = client ? "Install tools on this client" : removal ? "Review removal" : "Review " + selectedAction.ToLowerInvariant();
+            reviewTitle.Text = client ? "Install tools on this client" : removal ? "Review removal" : selectedAction == "MaintainRuntime" ? "Review runtime update" : "Review " + selectedAction.ToLowerInvariant();
             reviewText.Text = client
-                ? "Install the latest stable NDI Tools and NDI Configurator PC Agent from their official sources. Signatures and published checksums are verified where available.\r\n\r\nPC Agent has a separate non-commercial licence; commercial use requires separate permission. Its setup opens in its own Windows window. Review its licence and select the production adapter there, then close that window to return here.\r\n\r\nExisting NDI Tools can be updated or repaired. Newer installed versions of either application are retained.\r\n\r\nInternet access is required. Windows may need to restart."
+                ? "Install or update NDI Tools and NDI Configurator PC Agent from their official sources. Signatures and published checksums are verified where available.\r\n\r\nPC Agent has a separate non-commercial licence; commercial use requires separate permission. Review its licence in the Agent setup window when requested. Supported Agent packages install without changing network settings; onboarding is a separate step. Older packages may ask for an adapter in their own setup window.\r\n\r\nCurrent, complete NDI Tools are retained unless repair is requested. Newer installed versions are retained.\r\n\r\nInternet access is required. Windows may need to restart."
                 : maintenance
                 ? (selectedAction == "Backup"
                     ? "Stop KiloLink briefly and save its data, container settings and a checksum under ProgramData\\KiloLink\\Backups.\r\n\r\nThe container returns to its previous running state when backup finishes. Keep a separate copy of important backups on another disk."
@@ -372,17 +406,35 @@ namespace KiloLink.Setup
                     + "\r\nNDI Discovery: " + preferredIpAddress + ":" + ndiPortBox.Value + " TCP"
                     + "\r\n\r\nInstall missing components and update WSL, Ubuntu, Docker, KiloLink and NDI Tools. Configure automatic startup, firewall rules and browser shortcuts.\r\nExisting KiloLink data is retained and backed up before runtime or container updates. Services may stop briefly. Windows may need to restart.";
             reviewText.SelectionStart = 0;
+            if(selectedAction=="Verify"){
+                reviewText.Text="Verify after an interrupted operation.\r\n\r\nCheck that the previous worker has stopped, recovery records are resolved and the selected components are consistent. Server checks can start its Linux environment. No packages are installed or updated.\r\n\r\nA successful check permits a new operation; it does not mark the interrupted attempt successful. Open ProgramData\\KiloLink logs if a component still needs attention.";
+            }
+            if (removal) {
+                reviewText.Text = selectedAction=="RemoveApp"
+                    ? "Remove only the Kiloview Configuration application.\r\n\r\nKiloLink services, Linux environment, data, shared NDI Tools and PC Agent remain. The retained Environment maintenance executable remains available under ProgramData\\KiloLink\\Maintenance."
+                    : clientChoice.Checked
+                    ? "Remove Environment's Client role record. Shared NDI Tools and PC Agent remain installed and are managed separately."
+                    : "Remove services, keep data/environment.\r\n\r\nStop KiloLink and disable its automatic startup. Restore the previous NDI Discovery settings and remove owned firewall rules and shortcuts.\r\n\r\nKeep the dedicated Linux environment and its disk footprint, KiloLink data, backups and recovery configuration. The server role becomes inactive. Shared NDI Tools and PC Agent remain."
+                        + (purgeAvailable ? "\r\n\r\nThe separate checkbox below permanently deletes the dedicated environment and its data." : String.Empty);
+            } else if(!client && !maintenance && selectedAction=="Update") {
+                reviewText.Text="Update KiloLink and NDI Tools applications, retaining server data and current network settings. Runtime packages (Windows WSL, Ubuntu and Docker) are maintained separately. Services may stop temporarily. Windows may require a restart.";
+            } else if(!client && !maintenance && selectedAction=="Repair") {
+                reviewText.Text="Repair the saved server configuration, missing components, service startup and firewall rules. Retain KiloLink data and its current application image. Services may stop temporarily.";
+            }
+            purgeBox.Checked=false;
+            purgeBox.Visible=purgeAvailable;
+            purgeBox.Enabled=SetupLauncher.LifecycleRequest==null || !SetupLauncher.LifecycleRequest.PreserveData;
             reviewText.SelectionLength = 0;
             acceptanceBox.Checked = false;
             acceptanceBox.Text = client ? "I accept the installer EULA and NDI Tools licence. I authorise setup and updates for this client."
-                : removal ? "I understand that uninstall permanently deletes KiloLink application data and the dedicated Linux environment."
+                : removal ? (purgeAvailable ? "I confirm the removal described above, including permanent data deletion only if separately selected." : "I confirm the removal described above.")
                 : maintenance ? "I authorise this maintenance operation and the temporary service interruption."
                 : "I accept the installer EULA and Kiloview/NDI licences. I authorise setup and updates for this server.";
             foreach (Control control in reviewPanel.Controls)
             {
-                if (control is LinkLabel) { control.Visible = control.Name == "installerTerms" || (!removal && !maintenance && (control.Name == "agentTerms" ? client : control.Name == "kiloTerms" || control.Name == "changePorts" ? !client : true)); }
+                if (control is LinkLabel) { control.Visible = !removal && (control.Name == "installerTerms" || (!maintenance && (control.Name == "agentTerms" ? client : control.Name == "kiloTerms" || control.Name == "changePorts" ? !client : true))); }
             }
-            executeButton.Text = client ? "Set up / update client" : selectedAction == "Repair" ? "Apply repair" : selectedAction == "Update" ? "Install updates" : selectedAction == "MaintainRuntime" ? "Update runtime" : selectedAction == "Backup" ? "Back up data" : selectedAction == "Setup" ? "Set up / update server" : selectedAction;
+            executeButton.Text = client ? "Set up / update client" : selectedAction == "Repair" ? "Apply repair" : selectedAction == "Update" ? "Install updates" : selectedAction == "MaintainRuntime" ? "Update runtime" : selectedAction == "Backup" ? "Back up data" : selectedAction == "RemoveApp" ? "Remove app" : selectedAction == "Setup" ? "Set up / update server" : selectedAction;
             executeButton.Enabled = false;
             ShowPage(LauncherView.Review, reviewPanel, executeButton);
         }
@@ -397,7 +449,12 @@ namespace KiloLink.Setup
 
         private string BuildOperationArguments()
         {
-            if (selectedAction == "MaintainRuntime" || selectedAction == "Backup")
+            if (autoResume && lifecycleIntentRestored) {
+                string resumed=" -Action Resume -AcceptLicenses";
+                if (!String.IsNullOrEmpty(requestPath)) {resumed+=" -ConfigurationPath "+SetupLauncher.Quote(requestPath);}
+                return resumed;
+            }
+            if (selectedAction == "MaintainRuntime" || selectedAction == "Backup" || selectedAction == "Verify")
             {
                 if (!acceptanceBox.Checked) { throw new InvalidOperationException("Review and confirm the operation first."); }
                 return " -Action " + selectedAction + " -AcceptLicenses";
@@ -408,16 +465,21 @@ namespace KiloLink.Setup
                 if (!acceptanceBox.Checked) { throw new InvalidOperationException("NDI Tools licence acceptance is required."); }
                 return " -Action InstallClient -AcceptLicenses";
             }
-            if (selectedAction == "Uninstall")
+            if (selectedAction == "Uninstall" || selectedAction == "RemoveApp")
             {
                 if (!acceptanceBox.Checked) { throw new InvalidOperationException("Confirm permanent data removal before uninstalling."); }
-                return " -Action Uninstall -ConfirmRemoval";
+                return " -Action "+selectedAction+" -ConfirmRemoval"+(purgeConfirmed?" -PurgeData":"");
             }
             string error = ValidateServiceSettings();
             if (error != null) { throw new InvalidOperationException(error); }
             if (!acceptanceBox.Checked) { throw new InvalidOperationException("Vendor licence acceptance is required."); }
-            requestPath = Path.Combine(launcherDirectory, "request-" + Guid.NewGuid().ToString("N") + ".json");
-            File.WriteAllText(requestPath, eventSerializer.Serialize(CreateConfigurationRequest()), new UTF8Encoding(false));
+            if(SetupLauncher.LifecycleRequest!=null) {
+                requestPath=Path.Combine(SetupLauncher.LifecycleRequest.DirectoryPath,"configuration.json");
+                SetupLauncher.LifecycleRequest.AtomicWrite(requestPath,eventSerializer.Serialize(CreateConfigurationRequest()));
+            } else {
+                requestPath = Path.Combine(launcherDirectory, "request-" + Guid.NewGuid().ToString("N") + ".json");
+                File.WriteAllText(requestPath, eventSerializer.Serialize(CreateConfigurationRequest()), new UTF8Encoding(false));
+            }
             return " -Action " + selectedAction + " -AcceptLicenses -ConfigurationPath " + SetupLauncher.Quote(requestPath);
         }
 
@@ -453,7 +515,7 @@ namespace KiloLink.Setup
 
         private void FinishWizardOperation(int exitCode)
         {
-            if (requestPath != null)
+            if (requestPath != null && SetupLauncher.LifecycleRequest==null && exitCode!=3010)
             {
                 try { File.Delete(requestPath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
                 requestPath = null;
@@ -466,7 +528,8 @@ namespace KiloLink.Setup
                     ? "Open NDI Tools from Start. Use NDI Job Configurator to onboard this PC." : String.Empty;
             }
             restartButton.Visible = restart;
-            returnButton.Enabled = !restart;
+            returnButton.Enabled = !restart && SetupLauncher.LifecycleRequest==null;
+            returnButton.Visible = SetupLauncher.LifecycleRequest==null;
             finishButton.Enabled = true;
             finishButton.Text = restart ? "Restart later" : "Finish";
             AcceptButton = finishButton;

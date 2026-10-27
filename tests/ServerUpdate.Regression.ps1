@@ -19,11 +19,9 @@ $serverUpdateMocks = {
         Assert-True ($Uri -eq 'https://api.github.com/repos/microsoft/WSL/releases/latest') 'Unexpected server metadata source.'
         [pscustomobject]@{assets=@([pscustomobject]@{name='wsl.x64.msi';browser_download_url='https://example.invalid/wsl.x64.msi'})}
     }
-    function Invoke-WebRequest {
-        param($Uri)
-        Assert-True ($Uri -eq 'https://ndi.video/tools/') 'Unexpected NDI metadata source.'
+    function Get-NdiToolsMetadata {
         $script:NdiVersionChecks++
-        [pscustomobject]@{Links=@([pscustomobject]@{href=$script:NdiToolsUrl});Content='<div>Version 6.0.0</div>'}
+        [pscustomobject]@{Url=$script:NdiToolsUrl;Version='6.0.0'}
     }
     function Ensure-WslFeatures { $script:ServerSteps.Add('Features'); $true }
     function Invoke-WslScript {
@@ -46,7 +44,7 @@ foreach ($startingState in @('Fresh','Partial','Current','Outdated')) {
         $script:NdiInstalled = $startingState -in @('Current','Outdated')
         $script:FixtureImageChanged = $startingState -eq 'Outdated'
         function Get-NdiRegistration {
-            if ($script:NdiInstalled) { [pscustomobject]@{DisplayVersion=$(if ($startingState -eq 'Outdated') { '5.0.0' } else { '6.0.0' })} }
+            if ($script:NdiInstalled) { [pscustomobject]@{DisplayVersion=$(if ($startingState -eq 'Outdated' -and $script:NdiInstallCalls -eq 0) { '5.0.0' } else { '6.0.0' })} }
         }
         function Test-KiloContainer { $startingState -ne 'Fresh' }
         function Invoke-KiloReplacement { param($Config,[switch]$BackupOnly) Assert-True $BackupOnly 'Unexpected replacement call'; $script:ServerSteps.Add('Backup') }
@@ -91,7 +89,7 @@ Test-Case 'Full server updates keep current NDI and KiloLink without redundant d
 Test-Case 'Full server update installs older NDI once and replaces a changed KiloLink image' {
     . $serverUpdateMocks
     $script:FixtureImageChanged = $true
-    function Get-NdiRegistration { [pscustomobject]@{DisplayVersion='5.0.0'} }
+    function Get-NdiRegistration { [pscustomobject]@{DisplayVersion=$(if($script:NdiInstallCalls){'6.0.0'}else{'5.0.0'})} }
     $before = Get-SavedConfig
     Update-Suite
     $after = Get-SavedConfig
@@ -101,7 +99,7 @@ Test-Case 'Full server update installs older NDI once and replaces a changed Kil
 }
 Test-Case 'Full server update checks the signed installer when advertised version is unavailable' {
     . $serverUpdateMocks
-    function Invoke-WebRequest { [pscustomobject]@{Links=@([pscustomobject]@{href=$script:NdiToolsUrl});Content='No version advertised'} }
+    function Get-NdiToolsMetadata { [pscustomobject]@{Url=$script:NdiToolsUrl;Version=$null} }
     Update-Suite
     Assert-True ($script:NdiDownloads -eq 1 -and $script:NdiSignatureChecks -eq 2 -and $script:NdiInstallCalls -eq 0 -and $script:OperationOutcome -eq 'Completed') 'The full update did not retain its verified package fallback.'
 }

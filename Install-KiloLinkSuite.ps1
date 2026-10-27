@@ -15,7 +15,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Setup', 'Install', 'InstallClient', 'Repair', 'Update', 'MaintainRuntime', 'Uninstall', 'Resume', 'CheckDownloads', 'Inspect', 'Plan', 'Verify', 'Backup')]
+    [ValidateSet('Menu', 'Setup', 'Install', 'InstallClient', 'Repair', 'Update', 'MaintainRuntime', 'Uninstall', 'RemoveApp', 'Resume', 'CheckDownloads', 'Inspect', 'Plan', 'Verify', 'Backup')]
     [string]$Action = 'Menu',
     [switch]$AcceptLicenses,
     [switch]$AutoRestart,
@@ -25,7 +25,13 @@ param(
     [string]$PreferredIpAddress,
     [string]$ConfigurationPath,
     [switch]$ConfirmRemoval,
-    [string]$PackageDirectory
+    [string]$PackageDirectory,
+    [string]$LifecycleRequestPath,
+    [ValidateSet('client','server','')][string]$Role='',
+    [switch]$PreserveData = $true,
+    [switch]$PurgeData,
+    [switch]$PackageRestartContinuation,
+    [switch]$ForceComponentRepair
 )
 
 Set-StrictMode -Version 2.0
@@ -42,8 +48,19 @@ $script:WslVmCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
 $script:ManagedDistroName = 'KiloLink-Ubuntu'
 $script:ContainerName = 'KLNKSVR-pro'
 $script:ApplicationManifest = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('ewogICJzY2hlbWFWZXJzaW9uIjogMSwKICAicG9saWN5IjogImxhdGVzdC1zdGFibGUiLAogICJuZGlUb29scyI6IHsKICAgICJzb3VyY2UiOiAiaHR0cHM6Ly9uZGkudmlkZW8vdG9vbHMvIiwKICAgICJ1cmwiOiAiaHR0cHM6Ly9kb3dubG9hZHMubmRpLnR2L1Rvb2xzL05ESSUyMDYlMjBUb29scy5leGUiLAogICAgInZlcmlmaWNhdGlvbiI6ICJBdXRoZW50aWNvZGUgc2lnbmF0dXJlIGZyb20gTkRJLCBWaXpydCBvciBOZXdUZWs7IHJlY29yZCBkb3dubG9hZGVkIFNIQS0yNTYiCiAgfSwKICAicGNBZ2VudCI6IHsKICAgICJzb3VyY2UiOiAiaHR0cHM6Ly9naXRodWIuY29tL0pvaG5EZXZBYy9LaWxvdmlldy1QQy1PbmJvYXJkaW5nL3JlbGVhc2VzL2xhdGVzdCIsCiAgICAidmVyaWZpY2F0aW9uIjogInByb2R1Y3Rpb24gcmVsZWFzZSwgcHVibGlzaGVkIFNIQS0yNTYsIGFyY2hpdmUgcGF0aHMsIGJpbmFyeSBpZGVudGl0eSBhbmQgdmVyc2lvbnMiCiAgfSwKICAia2lsb0xpbmsiOiB7CiAgICAiaW1hZ2UiOiAia2lsb3ZpZXcva2xuay1wcm86bGF0ZXN0IiwKICAgICJ2ZXJpZmljYXRpb24iOiAiRG9ja2VyIGNvbnRlbnQgZGlnZXN0OyByZXRhaW4gb3JpZ2luYWwgY29udGFpbmVyIGFuZCBiYWNrdXAgYmVmb3JlIHJlcGxhY2VtZW50IgogIH0sCiAgInJ1bnRpbWUiOiB7CiAgICAidWJ1bnR1RGlzdHJpYnV0aW9uIjogIlVidW50dS0yNC4wNCIsCiAgICAibWFpbnRlbmFuY2UiOiAiZXhwbGljaXQgTWFpbnRhaW5SdW50aW1lIGFjdGlvbjsgV2luZG93cy9XU0wgYW5kIGFwdCByZXBvc2l0b3JpZXMgc3VwcGx5IHJ1bnRpbWUgcGFja2FnZXMiCiAgfQp9Cg==')) | ConvertFrom-Json
-$script:ProductVersion = '3.0.3'
+$script:ProductVersion = '3.1.0'
+$script:ProductChannel = 'development'
 $script:ActiveJournal = $null
+$script:Lifecycle = $null
+$script:LifecycleStage = 'preflight'
+$script:LifecycleEffects = @()
+$script:LifecycleRecoveryRequired = $false
+$script:LifecycleNextAction = ''
+$script:LifecycleErrorCode = ''
+$script:LifecycleComponents = @()
+$script:LifecycleLastHeartbeat = [datetime]::MinValue
+$script:NativeTimeoutSeconds = 1800
+$script:NativeStallSeconds = 300
 $script:KiloImage = $script:ApplicationManifest.kiloLink.image
 $script:LinuxDataPath = '/opt/kilolink-server'
 $script:NdiToolsUrl = $script:ApplicationManifest.ndiTools.url
@@ -51,10 +68,7 @@ $script:KiloInstallerUrl = 'https://www.kiloview.com/downloads/klnk-pro/install.
 $script:InstallerLogPath = Join-Path $script:StateRoot 'installer.log'
 $script:ResumeStatePath = Join-Path $script:StateRoot 'resume-state.json'
 $script:ResumeTaskName = 'KiloLink Suite Installation Resume'
-$script:PersistentLauncherPath = Join-Path $script:StateRoot 'Launcher\Kiloview-Environment-Setup.exe'
-if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'managed-installation.json'))) {
-    $script:PersistentLauncherPath = Join-Path $PSScriptRoot 'Kiloview-Environment-Setup.exe'
-}
+$script:PersistentLauncherPath = Join-Path $script:StateRoot 'Maintenance\Kiloview-Environment-Setup.exe'
 $script:RestartScheduled = $false
 $script:MaximumResumeAttempts = 3
 $script:KiloDefaultUsername = 'admin'
@@ -76,27 +90,39 @@ $script:PreparedNdiCheck = $null
 $script:NdiRestartRequired = $false
 $script:PreparedPcAgentRoot = $null
 $script:PreparedPcAgentRelease = $null
+$script:PcAgentRestartRequired = $false
 
 function Set-OperationOutcome {
     param(
-        [ValidateSet('Idle', 'Running', 'Completed', 'Cancelled', 'RestartRequired', 'Failed')]
+        [ValidateSet('Idle', 'Running', 'Completed', 'NoChange', 'Cancelled', 'RestartRequired', 'Failed', 'Partial', 'Blocked')]
         [string]$Outcome,
         [string]$Message
     )
     $script:OperationOutcome = $Outcome
     $script:OperationMessage = $Message
-    if ($Outcome -eq 'Failed') { $script:OperationFailed = $true }
-    if ($Outcome -eq 'Completed') { $script:OperationFailed = $false }
+    if ($Outcome -in @('Failed','Partial','Blocked')) { $script:OperationFailed = $true }
+    if ($Outcome -in @('Completed','NoChange')) { $script:OperationFailed = $false }
     if ($Outcome -eq 'Running' -and $script:ActiveJournal -and $script:ActiveJournal.outcome -ne 'Running') { $script:ActiveJournal = $null }
     if ($script:ActiveJournal) {
         $script:ActiveJournal.outcome = $Outcome
+        $script:ActiveJournal['recoveryRequired']=$script:LifecycleRecoveryRequired
         Save-DeploymentJournal
     }
+    if($script:Lifecycle -and $Outcome -notin @('Idle','Running')){
+        try{$script:LifecycleComponents=@(Get-ObservedComponents)}catch{Write-InstallerLog ('Final component inspection failed: '+$_.Exception.Message)}
+    }
     Write-LauncherEvent -Type 'outcome' -Data @{ outcome = $Outcome; message = $Message }
+    Write-LifecycleResult (Get-LifecycleResultOutcome $Outcome) $Message
+    if ($Outcome -notin @('Idle','Running') -and $script:ProgressActive) {
+        $finalPercent = if ($Outcome -in @('Completed','NoChange')) { 100 } else { $script:ProgressPercent }
+        Set-SuiteProgress -Percent $finalPercent -Status $Message
+    }
 }
 
 function Get-InstallerExitCode {
     if ($script:OperationOutcome -eq 'RestartRequired') { return 3010 }
+    if ($script:LifecycleErrorCode -eq 'operation-conflict') { return 1618 }
+    if ($script:OperationOutcome -eq 'Cancelled') { if ($script:LifecycleEffects.Count) { return 1 }; return 1602 }
     if ($script:OperationFailed -or $script:OperationOutcome -eq 'Running') { return 1 }
     return 0
 }
@@ -105,6 +131,7 @@ function Write-LauncherEvent {
     param([string]$Type, [hashtable]$Data = @{})
     if (-not $LauncherMode) { return }
     $payload = [ordered]@{ type = $Type }
+    if ($script:Lifecycle) { $payload['operationId']=$script:Lifecycle.OperationId }
     foreach ($key in $Data.Keys) {
         $payload[$key] = $Data[$key]
     }
@@ -122,12 +149,46 @@ function Read-InstallerInput {
 
 function Write-InstallerLog {
     param([string]$Message)
-    if (-not (Test-Path -LiteralPath $script:StateRoot)) { return }
     # wsl.exe can emit UTF-16 text through a native pipeline. Strip embedded
     # NUL characters so diagnostics remain readable in Notepad and on screen.
     $cleanMessage = ([string]$Message -replace [char]0, '').TrimEnd()
     $line = '{0} {1}' -f (Get-Date).ToString('o'), $cleanMessage
-    Add-Content -LiteralPath $script:InstallerLogPath -Value $line -Encoding UTF8
+    $previous=Get-Variable InstallerLogFailure -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $now=[datetime]::UtcNow
+    $failure=$null
+    $deferRetry=$previous -and $previous.path -eq $script:InstallerLogPath -and $now -lt $previous.retryAfterUtc
+    if($deferRetry){$failure=$previous.message}
+    else {
+        $clock=[Diagnostics.Stopwatch]::StartNew()
+        do {
+            $stream=$null;$writer=$null
+            try {
+                if (-not (Test-Path -LiteralPath $script:StateRoot)) { return }
+                # PS5.1 Add-Content can reject even a ReadWrite|Delete reader.
+                # Diagnostics must coexist with readers and never abort servicing.
+                $stream=[IO.FileStream]::new($script:InstallerLogPath,[IO.FileMode]::Append,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                $writer=[IO.StreamWriter]::new($stream,[Text.UTF8Encoding]::new($false))
+                $writer.WriteLine($line);$writer.Flush()
+                return
+            } catch {
+                $errorDetails=$_.Exception.GetBaseException()
+                $failure=$errorDetails.Message
+                $retry=($errorDetails.HResult -band 0xffff) -in @(32,33) -and $clock.ElapsedMilliseconds -lt 250
+            } finally {
+                if($writer){try{$writer.Dispose()}catch{}}
+                elseif($stream){try{$stream.Dispose()}catch{}}
+            }
+            if($retry){Start-Sleep -Milliseconds 50}
+        } while($retry)
+    }
+    # Avoid a fresh retry delay for every native output line during a persistent
+    # lock. Keep fallback output in the host/transcript without changing outcome.
+    $warn=-not $previous -or $previous.path -ne $script:InstallerLogPath -or $previous.message -ne $failure -or ($now-$previous.warnedUtc).TotalSeconds -ge 30
+    $script:InstallerLogFailure=@{path=$script:InstallerLogPath;message=$failure;retryAfterUtc=$(if($deferRetry){$previous.retryAfterUtc}else{[datetime]::UtcNow.AddSeconds(1)});warnedUtc=$(if($warn){$now}else{$previous.warnedUtc})}
+    try {
+        if($warn){Write-Warning -Message "Could not append the diagnostic log '$($script:InstallerLogPath)': $failure Diagnostic output is being sent to the setup host/transcript." -WarningAction Continue}
+        Write-Host $line
+    } catch { } # A secondary diagnostic sink must not replace the real error.
 }
 
 function Start-SuiteProgress {
@@ -144,7 +205,9 @@ function Start-SuiteProgress {
 function Set-SuiteProgress {
     param([int]$Percent, [string]$Status)
     if (-not $script:ProgressActive) { return }
-    $script:ProgressPercent = [Math]::Max($script:ProgressPercent, [Math]::Min(100, $Percent))
+    # Completion belongs to the operation outcome, never a finished download.
+    $maximum = if ($script:OperationOutcome -in @('Completed','NoChange')) { 100 } else { 99 }
+    $script:ProgressPercent = [Math]::Min($maximum, [Math]::Max($script:ProgressPercent, [Math]::Max(0, $Percent)))
     if ($Status) { $script:ProgressStatus = $Status }
     if (-not $LauncherMode) {
         Write-Progress -Id 1 -Activity $script:ProgressActivity -Status ("{0} ({1}%)" -f $script:ProgressStatus, $script:ProgressPercent) -PercentComplete $script:ProgressPercent
@@ -158,6 +221,7 @@ function Set-SuiteProgress {
 }
 
 function Update-SuiteProgressPulse {
+    Write-LifecycleHeartbeat
     if (-not $script:ProgressActive) { return }
     $now = Get-Date
     if (($now - $script:ProgressLastPulse).TotalMilliseconds -lt 250) { return }
@@ -239,6 +303,7 @@ function Test-Administrator {
 }
 
 function Ensure-Administrator {
+    try { Initialize-Lifecycle } catch { if($script:Lifecycle){Write-LifecycleResult 'blocked' $_.Exception.Message -Stage 'preflight' -ErrorCode 'request-rejected'}; Write-Error $_ -ErrorAction Continue; exit 1 }
     if ($Action -in @('Inspect','Plan')) { return }
     if (Test-Administrator) {
         return
@@ -256,11 +321,21 @@ function Ensure-Administrator {
     if ($ConfigurationPath) { $elevationArguments += " -ConfigurationPath `"$ConfigurationPath`"" }
     if ($PackageDirectory) { $elevationArguments += " -PackageDirectory `"$PackageDirectory`"" }
     if ($ConfirmRemoval) { $elevationArguments += ' -ConfirmRemoval' }
+    if ($LifecycleRequestPath) { $elevationArguments += " -LifecycleRequestPath `"$LifecycleRequestPath`"" }
+    if ($Role) { $elevationArguments += " -Role $Role" }
+    if ($PurgeData) { $elevationArguments += ' -PurgeData' }
+    if ($ForceComponentRepair) { $elevationArguments += ' -ForceComponentRepair' }
     if ($PreferredInterfaceAlias) { $elevationArguments += " -PreferredInterfaceAlias `"$PreferredInterfaceAlias`"" }
     if ($PreferredIpAddress) { $elevationArguments += " -PreferredIpAddress `"$PreferredIpAddress`"" }
-    if ($LauncherMode) { Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs -WindowStyle Hidden | Out-Null }
-    else { Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs | Out-Null }
-    exit 0
+    try {
+        Write-LifecycleResult 'running' 'Waiting for Windows administrator approval.' -Stage 'waiting-elevation'
+        $elevated = Start-Process powershell.exe -ArgumentList $elevationArguments -Verb RunAs -WindowStyle Hidden -PassThru -Wait
+        exit $elevated.ExitCode
+    } catch {
+        if ((Get-PropertyValue $_.Exception 'NativeErrorCode' 0) -eq 1223) { Set-OperationOutcome 'Cancelled' 'Windows administrator approval was cancelled.'; exit 1602 }
+        Set-OperationOutcome 'Failed' $_.Exception.Message
+        exit 1
+    }
 }
 
 function Get-SavedConfig {
@@ -268,7 +343,7 @@ function Get-SavedConfig {
         return $null
     }
     try {
-        return Get-Content -Raw -LiteralPath $script:ConfigPath | ConvertFrom-Json
+        return Get-Content -Encoding UTF8 -Raw -LiteralPath $script:ConfigPath | ConvertFrom-Json
     } catch {
         Write-Warning "Saved configuration is unreadable: $($_.Exception.Message)"
         return $null
@@ -284,11 +359,12 @@ function Save-Config {
         $Config.UpdatedAt = (Get-Date).ToString('o')
     }
     Write-StateJson $script:ConfigPath $Config
+    Add-LifecycleEffect 'Server configuration saved.'
 }
 
 function Get-RequestedSuiteConfig {
     param([string]$Path)
-    $request = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+    $request = Get-Content -Encoding UTF8 -Raw -LiteralPath $Path | ConvertFrom-Json
     if ([int](Get-PropertyValue $request 'SchemaVersion' 0) -ne 1) {
         throw 'Unsupported setup configuration. Reopen the current installer.'
     }
@@ -367,76 +443,346 @@ function Register-MaintenanceEntry {
 }
 
 function Remove-MaintenanceEntry {
-    Remove-Item -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup' -Recurse -Force -ErrorAction SilentlyContinue
+    $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KiloviewEnvironmentSetup'
+    if(Test-Path -LiteralPath $key){Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction Stop}
+    if(Test-Path -LiteralPath $key){throw 'Server role maintenance registration remains after removal.'}
     $programs = Join-Path ([Environment]::GetFolderPath('Programs')) 'Kiloview'
-    Remove-Item -LiteralPath (Join-Path $programs 'Kiloview Environment Setup.lnk') -Force -ErrorAction SilentlyContinue
+    Remove-OwnedFile (Join-Path $programs 'Kiloview Environment Setup.lnk')
 }
 
 function Invoke-Native {
-    param(
-        [string]$FilePath,
-        [string[]]$Arguments = @(),
-        [switch]$IgnoreExitCode,
-        [switch]$Capture
-    )
-    $previousErrorActionPreference = $ErrorActionPreference
-    $recentOutput = New-Object Collections.Generic.List[string]
+    param([string]$FilePath, [string[]]$Arguments=@(), [switch]$IgnoreExitCode, [switch]$Capture,
+        [double]$TimeoutSeconds=$script:NativeTimeoutSeconds, [double]$StallSeconds=$script:NativeStallSeconds, [switch]$ReadOnly)
+    Initialize-LifecycleProtocol
+    # -CommandType Application can return every PATH match even without -All.
+    # Preserve command precedence and pass exactly one path to ProcessStartInfo.
+    $command=Get-Command $FilePath -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $resolvedFile=$command.Source
+    if ($resolvedFile -isnot [string] -or -not [IO.Path]::IsPathRooted($resolvedFile) -or -not [IO.File]::Exists($resolvedFile)) {
+        throw "The selected native executable is missing or is not a single absolute file path: $FilePath"
+    }
+    $process=New-Object KiloLink.Lifecycle.NativeProcess($resolvedFile, $Arguments)
+    $output=New-Object 'Collections.Generic.List[string]'
+    $recent=New-Object 'Collections.Generic.List[string]'
+    $exitObserved=$false
     try {
-        # Windows PowerShell 5.1 converts native stderr into non-terminating
-        # PowerShell errors. With the script-wide preference set to Stop, normal
-        # progress written to stderr (for example by systemctl enable) would
-        # otherwise terminate the operation even when the process exits 0.
-        $ErrorActionPreference = 'Continue'
-        if ($Capture -and $script:ProgressActive) {
-            # Some checks need their output returned to the caller (for example,
-            # docker pull/image comparison). Stream those lines into a list so
-            # long-running captured commands still animate the progress display.
-            $captured = New-Object Collections.Generic.List[string]
-            & $FilePath @Arguments 2>&1 | ForEach-Object {
-                $line = ([string]$_ -replace [char]0, '').TrimEnd()
-                $captured.Add($line)
-                if ($line) { $recentOutput.Add($line) }
+        do {
+            foreach($line in $process.Drain()) {
+                if($Capture){$output.Add($line)}
+                if($line){$recent.Add($line);if($recent.Count -gt 12){$recent.RemoveAt(0)}}
                 Write-InstallerLog $line
-                Update-SuiteProgressPulse
             }
-            $output = @($captured)
-        } elseif ($Capture) {
-            $output = @(& $FilePath @Arguments 2>&1 | ForEach-Object {
-                $line = ([string]$_ -replace [char]0, '').TrimEnd()
-                if ($line) { $recentOutput.Add($line) }
-                $line
-            })
-        } else {
-            # Interactive mode sends verbose native output to the installer log
-            # while keeping a frequently refreshed progress bar on screen.
-            & $FilePath @Arguments 2>&1 | ForEach-Object {
-                $line = ([string]$_ -replace [char]0, '').TrimEnd()
-                if ($line) {
-                    $recentOutput.Add($line)
-                    if ($recentOutput.Count -gt 12) { $recentOutput.RemoveAt(0) }
+            Update-SuiteProgressPulse
+            if($process.HasExited){break}
+            if(([datetime]::UtcNow-$process.StartedUtc).TotalSeconds -gt $TimeoutSeconds -or
+                ($StallSeconds -gt 0 -and ([datetime]::UtcNow-$process.LastOutputUtc).TotalSeconds -gt $StallSeconds)) {
+                if($ReadOnly){
+                    $process.StopProbe()
+                    if(-not $process.HasExited){throw 'The owned read-only CLI could not be confirmed stopped after its deadline.'}
                 }
-                if ($script:ProgressActive) {
-                    Write-InstallerLog $line
-                    Update-SuiteProgressPulse
-                } else {
-                    Write-Host $line
+                else {
+                    $script:LifecycleRecoveryRequired=$true
+                    $script:LifecycleNextAction='An unattended command exceeded its deadline and may still be running. Wait for that command, inspect recovery records, then use Verify before retrying.'
                 }
+                $script:LifecycleErrorCode='command-timeout'
+                $failure=[TimeoutException]::new("Command exceeded its time limit: $FilePath. $($script:LifecycleNextAction)")
+                $failure.Data['NativeCommandTimeout']=$true
+                $failure.Data['NativeOutput']=$output.ToArray()
+                throw $failure
             }
-            $output = $null
+            Start-Sleep -Milliseconds 200
+        } while($true)
+        $code=$process.ExitCode
+        $exitObserved=$true
+        foreach($line in $process.Drain()){if($Capture){$output.Add($line)};if($line){$recent.Add($line)};Write-InstallerLog $line}
+        $global:LASTEXITCODE=$code
+        if(-not $IgnoreExitCode -and $code -ne 0){throw ('Command failed with exit code {0}: {1}. {2}' -f $code,$FilePath,(@($recent|Select-Object -Last 6)-join ' '))}
+        if($Capture){return $output.ToArray()}
+    } catch {
+        $originalFailure=$_
+        if(-not $ReadOnly -and -not $exitObserved) {
+            # A producer/heartbeat failure is not proof that the mutating child
+            # finished. Retain its identity without terminating it or servicing.
+            $script:LifecycleRecoveryRequired=$true
+            if(-not $script:LifecycleErrorCode){$script:LifecycleErrorCode='native-command-observation-failed'}
+            $guidance='Native command completion was not observed. Wait for the recorded command, inspect its package/recovery state, then use Verify before retrying. Do not start another operation while it may still be running.'
+            $script:LifecycleNextAction=(@($script:LifecycleNextAction,$guidance)|Where-Object {$_}) -join ' '
+            $pending=@{
+                processId=$process.Id;startedUtc=$process.StartedUtc.ToString('o');filePath=$resolvedFile;
+                reason=$(if($script:LifecycleErrorCode -eq 'command-timeout'){'Command exceeded its deadline'}else{'Native command completion was not observed'});
+                action=$Action;operationId=$(if($script:Lifecycle){$script:Lifecycle.OperationId}else{$null})}
+            if($script:ActiveJournal){$script:ActiveJournal['pendingNativeProcess']=$pending}
+            try {
+                Write-StateJson (Join-Path $script:StateRoot 'pending-process.json') $pending
+            } catch {
+                $recordFailure=$_.Exception.Message
+                $script:LifecycleNextAction+=' The pending command record could not be saved: '+$recordFailure
+                Write-InstallerLog ("Original command error: $($originalFailure.Exception.Message) Pending ownership write failed: $recordFailure")
+            }
         }
-        $code = $LASTEXITCODE
+        throw $originalFailure
     } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+        # A heartbeat/result-write error must not abandon a read-only probe.
+        # Mutating commands retain the existing recovery/ownership behavior.
+        try { if ($ReadOnly -and -not $process.HasExited) { $process.StopProbe() } }
+        finally { $process.Dispose() }
     }
-    if (-not $IgnoreExitCode -and $code -ne 0) {
-        $message = 'Command failed with exit code {0}: {1} {2}' -f $code, $FilePath, ($Arguments -join ' ')
-        $diagnostic = @($recentOutput | Where-Object { $_ } | Select-Object -Last 6) -join ' '
-        if ($diagnostic) { $message += [Environment]::NewLine + 'Reported by command: ' + $diagnostic }
-        throw $message
+}
+
+function Initialize-LifecycleProtocol {
+    if (-not ('KiloLink.Lifecycle.Request' -as [type])) {
+        $source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('Ly8gQ29weXJpZ2h0IChjKSAyMDI2IEpvaG4gTGlnaHRmb290LiBTUERYLUxpY2Vuc2UtSWRlbnRpZmllcjogTUlUCi8vIFNoYXJlZCBieSB0aGUgbmF0aXZlIGhvc3QgYW5kIHRoZSBnZW5lcmF0ZWQgUG93ZXJTaGVsbCBlbmdpbmUuCnVzaW5nIFN5c3RlbTsKdXNpbmcgU3lzdGVtLkNvbGxlY3Rpb25zLkdlbmVyaWM7CnVzaW5nIFN5c3RlbS5JTzsKdXNpbmcgU3lzdGVtLlNlY3VyaXR5LkFjY2Vzc0NvbnRyb2w7CnVzaW5nIFN5c3RlbS5TZWN1cml0eS5QcmluY2lwYWw7CnVzaW5nIFN5c3RlbS5UZXh0Owp1c2luZyBTeXN0ZW0uUnVudGltZS5JbnRlcm9wU2VydmljZXM7CnVzaW5nIE1pY3Jvc29mdC5XaW4zMi5TYWZlSGFuZGxlczsKdXNpbmcgU3lzdGVtLldlYi5TY3JpcHQuU2VyaWFsaXphdGlvbjsKCm5hbWVzcGFjZSBLaWxvTGluay5MaWZlY3ljbGUKewogICAgcHVibGljIHN0YXRpYyBjbGFzcyBBdG9taWNGaWxlCiAgICB7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIiwgU2V0TGFzdEVycm9yPXRydWUpXQogICAgICAgIHByaXZhdGUgc3RhdGljIGV4dGVybiBib29sIFNldEZpbGVJbmZvcm1hdGlvbkJ5SGFuZGxlKFNhZmVGaWxlSGFuZGxlIGZpbGUsaW50IGluZm9ybWF0aW9uQ2xhc3MsSW50UHRyIGluZm9ybWF0aW9uLHVpbnQgc2l6ZSk7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIiwgQ2hhclNldD1DaGFyU2V0LlVuaWNvZGUsIFNldExhc3RFcnJvcj10cnVlKV0KICAgICAgICBwcml2YXRlIHN0YXRpYyBleHRlcm4gU2FmZUZpbGVIYW5kbGUgQ3JlYXRlRmlsZShzdHJpbmcgcGF0aCx1aW50IGFjY2Vzcyx1aW50IHNoYXJlLEludFB0ciBzZWN1cml0eSx1aW50IGNyZWF0aW9uLHVpbnQgZmxhZ3MsSW50UHRyIHRlbXBsYXRlKTsKCiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgYm9vbCBEZWxldGVTaGFyaW5nQ29uZmxpY3Qoc3RyaW5nIHBhdGgpCiAgICAgICAgewogICAgICAgICAgICAvLyBSZW5hbWUtb3Zlci1leGlzdGluZyBjYW4gcmVwb3J0IEFDQ0VTU19ERU5JRUQgZm9yIGFuIG9wZW4gdGFyZ2V0CiAgICAgICAgICAgIC8vIHdoaWNoIGxhY2tzIEZJTEVfU0hBUkVfREVMRVRFLiBSZXRyeSBvbmx5IHdoZW4gYSBERUxFVEUtYWNjZXNzCiAgICAgICAgICAgIC8vIHByb2JlIGNvbmZpcm1zIHNoYXJpbmcsIG5vdCBmb3IgQUNMIG9yIHJlYWQtb25seSBmYWlsdXJlcy4KICAgICAgICAgICAgdXNpbmcoU2FmZUZpbGVIYW5kbGUgaGFuZGxlPUNyZWF0ZUZpbGUocGF0aCwweDEwMDAwLDcsSW50UHRyLlplcm8sMywweDAwMjAwMDAwLEludFB0ci5aZXJvKSkgewogICAgICAgICAgICAgICAgaW50IGVycm9yPU1hcnNoYWwuR2V0TGFzdFdpbjMyRXJyb3IoKTsKICAgICAgICAgICAgICAgIHJldHVybiBoYW5kbGUuSXNJbnZhbGlkICYmIChlcnJvcj09MzIgfHwgZXJyb3I9PTMzKTsKICAgICAgICAgICAgfQogICAgICAgIH0KCiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBSZW5hbWVPdmVyRXhpc3Rpbmcoc3RyaW5nIHRlbXBvcmFyeSxzdHJpbmcgdGFyZ2V0KQogICAgICAgIHsKICAgICAgICAgICAgdXNpbmcoU2FmZUZpbGVIYW5kbGUgaGFuZGxlPUNyZWF0ZUZpbGUodGVtcG9yYXJ5LDB4MTAwMDAsNyxJbnRQdHIuWmVybywzLDB4MDAyMDAwMDAsSW50UHRyLlplcm8pKSB7CiAgICAgICAgICAgICAgICBpZihoYW5kbGUuSXNJbnZhbGlkKXtUaHJvd1JlbmFtZUVycm9yKE1hcnNoYWwuR2V0TGFzdFdpbjMyRXJyb3IoKSk7fQogICAgICAgICAgICAgICAgYnl0ZVtdIG5hbWU9RW5jb2RpbmcuVW5pY29kZS5HZXRCeXRlcyh0YXJnZXQpOwogICAgICAgICAgICAgICAgaW50IHJvb3RPZmZzZXQ9SW50UHRyLlNpemUsIGxlbmd0aE9mZnNldD1yb290T2Zmc2V0K0ludFB0ci5TaXplLCBuYW1lT2Zmc2V0PWxlbmd0aE9mZnNldCs0OwogICAgICAgICAgICAgICAgaW50IGJ1ZmZlclNpemU9bmFtZU9mZnNldCtuYW1lLkxlbmd0aCtJbnRQdHIuU2l6ZTsKICAgICAgICAgICAgICAgIEludFB0ciBidWZmZXI9TWFyc2hhbC5BbGxvY0hHbG9iYWwoYnVmZmVyU2l6ZSk7CiAgICAgICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgICAgIC8vIEluY2x1ZGUgdGhlIHRyYWlsaW5nIFdDSEFSIGFuZCBuYXRpdmUgc3RydWN0dXJlIHBhZGRpbmc7CiAgICAgICAgICAgICAgICAgICAgLy8gRmlsZU5hbWVMZW5ndGggaXRzZWxmIGV4Y2x1ZGVzIHRoYXQgdGVybWluYXRvci4KICAgICAgICAgICAgICAgICAgICBmb3IoaW50IGk9MDtpPGJ1ZmZlclNpemU7aSsrKXtNYXJzaGFsLldyaXRlQnl0ZShidWZmZXIsaSwwKTt9CiAgICAgICAgICAgICAgICAgICAgLy8gRmlsZVJlbmFtZUluZm9FeDogUkVQTEFDRV9JRl9FWElTVFMgfCBQT1NJWF9TRU1BTlRJQ1MuCiAgICAgICAgICAgICAgICAgICAgLy8gRXhpc3RpbmcgY29vcGVyYXRpdmUgcmVhZGVyIGhhbmRsZXMga2VlcCB0aGVpciBvbGQgY29tcGxldGUKICAgICAgICAgICAgICAgICAgICAvLyBzbmFwc2hvdDsgbmV3IG9wZW5zIHNlZSB0aGUgcmVwbGFjZW1lbnQuIE5vIGRlbGV0ZS9jb3B5IGdhcC4KICAgICAgICAgICAgICAgICAgICBNYXJzaGFsLldyaXRlSW50MzIoYnVmZmVyLDAsMyk7CiAgICAgICAgICAgICAgICAgICAgTWFyc2hhbC5Xcml0ZUludFB0cihidWZmZXIscm9vdE9mZnNldCxJbnRQdHIuWmVybyk7CiAgICAgICAgICAgICAgICAgICAgTWFyc2hhbC5Xcml0ZUludDMyKGJ1ZmZlcixsZW5ndGhPZmZzZXQsbmFtZS5MZW5ndGgpOwogICAgICAgICAgICAgICAgICAgIE1hcnNoYWwuQ29weShuYW1lLDAsSW50UHRyLkFkZChidWZmZXIsbmFtZU9mZnNldCksbmFtZS5MZW5ndGgpOwogICAgICAgICAgICAgICAgICAgIGlmKCFTZXRGaWxlSW5mb3JtYXRpb25CeUhhbmRsZShoYW5kbGUsMjIsYnVmZmVyLCh1aW50KWJ1ZmZlclNpemUpKXtUaHJvd1JlbmFtZUVycm9yKE1hcnNoYWwuR2V0TGFzdFdpbjMyRXJyb3IoKSk7fQogICAgICAgICAgICAgICAgfSBmaW5hbGx5IHtNYXJzaGFsLkZyZWVIR2xvYmFsKGJ1ZmZlcik7fQogICAgICAgICAgICB9CiAgICAgICAgfQoKICAgICAgICBwcml2YXRlIHN0YXRpYyB2b2lkIFRocm93UmVuYW1lRXJyb3IoaW50IGVycm9yKSB7CiAgICAgICAgICAgIHRocm93IG5ldyBJT0V4Y2VwdGlvbigiQXRvbWljIHJlbmFtZSBmYWlsZWQgKFdpbmRvd3MgZXJyb3IgIitlcnJvcisiKTogIituZXcgU3lzdGVtLkNvbXBvbmVudE1vZGVsLldpbjMyRXhjZXB0aW9uKGVycm9yKS5NZXNzYWdlLAogICAgICAgICAgICAgICAgdW5jaGVja2VkKChpbnQpMHg4MDA3MDAwMCl8ZXJyb3IpOwogICAgICAgIH0KCiAgICAgICAgcHJpdmF0ZSBzZWFsZWQgY2xhc3MgV3JpdGVyTGVhc2UgOiBJRGlzcG9zYWJsZQogICAgICAgIHsKICAgICAgICAgICAgcHJpdmF0ZSBTeXN0ZW0uVGhyZWFkaW5nLk11dGV4IG11dGV4OwogICAgICAgICAgICBwdWJsaWMgV3JpdGVyTGVhc2UoU3lzdGVtLlRocmVhZGluZy5NdXRleCB2YWx1ZSkgeyBtdXRleD12YWx1ZTsgfQogICAgICAgICAgICBwdWJsaWMgdm9pZCBEaXNwb3NlKCkgewogICAgICAgICAgICAgICAgU3lzdGVtLlRocmVhZGluZy5NdXRleCB2YWx1ZT1TeXN0ZW0uVGhyZWFkaW5nLkludGVybG9ja2VkLkV4Y2hhbmdlKHJlZiBtdXRleCxudWxsKTsKICAgICAgICAgICAgICAgIGlmKHZhbHVlIT1udWxsKXt0cnl7dmFsdWUuUmVsZWFzZU11dGV4KCk7fWZpbmFsbHl7dmFsdWUuRGlzcG9zZSgpO319CiAgICAgICAgICAgIH0KICAgICAgICB9CgogICAgICAgIHB1YmxpYyBzdGF0aWMgSURpc3Bvc2FibGUgQWNxdWlyZShzdHJpbmcgdGFyZ2V0KQogICAgICAgIHsKICAgICAgICAgICAgc3RyaW5nIGlkZW50aXR5PVBhdGguR2V0RnVsbFBhdGgodGFyZ2V0KS5Ub1VwcGVySW52YXJpYW50KCk7CiAgICAgICAgICAgIHN0cmluZyBkaWdlc3Q7CiAgICAgICAgICAgIHVzaW5nKFN5c3RlbS5TZWN1cml0eS5DcnlwdG9ncmFwaHkuU0hBMjU2IGhhc2g9U3lzdGVtLlNlY3VyaXR5LkNyeXB0b2dyYXBoeS5TSEEyNTYuQ3JlYXRlKCkpIHsKICAgICAgICAgICAgICAgIGRpZ2VzdD1CaXRDb252ZXJ0ZXIuVG9TdHJpbmcoaGFzaC5Db21wdXRlSGFzaChFbmNvZGluZy5Vbmljb2RlLkdldEJ5dGVzKGlkZW50aXR5KSkpLlJlcGxhY2UoIi0iLCIiKTsKICAgICAgICAgICAgfQogICAgICAgICAgICAvLyBTeW5jaHJvbml6ZSBlbGV2YXRlZC9uYXRpdmUvUG93ZXJTaGVsbCB3cml0ZXJzIGFjcm9zcyBXaW5kb3dzIHNlc3Npb25zLgogICAgICAgICAgICBNdXRleFNlY3VyaXR5IHNlY3VyaXR5PW5ldyBNdXRleFNlY3VyaXR5KCk7c2VjdXJpdHkuU2V0QWNjZXNzUnVsZVByb3RlY3Rpb24odHJ1ZSxmYWxzZSk7CiAgICAgICAgICAgIGZvcmVhY2goU2VjdXJpdHlJZGVudGlmaWVyIHNpZCBpbiBuZXdbXXtXaW5kb3dzSWRlbnRpdHkuR2V0Q3VycmVudCgpLlVzZXIsbmV3IFNlY3VyaXR5SWRlbnRpZmllcihXZWxsS25vd25TaWRUeXBlLkxvY2FsU3lzdGVtU2lkLG51bGwpLG5ldyBTZWN1cml0eUlkZW50aWZpZXIoV2VsbEtub3duU2lkVHlwZS5CdWlsdGluQWRtaW5pc3RyYXRvcnNTaWQsbnVsbCl9KSB7CiAgICAgICAgICAgICAgICBzZWN1cml0eS5BZGRBY2Nlc3NSdWxlKG5ldyBNdXRleEFjY2Vzc1J1bGUoc2lkLE11dGV4UmlnaHRzLkZ1bGxDb250cm9sLEFjY2Vzc0NvbnRyb2xUeXBlLkFsbG93KSk7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgYm9vbCBjcmVhdGVkOwogICAgICAgICAgICBTeXN0ZW0uVGhyZWFkaW5nLk11dGV4IG11dGV4PW5ldyBTeXN0ZW0uVGhyZWFkaW5nLk11dGV4KGZhbHNlLEAiR2xvYmFsXEtpbG92aWV3LkF0b21pY0ZpbGUuIitkaWdlc3Qsb3V0IGNyZWF0ZWQsc2VjdXJpdHkpOwogICAgICAgICAgICBib29sIGFjcXVpcmVkPWZhbHNlOwogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgdHJ5IHthY3F1aXJlZD1tdXRleC5XYWl0T25lKDUwMDApO30gY2F0Y2goU3lzdGVtLlRocmVhZGluZy5BYmFuZG9uZWRNdXRleEV4Y2VwdGlvbil7YWNxdWlyZWQ9dHJ1ZTt9CiAgICAgICAgICAgICAgICBpZighYWNxdWlyZWQpe3Rocm93IG5ldyBJT0V4Y2VwdGlvbigiQW5vdGhlciB3cml0ZXIgc3RpbGwgb3ducyB0aGUgYXRvbWljIHJlc3VsdCBjb21taXQgYWZ0ZXIgZml2ZSBzZWNvbmRzOiAiK3RhcmdldCk7fQogICAgICAgICAgICAgICAgcmV0dXJuIG5ldyBXcml0ZXJMZWFzZShtdXRleCk7CiAgICAgICAgICAgIH0gY2F0Y2gge2lmKGFjcXVpcmVkKXttdXRleC5SZWxlYXNlTXV0ZXgoKTt9bXV0ZXguRGlzcG9zZSgpO3Rocm93O30KICAgICAgICB9CgogICAgICAgIC8vIFJlbmFtZSBhIGZsdXNoZWQgc2libGluZyBvdmVyIHRoZSBvbGQgZmlsZSBpbiBvbmUgZmlsZXN5c3RlbSBvcGVyYXRpb24uCiAgICAgICAgLy8gUmVwbGFjZUZpbGUncyBBQ0wvc3RyZWFtIG1lcmdlIGNhbiBwYXJ0aWFsbHkgcmVuYW1lIGZpbGVzIG9uIGVycm9ycyAxMTc2LwogICAgICAgIC8vIDExNzcuIERvIG5vdCB1c2UgdGhhdCBvcGVyYXRpb24sIGRlbGV0ZS90cnVuY2F0ZSB0aGUgdGFyZ2V0LCBvciBjb3B5IGl0LgogICAgICAgIHB1YmxpYyBzdGF0aWMgdm9pZCBDb21taXQoc3RyaW5nIHRlbXBvcmFyeSwgc3RyaW5nIHRhcmdldCwgQWN0aW9uIHZhbGlkYXRlKQogICAgICAgIHsKICAgICAgICAgICAgdGVtcG9yYXJ5PVBhdGguR2V0RnVsbFBhdGgodGVtcG9yYXJ5KTt0YXJnZXQ9UGF0aC5HZXRGdWxsUGF0aCh0YXJnZXQpOwogICAgICAgICAgICBpZighU3RyaW5nLkVxdWFscyhQYXRoLkdldERpcmVjdG9yeU5hbWUodGVtcG9yYXJ5KSxQYXRoLkdldERpcmVjdG9yeU5hbWUodGFyZ2V0KSxTdHJpbmdDb21wYXJpc29uLk9yZGluYWxJZ25vcmVDYXNlKQogICAgICAgICAgICAgICAgfHwgU3RyaW5nLkVxdWFscyh0ZW1wb3JhcnksdGFyZ2V0LFN0cmluZ0NvbXBhcmlzb24uT3JkaW5hbElnbm9yZUNhc2UpKSB7CiAgICAgICAgICAgICAgICB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIkF0b21pYyByZXBsYWNlbWVudCByZXF1aXJlcyBhIGRpc3RpbmN0IHN0YWdlZCBmaWxlIGluIHRoZSBkZXN0aW5hdGlvbiBkaXJlY3RvcnkuIik7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgdXNpbmcoQWNxdWlyZSh0YXJnZXQpKSB7CiAgICAgICAgICAgIFN5c3RlbS5EaWFnbm9zdGljcy5TdG9wd2F0Y2ggZWxhcHNlZCA9IFN5c3RlbS5EaWFnbm9zdGljcy5TdG9wd2F0Y2guU3RhcnROZXcoKTsKICAgICAgICAgICAgaW50IGRlbGF5ID0gMjU7CiAgICAgICAgICAgIHdoaWxlICh0cnVlKSB7CiAgICAgICAgICAgICAgICBpZiAodmFsaWRhdGUgIT0gbnVsbCkgeyB2YWxpZGF0ZSgpOyB9CiAgICAgICAgICAgICAgICBTYWZlUGF0aC5DaGVjayh0ZW1wb3JhcnkpO1NhZmVQYXRoLkNoZWNrUGFyZW50KHRhcmdldCk7CiAgICAgICAgICAgICAgICBpZihGaWxlLkV4aXN0cyh0YXJnZXQpKSB7CiAgICAgICAgICAgICAgICAgICAgLy8gQSBzdGFnZWQgZmlsZSBpbmhlcml0cyB0aGUgZGlyZWN0b3J5IEFDTC4gUHJlc2VydmUgYW55CiAgICAgICAgICAgICAgICAgICAgLy8gc3RyaWN0ZXIgYWNjZXNzIEFDTCBvbiB0aGUgZXhpc3RpbmcgcmVzdWx0IGJlZm9yZSByZW5hbWUuCiAgICAgICAgICAgICAgICAgICAgRmlsZVNlY3VyaXR5IGFjY2Vzcz1uZXcgRmlsZVNlY3VyaXR5KCk7CiAgICAgICAgICAgICAgICAgICAgYWNjZXNzLlNldFNlY3VyaXR5RGVzY3JpcHRvckJpbmFyeUZvcm0oRmlsZS5HZXRBY2Nlc3NDb250cm9sKHRhcmdldCxBY2Nlc3NDb250cm9sU2VjdGlvbnMuQWNjZXNzKS5HZXRTZWN1cml0eURlc2NyaXB0b3JCaW5hcnlGb3JtKCksQWNjZXNzQ29udHJvbFNlY3Rpb25zLkFjY2Vzcyk7CiAgICAgICAgICAgICAgICAgICAgRmlsZS5TZXRBY2Nlc3NDb250cm9sKHRlbXBvcmFyeSxhY2Nlc3MpOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgICAgICBSZW5hbWVPdmVyRXhpc3RpbmcodGVtcG9yYXJ5LHRhcmdldCk7CiAgICAgICAgICAgICAgICAgICAgcmV0dXJuOwogICAgICAgICAgICAgICAgfSBjYXRjaCAoSU9FeGNlcHRpb24gZXhjZXB0aW9uKSB7CiAgICAgICAgICAgICAgICAgICAgaW50IGNvZGUgPSBleGNlcHRpb24uSFJlc3VsdCAmIDB4ZmZmZjsKICAgICAgICAgICAgICAgICAgICBpZiAoY29kZSAhPSAzMiAmJiBjb2RlICE9IDMzICYmICEoY29kZT09NSAmJiAoRGVsZXRlU2hhcmluZ0NvbmZsaWN0KHRhcmdldCkgfHwgRGVsZXRlU2hhcmluZ0NvbmZsaWN0KHRlbXBvcmFyeSkpKSkgeyB0aHJvdzsgfQogICAgICAgICAgICAgICAgICAgIGlmIChlbGFwc2VkLkVsYXBzZWRNaWxsaXNlY29uZHMgPj0gNTAwMCkgewogICAgICAgICAgICAgICAgICAgICAgICB0aHJvdyBuZXcgSU9FeGNlcHRpb24oIkNvdWxkIG5vdCBhdG9taWNhbGx5IHNhdmUgIiArIHRhcmdldAogICAgICAgICAgICAgICAgICAgICAgICAgICAgKyAiIGJlY2F1c2UgV2luZG93cyBrZXB0IHJlcG9ydGluZyBmaWxlIHNoYXJpbmcgY29uZmxpY3RzIGZvciBmaXZlIHNlY29uZHMuIFRoZSBwcmV2aW91cyBmaWxlIHdhcyByZXRhaW5lZC4gSW5zcGVjdCB0aGUgb3BlcmF0aW9uIGpvdXJuYWwgYW5kIHdyaXRlciBkaWFnbm9zdGljcyBiZWZvcmUgcmV0cnlpbmcuIiwgZXhjZXB0aW9uKTsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgU3lzdGVtLlRocmVhZGluZy5UaHJlYWQuU2xlZXAoTWF0aC5NYXgoMSwgTWF0aC5NaW4oZGVsYXksIChpbnQpKDUwMDAgLSBlbGFwc2VkLkVsYXBzZWRNaWxsaXNlY29uZHMpKSkpOwogICAgICAgICAgICAgICAgICAgIGRlbGF5ID0gTWF0aC5NaW4oMjUwLCBkZWxheSAqIDIpOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICB9CiAgICAgICAgICAgIH0KICAgICAgICB9CiAgICB9CgogICAgcHVibGljIHN0YXRpYyBjbGFzcyBDb25maWd1cmF0aW9uTXNpCiAgICB7CiAgICAgICAgW0RsbEltcG9ydCgibXNpLmRsbCIsQ2hhclNldD1DaGFyU2V0LlVuaWNvZGUpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gdWludCBNc2lFbnVtUmVsYXRlZFByb2R1Y3RzKHN0cmluZyB1cGdyYWRlLHVpbnQgcmVzZXJ2ZWQsdWludCBpbmRleCxTdHJpbmdCdWlsZGVyIHByb2R1Y3QpOwogICAgICAgIFtEbGxJbXBvcnQoIm1zaS5kbGwiLENoYXJTZXQ9Q2hhclNldC5Vbmljb2RlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGludCBNc2lRdWVyeVByb2R1Y3RTdGF0ZShzdHJpbmcgcHJvZHVjdCk7CiAgICAgICAgcHVibGljIHN0YXRpYyBzdHJpbmdbXSBJbnN0YWxsZWRQcm9kdWN0cygpIHsKICAgICAgICAgICAgTGlzdDxzdHJpbmc+IHByb2R1Y3RzPW5ldyBMaXN0PHN0cmluZz4oKTsKICAgICAgICAgICAgZm9yKHVpbnQgaW5kZXg9MDs7aW5kZXgrKykgewogICAgICAgICAgICAgICAgU3RyaW5nQnVpbGRlciBwcm9kdWN0PW5ldyBTdHJpbmdCdWlsZGVyKDM5KTt1aW50IGNvZGU9TXNpRW51bVJlbGF0ZWRQcm9kdWN0cygie0VCMTVGNzlELTY1OTgtNEFCMS04RTM5LUI4RDkyN0IwNTg2Mn0iLDAsaW5kZXgscHJvZHVjdCk7CiAgICAgICAgICAgICAgICBpZihjb2RlPT0yNTkpe2JyZWFrO31pZihjb2RlIT0wKXt0aHJvdyBuZXcgU3lzdGVtLkNvbXBvbmVudE1vZGVsLldpbjMyRXhjZXB0aW9uKChpbnQpY29kZSk7fQogICAgICAgICAgICAgICAgaWYoTXNpUXVlcnlQcm9kdWN0U3RhdGUocHJvZHVjdC5Ub1N0cmluZygpKT09NSl7cHJvZHVjdHMuQWRkKHByb2R1Y3QuVG9TdHJpbmcoKSk7fQogICAgICAgICAgICB9CiAgICAgICAgICAgIHJldHVybiBwcm9kdWN0cy5Ub0FycmF5KCk7CiAgICAgICAgfQogICAgfQoKICAgIHB1YmxpYyBzdGF0aWMgY2xhc3MgU2FmZVBhdGgKICAgIHsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLCBDaGFyU2V0PUNoYXJTZXQuVW5pY29kZSwgU2V0TGFzdEVycm9yPXRydWUpXQogICAgICAgIHByaXZhdGUgc3RhdGljIGV4dGVybiBTYWZlRmlsZUhhbmRsZSBDcmVhdGVGaWxlKHN0cmluZyBwYXRoLHVpbnQgYWNjZXNzLHVpbnQgc2hhcmUsSW50UHRyIHNlY3VyaXR5LHVpbnQgY3JlYXRpb24sdWludCBmbGFncyxJbnRQdHIgdGVtcGxhdGUpOwogICAgICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsIFNldExhc3RFcnJvcj10cnVlKV0KICAgICAgICBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBEZXZpY2VJb0NvbnRyb2woU2FmZUZpbGVIYW5kbGUgZmlsZSx1aW50IGNvZGUsSW50UHRyIGlucHV0LGludCBpbnB1dFNpemUsYnl0ZVtdIG91dHB1dCxpbnQgb3V0cHV0U2l6ZSxvdXQgaW50IHJldHVybmVkLEludFB0ciBvdmVybGFwKTsKICAgICAgICBbU3RydWN0TGF5b3V0KExheW91dEtpbmQuU2VxdWVudGlhbCldIHByaXZhdGUgc3RydWN0IEZpbGVJbmZvIHsKICAgICAgICAgICAgaW50ZXJuYWwgdWludCBBdHRyaWJ1dGVzO2ludGVybmFsIFN5c3RlbS5SdW50aW1lLkludGVyb3BTZXJ2aWNlcy5Db21UeXBlcy5GSUxFVElNRSBDcmVhdGlvbixBY2Nlc3MsV3JpdGU7CiAgICAgICAgICAgIGludGVybmFsIHVpbnQgVm9sdW1lU2VyaWFsLFNpemVIaWdoLFNpemVMb3csTGlua3MsSWRIaWdoLElkTG93OwogICAgICAgIH0KICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgR2V0RmlsZUluZm9ybWF0aW9uQnlIYW5kbGUoU2FmZUZpbGVIYW5kbGUgZmlsZSxvdXQgRmlsZUluZm8gaW5mbyk7CiAgICAgICAgcHVibGljIHN0YXRpYyBib29sIElzQWxsb3dlZENsb3VkVGFnKHVpbnQgdGFnKSB7IHJldHVybiAodGFnICYgMHhmZmZmMGZmZlUpID09IDB4OTAwMDAwMWFVOyB9CiAgICAgICAgcHVibGljIHN0YXRpYyB2b2lkIENoZWNrUGFyZW50KHN0cmluZyBwYXRoKSB7CiAgICAgICAgICAgIHBhdGg9UGF0aC5HZXRGdWxsUGF0aChwYXRoKTsKICAgICAgICAgICAgd2hpbGUoIURpcmVjdG9yeS5FeGlzdHMocGF0aCkgJiYgIUZpbGUuRXhpc3RzKHBhdGgpKXtwYXRoPVBhdGguR2V0RGlyZWN0b3J5TmFtZShwYXRoKTtpZihTdHJpbmcuSXNOdWxsT3JFbXB0eShwYXRoKSl7dGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJObyBleGlzdGluZyBwYXJlbnQgZGlyZWN0b3J5LiIpO319CiAgICAgICAgICAgIENoZWNrKHBhdGgpOwogICAgICAgIH0KICAgICAgICBwdWJsaWMgc3RhdGljIHZvaWQgQ2hlY2soc3RyaW5nIHBhdGgpCiAgICAgICAgewogICAgICAgICAgICBwYXRoPVBhdGguR2V0RnVsbFBhdGgocGF0aCk7CiAgICAgICAgICAgIHdoaWxlKCFTdHJpbmcuSXNOdWxsT3JFbXB0eShwYXRoKSkgewogICAgICAgICAgICAgICAgRmlsZUF0dHJpYnV0ZXMgYXR0cmlidXRlcz1GaWxlLkdldEF0dHJpYnV0ZXMocGF0aCk7CiAgICAgICAgICAgICAgICBpZigoYXR0cmlidXRlcyAmIEZpbGVBdHRyaWJ1dGVzLkRpcmVjdG9yeSk9PTApIHsKICAgICAgICAgICAgICAgICAgICB1c2luZyhTYWZlRmlsZUhhbmRsZSBoYW5kbGU9Q3JlYXRlRmlsZShwYXRoLDAsNyxJbnRQdHIuWmVybywzLDB4MDAyMDAwMDAsSW50UHRyLlplcm8pKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIEZpbGVJbmZvIGluZm87CiAgICAgICAgICAgICAgICAgICAgICAgIGlmKGhhbmRsZS5Jc0ludmFsaWQgfHwgIUdldEZpbGVJbmZvcm1hdGlvbkJ5SGFuZGxlKGhhbmRsZSxvdXQgaW5mbykgfHwgaW5mby5MaW5rcyE9MSl7dGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJMaWZlY3ljbGUvbWFpbnRlbmFuY2UgZmlsZXMgY2Fubm90IGhhdmUgbXVsdGlwbGUgaGFyZCBsaW5rczogIitwYXRoKTt9CiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgaWYgKChhdHRyaWJ1dGVzICYgRmlsZUF0dHJpYnV0ZXMuUmVwYXJzZVBvaW50KSAhPSAwKSB7CiAgICAgICAgICAgICAgICAgICAgdXNpbmcoU2FmZUZpbGVIYW5kbGUgaGFuZGxlPUNyZWF0ZUZpbGUocGF0aCwwLDcsSW50UHRyLlplcm8sMywweDAyMjAwMDAwLEludFB0ci5aZXJvKSkgewogICAgICAgICAgICAgICAgICAgICAgICBieXRlW10gZGF0YT1uZXcgYnl0ZVsxNjM4NF07IGludCBjb3VudDsKICAgICAgICAgICAgICAgICAgICAgICAgaWYoaGFuZGxlLklzSW52YWxpZCB8fCAhRGV2aWNlSW9Db250cm9sKGhhbmRsZSwweDkwMGE4LEludFB0ci5aZXJvLDAsZGF0YSxkYXRhLkxlbmd0aCxvdXQgY291bnQsSW50UHRyLlplcm8pCiAgICAgICAgICAgICAgICAgICAgICAgICAgICB8fCBjb3VudDw4IHx8ICFJc0FsbG93ZWRDbG91ZFRhZyhCaXRDb252ZXJ0ZXIuVG9VSW50MzIoZGF0YSwwKSkpIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHRocm93IG5ldyBJbnZhbGlkRGF0YUV4Y2VwdGlvbigiUGF0aCB0cmF2ZXJzZXMgYW4gdW5zdXBwb3J0ZWQgbGluayBvciByZXBhcnNlIHBvaW50OiAiICsgcGF0aCk7CiAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBwYXRoPVBhdGguR2V0RGlyZWN0b3J5TmFtZShwYXRoKTsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgIH0KCiAgICBwdWJsaWMgc2VhbGVkIGNsYXNzIE5hdGl2ZVByb2Nlc3MgOiBJRGlzcG9zYWJsZQogICAgewogICAgICAgIHByaXZhdGUgcmVhZG9ubHkgU3lzdGVtLkRpYWdub3N0aWNzLlByb2Nlc3MgcHJvY2VzczsKICAgICAgICBwcml2YXRlIHJlYWRvbmx5IFN5c3RlbS5Db2xsZWN0aW9ucy5Db25jdXJyZW50LkNvbmN1cnJlbnRRdWV1ZTxzdHJpbmc+IGxpbmVzID0gbmV3IFN5c3RlbS5Db2xsZWN0aW9ucy5Db25jdXJyZW50LkNvbmN1cnJlbnRRdWV1ZTxzdHJpbmc+KCk7CiAgICAgICAgcHJpdmF0ZSBsb25nIGxhc3RPdXRwdXQgPSBEYXRlVGltZS5VdGNOb3cuVGlja3M7CiAgICAgICAgcHVibGljIERhdGVUaW1lIFN0YXJ0ZWRVdGMgeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIERhdGVUaW1lIExhc3RPdXRwdXRVdGMgeyBnZXQgeyByZXR1cm4gbmV3IERhdGVUaW1lKFN5c3RlbS5UaHJlYWRpbmcuSW50ZXJsb2NrZWQuUmVhZChyZWYgbGFzdE91dHB1dCksIERhdGVUaW1lS2luZC5VdGMpOyB9IH0KICAgICAgICBwdWJsaWMgYm9vbCBIYXNFeGl0ZWQgeyBnZXQgeyByZXR1cm4gcHJvY2Vzcy5IYXNFeGl0ZWQ7IH0gfQogICAgICAgIHB1YmxpYyBpbnQgRXhpdENvZGUgeyBnZXQgeyBwcm9jZXNzLldhaXRGb3JFeGl0KCk7IHJldHVybiBwcm9jZXNzLkV4aXRDb2RlOyB9IH0KICAgICAgICBwdWJsaWMgaW50IElkIHsgZ2V0IHsgcmV0dXJuIHByb2Nlc3MuSWQ7IH0gfQogICAgICAgIHB1YmxpYyBOYXRpdmVQcm9jZXNzKHN0cmluZyBmaWxlLCBzdHJpbmdbXSBhcmd1bWVudHMpCiAgICAgICAgewogICAgICAgICAgICBwcm9jZXNzID0gbmV3IFN5c3RlbS5EaWFnbm9zdGljcy5Qcm9jZXNzKCk7CiAgICAgICAgICAgIExpc3Q8c3RyaW5nPiBxdW90ZWQgPSBuZXcgTGlzdDxzdHJpbmc+KCk7CiAgICAgICAgICAgIGZvcmVhY2ggKHN0cmluZyBhcmd1bWVudCBpbiBhcmd1bWVudHMpIHsgcXVvdGVkLkFkZChRdW90ZShhcmd1bWVudCkpOyB9CiAgICAgICAgICAgIHByb2Nlc3MuU3RhcnRJbmZvID0gbmV3IFN5c3RlbS5EaWFnbm9zdGljcy5Qcm9jZXNzU3RhcnRJbmZvKGZpbGUsIFN0cmluZy5Kb2luKCIgIiwgcXVvdGVkKSkgewogICAgICAgICAgICAgICAgVXNlU2hlbGxFeGVjdXRlID0gZmFsc2UsIENyZWF0ZU5vV2luZG93ID0gdHJ1ZSwgUmVkaXJlY3RTdGFuZGFyZE91dHB1dCA9IHRydWUsIFJlZGlyZWN0U3RhbmRhcmRFcnJvciA9IHRydWUsIFJlZGlyZWN0U3RhbmRhcmRJbnB1dCA9IHRydWUgfTsKICAgICAgICAgICAgcHJvY2Vzcy5PdXRwdXREYXRhUmVjZWl2ZWQgKz0gUmVjZWl2ZTsgcHJvY2Vzcy5FcnJvckRhdGFSZWNlaXZlZCArPSBSZWNlaXZlOwogICAgICAgICAgICBpZiAoIXByb2Nlc3MuU3RhcnQoKSkgeyB0aHJvdyBuZXcgSU9FeGNlcHRpb24oIldpbmRvd3MgZGlkIG5vdCBzdGFydCB0aGUgcmVxdWVzdGVkIGNvbW1hbmQuIik7IH0KICAgICAgICAgICAgU3RhcnRlZFV0YyA9IHByb2Nlc3MuU3RhcnRUaW1lLlRvVW5pdmVyc2FsVGltZSgpOyBwcm9jZXNzLlN0YW5kYXJkSW5wdXQuQ2xvc2UoKTsKICAgICAgICAgICAgcHJvY2Vzcy5CZWdpbk91dHB1dFJlYWRMaW5lKCk7IHByb2Nlc3MuQmVnaW5FcnJvclJlYWRMaW5lKCk7CiAgICAgICAgfQogICAgICAgIHByaXZhdGUgdm9pZCBSZWNlaXZlKG9iamVjdCBzZW5kZXIsIFN5c3RlbS5EaWFnbm9zdGljcy5EYXRhUmVjZWl2ZWRFdmVudEFyZ3MgYXJncykgewogICAgICAgICAgICBpZiAoYXJncy5EYXRhICE9IG51bGwpIHsgbGluZXMuRW5xdWV1ZShhcmdzLkRhdGEuUmVwbGFjZSgiXDAiLCAiIikpOyBTeXN0ZW0uVGhyZWFkaW5nLkludGVybG9ja2VkLkV4Y2hhbmdlKHJlZiBsYXN0T3V0cHV0LCBEYXRlVGltZS5VdGNOb3cuVGlja3MpOyB9CiAgICAgICAgfQogICAgICAgIHB1YmxpYyBzdHJpbmdbXSBEcmFpbigpIHsgTGlzdDxzdHJpbmc+IHJlc3VsdCA9IG5ldyBMaXN0PHN0cmluZz4oKTsgc3RyaW5nIGxpbmU7IHdoaWxlKGxpbmVzLlRyeURlcXVldWUob3V0IGxpbmUpKSB7IHJlc3VsdC5BZGQobGluZSk7IH0gcmV0dXJuIHJlc3VsdC5Ub0FycmF5KCk7IH0KICAgICAgICBwdWJsaWMgdm9pZCBTdG9wUHJvYmUoKSB7IGlmICghcHJvY2Vzcy5IYXNFeGl0ZWQpIHsgcHJvY2Vzcy5LaWxsKCk7IHByb2Nlc3MuV2FpdEZvckV4aXQoNTAwMCk7IH0gfQogICAgICAgIHB1YmxpYyB2b2lkIERpc3Bvc2UoKSB7IHByb2Nlc3MuRGlzcG9zZSgpOyB9CiAgICAgICAgcHVibGljIHN0YXRpYyBzdHJpbmcgUXVvdGUoc3RyaW5nIHZhbHVlKSB7CiAgICAgICAgICAgIC8vIFdTTCBkaXNwYXRjaGVzIGl0cyBsZWFkaW5nIHN3aXRjaGVzIGZyb20gcmF3IGNvbW1hbmQtbGluZSB0b2tlbnM7CiAgICAgICAgICAgIC8vIHdyYXBwaW5nIC0taW5zdGFsbC8tLXN0YXR1cyBpbiBxdW90ZXMgcHJldmVudHMgdGhlaXIgcmVjb2duaXRpb24uCiAgICAgICAgICAgIC8vIFF1b3RlIG9ubHkgd2hlbiBuZWVkZWQsIHJldGFpbmluZyBXaW5kb3dzIGVzY2FwaW5nIGZvciBhcmd1bWVudCBkYXRhLgogICAgICAgICAgICBpZiAoIVN0cmluZy5Jc051bGxPckVtcHR5KHZhbHVlKSkgewogICAgICAgICAgICAgICAgYm9vbCByZXF1aXJlZCA9IGZhbHNlOwogICAgICAgICAgICAgICAgZm9yZWFjaChjaGFyIGMgaW4gdmFsdWUpIHsgaWYgKENoYXIuSXNXaGl0ZVNwYWNlKGMpIHx8IGMgPT0gJyInKSB7IHJlcXVpcmVkID0gdHJ1ZTsgYnJlYWs7IH0gfQogICAgICAgICAgICAgICAgaWYgKCFyZXF1aXJlZCkgeyByZXR1cm4gdmFsdWU7IH0KICAgICAgICAgICAgfQogICAgICAgICAgICBTdHJpbmdCdWlsZGVyIHJlc3VsdCA9IG5ldyBTdHJpbmdCdWlsZGVyKCJcIiIpOyBpbnQgc2xhc2hlcyA9IDA7CiAgICAgICAgICAgIGZvcmVhY2goY2hhciBjIGluIHZhbHVlID8/ICIiKSB7CiAgICAgICAgICAgICAgICBpZihjID09ICdcXCcpIHsgc2xhc2hlcysrOyBjb250aW51ZTsgfQogICAgICAgICAgICAgICAgaWYoYyA9PSAnIicpIHsgcmVzdWx0LkFwcGVuZCgnXFwnLCBzbGFzaGVzICogMiArIDEpLkFwcGVuZChjKTsgfQogICAgICAgICAgICAgICAgZWxzZSB7IHJlc3VsdC5BcHBlbmQoJ1xcJywgc2xhc2hlcykuQXBwZW5kKGMpOyB9CiAgICAgICAgICAgICAgICBzbGFzaGVzID0gMDsKICAgICAgICAgICAgfQogICAgICAgICAgICByZXR1cm4gcmVzdWx0LkFwcGVuZCgnXFwnLCBzbGFzaGVzICogMikuQXBwZW5kKCciJykuVG9TdHJpbmcoKTsKICAgICAgICB9CiAgICB9CgogICAgLy8gVGhlIFdpbmRvd3MgaW5ib3ggV1NMIGJvb3RzdHJhcCBuZWVkcyBjb25zb2xlIGhhbmRsZXMuIEtlZXAgdGhpcyBwYXRoCiAgICAvLyBzZXBhcmF0ZSBmcm9tIHJlZGlyZWN0ZWQgcHJvYmVzOiBpdCBoYXMgYSBoaWRkZW4gY29uc29sZS9wcml2YXRlIGRlc2t0b3AKICAgIC8vIGFuZCBhIGpvYiBhc3NpZ25lZCBiZWZvcmUgaXRzIGZpcnN0IGluc3RydWN0aW9uLiBBIHJvb3QgZXhpdCBpcyBub3QgYQogICAgLy8gY29tcGxldGVkIG9wZXJhdGlvbiB3aGlsZSBkZXNjZW5kYW50cyByZW1haW4uIENsb3Npbmcgb3VyIGhhbmRsZXMgbmV2ZXIKICAgIC8vIHRlcm1pbmF0ZXMgc2VydmljaW5nLiBBbiBpbmRlcGVuZGVudCBob3N0IHJldGFpbnMgdGhpcyBpbnN0YW5jZSB1bnRpbCB0aGUKICAgIC8vIHRyZWUgZXhpdHMgYW5kIHdyaXRlcyBhIGR1cmFibGUgY29tcGxldGlvbiByZWNlaXB0IGZvciBsYXRlciByZWNvdmVyeS4KICAgIHB1YmxpYyBzZWFsZWQgY2xhc3MgQ29uc29sZUJvb3RzdHJhcFByb2Nlc3MgOiBJRGlzcG9zYWJsZQogICAgewogICAgICAgIHByaXZhdGUgSW50UHRyIGRlc2t0b3AsIGpvYiwgcHJvY2VzczsKICAgICAgICBwdWJsaWMgaW50IElkIHsgZ2V0OyBwcml2YXRlIHNldDsgfQogICAgICAgIHB1YmxpYyBEYXRlVGltZSBTdGFydGVkVXRjIHsgZ2V0OyBwcml2YXRlIHNldDsgfQogICAgICAgIHB1YmxpYyBzdHJpbmcgSm9iTmFtZSB7IGdldDsgcHJpdmF0ZSBzZXQ7IH0KICAgICAgICBwcml2YXRlIGNvbnN0IHN0cmluZyBKb2JQcmVmaXggPSAiR2xvYmFsXFxLaWxvdmlld1dzbEJvb3RzdHJhcF8iOwoKICAgICAgICBwdWJsaWMgQ29uc29sZUJvb3RzdHJhcFByb2Nlc3Moc3RyaW5nIGZpbGUsIHN0cmluZ1tdIGFyZ3VtZW50cywgc3RyaW5nIGpvYk5hbWUpCiAgICAgICAgewogICAgICAgICAgICBWYWxpZGF0ZUpvYk5hbWUoam9iTmFtZSk7CiAgICAgICAgICAgIEpvYk5hbWUgPSBqb2JOYW1lOwogICAgICAgICAgICBQcm9jZXNzSW5mb3JtYXRpb24gY2hpbGQgPSBuZXcgUHJvY2Vzc0luZm9ybWF0aW9uKCk7CiAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICBqb2IgPSBDcmVhdGVKb2JPYmplY3QoSW50UHRyLlplcm8sIGpvYk5hbWUpOwogICAgICAgICAgICAgICAgaW50IGVycm9yID0gTWFyc2hhbC5HZXRMYXN0V2luMzJFcnJvcigpOwogICAgICAgICAgICAgICAgaWYgKGpvYiA9PSBJbnRQdHIuWmVybykgeyB0aHJvdyBuZXcgU3lzdGVtLkNvbXBvbmVudE1vZGVsLldpbjMyRXhjZXB0aW9uKGVycm9yKTsgfQogICAgICAgICAgICAgICAgaWYgKGVycm9yID09IDE4MykgeyB0aHJvdyBuZXcgSU9FeGNlcHRpb24oIlRoZSBib290c3RyYXAgam9iIGFscmVhZHkgZXhpc3RzLiIpOyB9CiAgICAgICAgICAgICAgICBzdHJpbmcgZGVza3RvcE5hbWUgPSAiS2lsb3ZpZXdXc2xfIiArIEd1aWQuTmV3R3VpZCgpLlRvU3RyaW5nKCJOIik7CiAgICAgICAgICAgICAgICBkZXNrdG9wID0gQ3JlYXRlRGVza3RvcChkZXNrdG9wTmFtZSwgbnVsbCwgSW50UHRyLlplcm8sIDAsIDB4MDFGRiwgSW50UHRyLlplcm8pOwogICAgICAgICAgICAgICAgaWYgKGRlc2t0b3AgPT0gSW50UHRyLlplcm8pIHsgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOyB9CiAgICAgICAgICAgICAgICBMaXN0PHN0cmluZz4gcXVvdGVkID0gbmV3IExpc3Q8c3RyaW5nPigpOwogICAgICAgICAgICAgICAgZm9yZWFjaCAoc3RyaW5nIGFyZ3VtZW50IGluIGFyZ3VtZW50cykgeyBxdW90ZWQuQWRkKE5hdGl2ZVByb2Nlc3MuUXVvdGUoYXJndW1lbnQpKTsgfQogICAgICAgICAgICAgICAgU3RhcnR1cEluZm9ybWF0aW9uIHN0YXJ0dXAgPSBuZXcgU3RhcnR1cEluZm9ybWF0aW9uKCk7CiAgICAgICAgICAgICAgICBzdGFydHVwLmNiID0gTWFyc2hhbC5TaXplT2Yoc3RhcnR1cCk7IHN0YXJ0dXAubHBEZXNrdG9wID0gZGVza3RvcE5hbWU7CiAgICAgICAgICAgICAgICBzdGFydHVwLmR3RmxhZ3MgPSAxOyBzdGFydHVwLndTaG93V2luZG93ID0gMDsgLy8gU1RBUlRGX1VTRVNIT1dXSU5ET1cgLyBTV19ISURFCiAgICAgICAgICAgICAgICAvLyBObyBTVEFSVEZfVVNFU1RESEFORExFUzogV2luZG93cyBzdXBwbGllcyB0aGUgbmV3IGNvbnNvbGUncwogICAgICAgICAgICAgICAgLy8gaW5wdXQvb3V0cHV0IGhhbmRsZXMsIHJhdGhlciB0aGFuIGluaGVyaXRpbmcgY2xvc2VkIHBpcGVzLgogICAgICAgICAgICAgICAgaWYgKCFDcmVhdGVQcm9jZXNzKGZpbGUsIG5ldyBTdHJpbmdCdWlsZGVyKE5hdGl2ZVByb2Nlc3MuUXVvdGUoZmlsZSkgKyAiICIgKyBTdHJpbmcuSm9pbigiICIsIHF1b3RlZCkpLAogICAgICAgICAgICAgICAgICAgIEludFB0ci5aZXJvLCBJbnRQdHIuWmVybywgZmFsc2UsIDB4MTQsIEludFB0ci5aZXJvLCBQYXRoLkdldERpcmVjdG9yeU5hbWUoZmlsZSksIHJlZiBzdGFydHVwLCBvdXQgY2hpbGQpKSB7CiAgICAgICAgICAgICAgICAgICAgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgcHJvY2VzcyA9IGNoaWxkLmhQcm9jZXNzOyBJZCA9IHVuY2hlY2tlZCgoaW50KWNoaWxkLmR3UHJvY2Vzc0lkKTsKICAgICAgICAgICAgICAgIGlmICghQXNzaWduUHJvY2Vzc1RvSm9iT2JqZWN0KGpvYiwgcHJvY2VzcykpIHsgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOyB9CiAgICAgICAgICAgICAgICBsb25nIGNyZWF0aW9uLCBleGl0LCBrZXJuZWwsIHVzZXI7CiAgICAgICAgICAgICAgICBpZiAoIUdldFByb2Nlc3NUaW1lcyhwcm9jZXNzLCBvdXQgY3JlYXRpb24sIG91dCBleGl0LCBvdXQga2VybmVsLCBvdXQgdXNlcikpIHsgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOyB9CiAgICAgICAgICAgICAgICBTdGFydGVkVXRjID0gRGF0ZVRpbWUuRnJvbUZpbGVUaW1lVXRjKGNyZWF0aW9uKTsKICAgICAgICAgICAgICAgIGlmIChSZXN1bWVUaHJlYWQoY2hpbGQuaFRocmVhZCkgPT0gVUludDMyLk1heFZhbHVlKSB7IHRocm93IG5ldyBTeXN0ZW0uQ29tcG9uZW50TW9kZWwuV2luMzJFeGNlcHRpb24oKTsgfQogICAgICAgICAgICB9IGNhdGNoIHsKICAgICAgICAgICAgICAgIC8vIENvbnN0cnVjdG9yIGZhaWx1cmVzIG9jY3VyIGJlZm9yZSBleGVjdXRpb247IG9ubHkgb3VyIHN1c3BlbmRlZAogICAgICAgICAgICAgICAgLy8gY2hpbGQgaXMgdGVybWluYXRlZC4gUnVubmluZyBzZXJ2aWNpbmcgaXMgbmV2ZXIga2lsbGVkIGhlcmUuCiAgICAgICAgICAgICAgICBpZiAoY2hpbGQuaFByb2Nlc3MgIT0gSW50UHRyLlplcm8pIHsgVGVybWluYXRlUHJvY2VzcyhjaGlsZC5oUHJvY2VzcywgMSk7IH0KICAgICAgICAgICAgICAgIERpc3Bvc2UoKTsgdGhyb3c7CiAgICAgICAgICAgIH0gZmluYWxseSB7IGlmIChjaGlsZC5oVGhyZWFkICE9IEludFB0ci5aZXJvKSB7IENsb3NlSGFuZGxlKGNoaWxkLmhUaHJlYWQpOyB9IH0KICAgICAgICB9CiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBWYWxpZGF0ZUpvYk5hbWUoc3RyaW5nIG5hbWUpIHsKICAgICAgICAgICAgR3VpZCBpZDsKICAgICAgICAgICAgaWYgKG5hbWUgPT0gbnVsbCB8fCAhbmFtZS5TdGFydHNXaXRoKEpvYlByZWZpeCwgU3RyaW5nQ29tcGFyaXNvbi5PcmRpbmFsKSB8fAogICAgICAgICAgICAgICAgIUd1aWQuVHJ5UGFyc2VFeGFjdChuYW1lLlN1YnN0cmluZyhKb2JQcmVmaXguTGVuZ3RoKSwgIk4iLCBvdXQgaWQpKSB7CiAgICAgICAgICAgICAgICB0aHJvdyBuZXcgQXJndW1lbnRFeGNlcHRpb24oIkludmFsaWQgYm9vdHN0cmFwIGpvYiBuYW1lLiIpOwogICAgICAgICAgICB9CiAgICAgICAgfQogICAgICAgIHB1YmxpYyBzdGF0aWMgYm9vbCBJc0pvYkFjdGl2ZShzdHJpbmcgbmFtZSkgewogICAgICAgICAgICBWYWxpZGF0ZUpvYk5hbWUobmFtZSk7CiAgICAgICAgICAgIEludFB0ciBoYW5kbGUgPSBPcGVuSm9iT2JqZWN0KDQsIGZhbHNlLCBuYW1lKTsgLy8gSk9CX09CSkVDVF9RVUVSWQogICAgICAgICAgICBpZiAoaGFuZGxlID09IEludFB0ci5aZXJvKSB7CiAgICAgICAgICAgICAgICBpbnQgZXJyb3IgPSBNYXJzaGFsLkdldExhc3RXaW4zMkVycm9yKCk7CiAgICAgICAgICAgICAgICBpZiAoZXJyb3IgPT0gMikgeyByZXR1cm4gZmFsc2U7IH0KICAgICAgICAgICAgICAgIHRocm93IG5ldyBTeXN0ZW0uQ29tcG9uZW50TW9kZWwuV2luMzJFeGNlcHRpb24oZXJyb3IpOwogICAgICAgICAgICB9CiAgICAgICAgICAgIHRyeSB7IHJldHVybiBBY3RpdmVDb3VudChoYW5kbGUpICE9IDA7IH0gZmluYWxseSB7IENsb3NlSGFuZGxlKGhhbmRsZSk7IH0KICAgICAgICB9CiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgdWludCBBY3RpdmVDb3VudChJbnRQdHIgaGFuZGxlKSB7CiAgICAgICAgICAgIEFjY291bnRpbmdJbmZvcm1hdGlvbiBpbmZvOwogICAgICAgICAgICBpZiAoIVF1ZXJ5SW5mb3JtYXRpb25Kb2JPYmplY3QoaGFuZGxlLCAxLCBvdXQgaW5mbywgKHVpbnQpTWFyc2hhbC5TaXplT2YodHlwZW9mKEFjY291bnRpbmdJbmZvcm1hdGlvbikpLCBJbnRQdHIuWmVybykpIHsKICAgICAgICAgICAgICAgIHRocm93IG5ldyBTeXN0ZW0uQ29tcG9uZW50TW9kZWwuV2luMzJFeGNlcHRpb24oKTsKICAgICAgICAgICAgfQogICAgICAgICAgICByZXR1cm4gaW5mby5BY3RpdmVQcm9jZXNzZXM7CiAgICAgICAgfQogICAgICAgIHB1YmxpYyBib29sIEhhc0V4aXRlZCB7IGdldCB7CiAgICAgICAgICAgIHVpbnQgc3RhdHVzID0gV2FpdEZvclNpbmdsZU9iamVjdChwcm9jZXNzLCAwKTsKICAgICAgICAgICAgaWYgKHN0YXR1cyA9PSBVSW50MzIuTWF4VmFsdWUpIHsgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOyB9CiAgICAgICAgICAgIHJldHVybiBzdGF0dXMgPT0gMCAmJiBBY3RpdmVDb3VudChqb2IpID09IDA7CiAgICAgICAgfSB9CiAgICAgICAgcHVibGljIGludCBFeGl0Q29kZSB7IGdldCB7CiAgICAgICAgICAgIGlmICghSGFzRXhpdGVkKSB7IHRocm93IG5ldyBJbnZhbGlkT3BlcmF0aW9uRXhjZXB0aW9uKCJUaGUgV1NMIGJvb3RzdHJhcCBvciBhIGRlc2NlbmRhbnQgaXMgc3RpbGwgcnVubmluZy4iKTsgfQogICAgICAgICAgICB1aW50IGNvZGU7CiAgICAgICAgICAgIGlmICghR2V0RXhpdENvZGVQcm9jZXNzKHByb2Nlc3MsIG91dCBjb2RlKSkgeyB0aHJvdyBuZXcgU3lzdGVtLkNvbXBvbmVudE1vZGVsLldpbjMyRXhjZXB0aW9uKCk7IH0KICAgICAgICAgICAgcmV0dXJuIHVuY2hlY2tlZCgoaW50KWNvZGUpOwogICAgICAgIH0gfQogICAgICAgIHB1YmxpYyB2b2lkIERpc3Bvc2UoKSB7CiAgICAgICAgICAgIGlmIChwcm9jZXNzICE9IEludFB0ci5aZXJvKSB7IENsb3NlSGFuZGxlKHByb2Nlc3MpOyBwcm9jZXNzID0gSW50UHRyLlplcm87IH0KICAgICAgICAgICAgLy8gTm8gS0lMTF9PTl9KT0JfQ0xPU0U6IG5ldmVyIGtpbGwgc2VydmljaW5nLiBUaGUgaW5kZXBlbmRlbnQgaG9zdAogICAgICAgICAgICAvLyBtdXN0IGtlZXAgdGhpcyBoYW5kbGUgb3BlbiB1bnRpbCBpdHMgcHJvY2VzcyB0cmVlIGhhcyBjb21wbGV0ZWQuCiAgICAgICAgICAgIGlmIChqb2IgIT0gSW50UHRyLlplcm8pIHsgQ2xvc2VIYW5kbGUoam9iKTsgam9iID0gSW50UHRyLlplcm87IH0KICAgICAgICAgICAgaWYgKGRlc2t0b3AgIT0gSW50UHRyLlplcm8pIHsgQ2xvc2VEZXNrdG9wKGRlc2t0b3ApOyBkZXNrdG9wID0gSW50UHRyLlplcm87IH0KICAgICAgICAgICAgR0MuU3VwcHJlc3NGaW5hbGl6ZSh0aGlzKTsKICAgICAgICB9CiAgICAgICAgfkNvbnNvbGVCb290c3RyYXBQcm9jZXNzKCkgeyBEaXNwb3NlKCk7IH0KICAgICAgICBbU3RydWN0TGF5b3V0KExheW91dEtpbmQuU2VxdWVudGlhbCwgQ2hhclNldD1DaGFyU2V0LlVuaWNvZGUpXQogICAgICAgIHByaXZhdGUgc3RydWN0IFN0YXJ0dXBJbmZvcm1hdGlvbiB7CiAgICAgICAgICAgIHB1YmxpYyBpbnQgY2I7IHB1YmxpYyBzdHJpbmcgbHBSZXNlcnZlZCwgbHBEZXNrdG9wLCBscFRpdGxlOwogICAgICAgICAgICBwdWJsaWMgaW50IGR3WCwgZHdZLCBkd1hTaXplLCBkd1lTaXplLCBkd1hDb3VudENoYXJzLCBkd1lDb3VudENoYXJzLCBkd0ZpbGxBdHRyaWJ1dGUsIGR3RmxhZ3M7CiAgICAgICAgICAgIHB1YmxpYyBzaG9ydCB3U2hvd1dpbmRvdywgY2JSZXNlcnZlZDI7IHB1YmxpYyBJbnRQdHIgbHBSZXNlcnZlZDIsIGhTdGRJbnB1dCwgaFN0ZE91dHB1dCwgaFN0ZEVycm9yOwogICAgICAgIH0KICAgICAgICBbU3RydWN0TGF5b3V0KExheW91dEtpbmQuU2VxdWVudGlhbCldCiAgICAgICAgcHJpdmF0ZSBzdHJ1Y3QgUHJvY2Vzc0luZm9ybWF0aW9uIHsgcHVibGljIEludFB0ciBoUHJvY2VzcywgaFRocmVhZDsgcHVibGljIHVpbnQgZHdQcm9jZXNzSWQsIGR3VGhyZWFkSWQ7IH0KICAgICAgICBbU3RydWN0TGF5b3V0KExheW91dEtpbmQuU2VxdWVudGlhbCldCiAgICAgICAgcHJpdmF0ZSBzdHJ1Y3QgQWNjb3VudGluZ0luZm9ybWF0aW9uIHsKICAgICAgICAgICAgcHVibGljIGxvbmcgVG90YWxVc2VyVGltZSwgVG90YWxLZXJuZWxUaW1lLCBUaGlzUGVyaW9kVG90YWxVc2VyVGltZSwgVGhpc1BlcmlvZFRvdGFsS2VybmVsVGltZTsKICAgICAgICAgICAgcHVibGljIHVpbnQgVG90YWxQYWdlRmF1bHRDb3VudCwgVG90YWxQcm9jZXNzZXMsIEFjdGl2ZVByb2Nlc3NlcywgVG90YWxUZXJtaW5hdGVkUHJvY2Vzc2VzOwogICAgICAgIH0KICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLENoYXJTZXQ9Q2hhclNldC5Vbmljb2RlLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIEludFB0ciBDcmVhdGVKb2JPYmplY3QoSW50UHRyIGF0dHJpYnV0ZXMsc3RyaW5nIG5hbWUpOwogICAgICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsQ2hhclNldD1DaGFyU2V0LlVuaWNvZGUsU2V0TGFzdEVycm9yPXRydWUpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gSW50UHRyIE9wZW5Kb2JPYmplY3QodWludCBhY2Nlc3MsYm9vbCBpbmhlcml0LHN0cmluZyBuYW1lKTsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQXNzaWduUHJvY2Vzc1RvSm9iT2JqZWN0KEludFB0ciBqb2IsSW50UHRyIHByb2Nlc3MpOwogICAgICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsU2V0TGFzdEVycm9yPXRydWUpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBRdWVyeUluZm9ybWF0aW9uSm9iT2JqZWN0KEludFB0ciBqb2IsaW50IGtpbmQsb3V0IEFjY291bnRpbmdJbmZvcm1hdGlvbiBpbmZvLHVpbnQgc2l6ZSxJbnRQdHIgbGVuZ3RoKTsKICAgICAgICBbRGxsSW1wb3J0KCJ1c2VyMzIuZGxsIixDaGFyU2V0PUNoYXJTZXQuVW5pY29kZSxTZXRMYXN0RXJyb3I9dHJ1ZSldIHByaXZhdGUgc3RhdGljIGV4dGVybiBJbnRQdHIgQ3JlYXRlRGVza3RvcChzdHJpbmcgbmFtZSxzdHJpbmcgZGV2aWNlLEludFB0ciBtb2RlLHVpbnQgZmxhZ3MsdWludCBhY2Nlc3MsSW50UHRyIGF0dHJpYnV0ZXMpOwogICAgICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQ2xvc2VEZXNrdG9wKEludFB0ciBkZXNrdG9wKTsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLENoYXJTZXQ9Q2hhclNldC5Vbmljb2RlLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQ3JlYXRlUHJvY2VzcyhzdHJpbmcgYXBwLFN0cmluZ0J1aWxkZXIgY29tbWFuZCxJbnRQdHIgcHJvY2Vzc0F0dHJpYnV0ZXMsSW50UHRyIHRocmVhZEF0dHJpYnV0ZXMsYm9vbCBpbmhlcml0LHVpbnQgZmxhZ3MsSW50UHRyIGVudmlyb25tZW50LHN0cmluZyBkaXJlY3RvcnkscmVmIFN0YXJ0dXBJbmZvcm1hdGlvbiBzdGFydHVwLG91dCBQcm9jZXNzSW5mb3JtYXRpb24gcHJvY2Vzcyk7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIixTZXRMYXN0RXJyb3I9dHJ1ZSldIHByaXZhdGUgc3RhdGljIGV4dGVybiB1aW50IFJlc3VtZVRocmVhZChJbnRQdHIgdGhyZWFkKTsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgVGVybWluYXRlUHJvY2VzcyhJbnRQdHIgcHJvY2Vzcyx1aW50IGNvZGUpOwogICAgICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsU2V0TGFzdEVycm9yPXRydWUpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBHZXRQcm9jZXNzVGltZXMoSW50UHRyIHByb2Nlc3Msb3V0IGxvbmcgY3JlYXRpb24sb3V0IGxvbmcgZXhpdCxvdXQgbG9uZyBrZXJuZWwsb3V0IGxvbmcgdXNlcik7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIixTZXRMYXN0RXJyb3I9dHJ1ZSldIHByaXZhdGUgc3RhdGljIGV4dGVybiB1aW50IFdhaXRGb3JTaW5nbGVPYmplY3QoSW50UHRyIGhhbmRsZSx1aW50IG1pbGxpc2Vjb25kcyk7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIixTZXRMYXN0RXJyb3I9dHJ1ZSldIHByaXZhdGUgc3RhdGljIGV4dGVybiBib29sIEdldEV4aXRDb2RlUHJvY2VzcyhJbnRQdHIgcHJvY2VzcyxvdXQgdWludCBjb2RlKTsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQ2xvc2VIYW5kbGUoSW50UHRyIGhhbmRsZSk7CiAgICB9CgogICAgcHVibGljIHNlYWxlZCBjbGFzcyBSZXF1ZXN0CiAgICB7CiAgICAgICAgcHVibGljIHN0cmluZyBSZXF1ZXN0UGF0aCB7IGdldDsgcHJpdmF0ZSBzZXQ7IH0KICAgICAgICBwdWJsaWMgc3RyaW5nIERpcmVjdG9yeVBhdGggeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBSZXN1bHRQYXRoIHsgZ2V0OyBwcml2YXRlIHNldDsgfQogICAgICAgIHB1YmxpYyBzdHJpbmcgT3BlcmF0aW9uSWQgeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBQcm9kdWN0SWQgeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBBY3Rpb24geyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBSb2xlIHsgZ2V0OyBwcml2YXRlIHNldDsgfQogICAgICAgIHB1YmxpYyBib29sIFByZXNlcnZlRGF0YSB7IGdldDsgcHJpdmF0ZSBzZXQ7IH0KICAgICAgICBwdWJsaWMgc3RyaW5nIFJlcXVlc3RlZFZlcnNpb24geyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBPd25lclNpZCB7IGdldDsgcHJpdmF0ZSBzZXQ7IH0KICAgICAgICBwdWJsaWMgaW50IEF0dGVtcHQgeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0YXRpYyByZWFkb25seSBzdHJpbmdbXSBBY3Rpb25zID0geyAiaW5zcGVjdCIsICJpbnN0YWxsIiwgInVwZGF0ZSIsICJyZXBhaXIiLCAidW5pbnN0YWxsIiwgInJlbW92ZS1yb2xlIiwgInJlbW92ZS1hcHAiLCAiYmFja3VwIiwgIm1haW50YWluLXJ1bnRpbWUiIH07CiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgcmVhZG9ubHkgc3RyaW5nW10gT3V0Y29tZXMgPSB7ICJydW5uaW5nIiwgInN1Y2NlZWRlZCIsICJuby1jaGFuZ2UiLCAiY2FuY2VsbGVkIiwgInBhcnRpYWwiLCAiZmFpbGVkIiwgImJsb2NrZWQiLCAicmVzdGFydC1yZXF1aXJlZCIgfTsKICAgICAgICBwcml2YXRlIHJlYWRvbmx5IEphdmFTY3JpcHRTZXJpYWxpemVyIGpzb24gPSBuZXcgSmF2YVNjcmlwdFNlcmlhbGl6ZXIgeyBNYXhKc29uTGVuZ3RoID0gMTAyNCAqIDEwMjQgfTsKCiAgICAgICAgcHVibGljIHN0YXRpYyBSZXF1ZXN0IExvYWQoc3RyaW5nIHBhdGgpCiAgICAgICAgeyByZXR1cm4gTG9hZEZvclByb2R1Y3QocGF0aCwiZW52aXJvbm1lbnQiKTsgfQoKICAgICAgICBwdWJsaWMgc3RhdGljIFJlcXVlc3QgTG9hZEZvclByb2R1Y3Qoc3RyaW5nIHBhdGgsc3RyaW5nIHByb2R1Y3RJZCkKICAgICAgICB7CiAgICAgICAgICAgIGlmKHByb2R1Y3RJZCE9ImVudmlyb25tZW50IiAmJiBwcm9kdWN0SWQhPSJwYy1hZ2VudCIpIHt0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIlVuc3VwcG9ydGVkIHByb2R1Y3QgaWRlbnRpdHkuIik7fQogICAgICAgICAgICBSZXF1ZXN0IHZhbHVlID0gbmV3IFJlcXVlc3QoKTsKICAgICAgICAgICAgdmFsdWUuUHJvZHVjdElkPXByb2R1Y3RJZDsKICAgICAgICAgICAgdmFsdWUuT3duZXJTaWQgPSBXaW5kb3dzSWRlbnRpdHkuR2V0Q3VycmVudCgpLlVzZXIuVmFsdWU7CiAgICAgICAgICAgIHZhbHVlLlJlcXVlc3RQYXRoID0gRnVsbExvY2FsUGF0aChwYXRoKTsKICAgICAgICAgICAgdmFsdWUuRGlyZWN0b3J5UGF0aCA9IFBhdGguR2V0RGlyZWN0b3J5TmFtZSh2YWx1ZS5SZXF1ZXN0UGF0aCk7CiAgICAgICAgICAgIHZhbHVlLlZhbGlkYXRlRGlyZWN0b3J5KCk7CiAgICAgICAgICAgIFZhbGlkYXRlRmlsZSh2YWx1ZS5SZXF1ZXN0UGF0aCwgdmFsdWUuT3duZXJTaWQsIHRydWUpOwogICAgICAgICAgICBpZiAobmV3IEZpbGVJbmZvKHZhbHVlLlJlcXVlc3RQYXRoKS5MZW5ndGggPiA2NTUzNikgeyB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIkxpZmVjeWNsZSByZXF1ZXN0IGlzIHRvbyBsYXJnZS4iKTsgfQogICAgICAgICAgICBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBkYXRhID0gdmFsdWUuanNvbi5EZXNlcmlhbGl6ZTxEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0Pj4oRmlsZS5SZWFkQWxsVGV4dCh2YWx1ZS5SZXF1ZXN0UGF0aCwgRW5jb2RpbmcuVVRGOCkpOwogICAgICAgICAgICBHdWlkIGlkOwogICAgICAgICAgICBpZiAoZGF0YSA9PSBudWxsIHx8ICFJc1NjaGVtYU9uZShkYXRhKSB8fCBUZXh0KGRhdGEsICJwcm9kdWN0SWQiKSAhPSBwcm9kdWN0SWQKICAgICAgICAgICAgICAgIHx8ICFHdWlkLlRyeVBhcnNlRXhhY3QoVGV4dChkYXRhLCAib3BlcmF0aW9uSWQiKSwgIkQiLCBvdXQgaWQpIHx8IGlkID09IEd1aWQuRW1wdHkKICAgICAgICAgICAgICAgIHx8IEFycmF5LkluZGV4T2YoQWN0aW9ucywgVGV4dChkYXRhLCAiYWN0aW9uIikpIDwgMCkKICAgICAgICAgICAgeyB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIlVuc3VwcG9ydGVkIG9yIG1hbGZvcm1lZCBFbnZpcm9ubWVudCBsaWZlY3ljbGUgcmVxdWVzdC4iKTsgfQogICAgICAgICAgICB2YWx1ZS5PcGVyYXRpb25JZCA9IGlkLlRvU3RyaW5nKCJEIik7CiAgICAgICAgICAgIHZhbHVlLkFjdGlvbiA9IFRleHQoZGF0YSwgImFjdGlvbiIpOwogICAgICAgICAgICB2YWx1ZS5Sb2xlID0gVGV4dChkYXRhLCAicm9sZSIpOwogICAgICAgICAgICBpZiAodmFsdWUuUm9sZS5MZW5ndGggIT0gMCAmJiB2YWx1ZS5Sb2xlICE9ICJjbGllbnQiICYmIHZhbHVlLlJvbGUgIT0gInNlcnZlciIpIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJVbnN1cHBvcnRlZCByb2xlLiIpOyB9CiAgICAgICAgICAgIG9iamVjdCBwcmVzZXJ2ZTsKICAgICAgICAgICAgdmFsdWUuUHJlc2VydmVEYXRhID0gdHJ1ZTsKICAgICAgICAgICAgaWYgKGRhdGEuVHJ5R2V0VmFsdWUoInByZXNlcnZlRGF0YSIsIG91dCBwcmVzZXJ2ZSkpIHsKICAgICAgICAgICAgICAgIGlmICghKHByZXNlcnZlIGlzIGJvb2wpKSB7IHRocm93IG5ldyBJbnZhbGlkRGF0YUV4Y2VwdGlvbigicHJlc2VydmVEYXRhIG11c3QgYmUgYSBib29sZWFuLiIpOyB9CiAgICAgICAgICAgICAgICB2YWx1ZS5QcmVzZXJ2ZURhdGEgPSAoYm9vbClwcmVzZXJ2ZTsKICAgICAgICAgICAgfQogICAgICAgICAgICB2YWx1ZS5SZXF1ZXN0ZWRWZXJzaW9uID0gVGV4dChkYXRhLCAicmVxdWVzdGVkVmVyc2lvbiIpOwogICAgICAgICAgICB2YWx1ZS5SZXN1bHRQYXRoID0gRnVsbExvY2FsUGF0aChUZXh0KGRhdGEsICJyZXN1bHRQYXRoIikpOwogICAgICAgICAgICBpZiAoIVN0cmluZy5FcXVhbHMoUGF0aC5HZXREaXJlY3RvcnlOYW1lKHZhbHVlLlJlc3VsdFBhdGgpLCB2YWx1ZS5EaXJlY3RvcnlQYXRoLCBTdHJpbmdDb21wYXJpc29uLk9yZGluYWxJZ25vcmVDYXNlKQogICAgICAgICAgICAgICAgfHwgU3RyaW5nLkVxdWFscyh2YWx1ZS5SZXN1bHRQYXRoLCB2YWx1ZS5SZXF1ZXN0UGF0aCwgU3RyaW5nQ29tcGFyaXNvbi5PcmRpbmFsSWdub3JlQ2FzZSkKICAgICAgICAgICAgICAgIHx8ICFTdHJpbmcuRXF1YWxzKFBhdGguR2V0RXh0ZW5zaW9uKHZhbHVlLlJlc3VsdFBhdGgpLCAiLmpzb24iLCBTdHJpbmdDb21wYXJpc29uLk9yZGluYWxJZ25vcmVDYXNlKSkKICAgICAgICAgICAgeyB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIlJlc3VsdCBtdXN0IGJlIGEgc2VwYXJhdGUgSlNPTiBmaWxlIGluIHRoZSBvd25lZCBvcGVyYXRpb24gZGlyZWN0b3J5LiIpOyB9CiAgICAgICAgICAgIHZhbHVlLkF0dGVtcHQgPSAxOwogICAgICAgICAgICBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBwcmV2aW91cyA9IHZhbHVlLlJlYWRSZXN1bHQoKTsKICAgICAgICAgICAgaWYgKHByZXZpb3VzICE9IG51bGwpIHsgdmFsdWUuQXR0ZW1wdCA9IE1hdGguTWF4KDEsIE51bWJlcihwcmV2aW91cywgImF0dGVtcHQiKSk7IH0KICAgICAgICAgICAgcmV0dXJuIHZhbHVlOwogICAgICAgIH0KCiAgICAgICAgcHVibGljIHN0YXRpYyBzdHJpbmcgRnVsbExvY2FsUGF0aChzdHJpbmcgcGF0aCkKICAgICAgICB7CiAgICAgICAgICAgIGlmIChTdHJpbmcuSXNOdWxsT3JXaGl0ZVNwYWNlKHBhdGgpIHx8IHBhdGguTGVuZ3RoIDwgNCB8fCAhQ2hhci5Jc0xldHRlcihwYXRoWzBdKSB8fCBwYXRoWzFdICE9ICc6JyB8fCBwYXRoWzJdICE9ICdcXCcKICAgICAgICAgICAgICAgIHx8IHBhdGguU3Vic3RyaW5nKDIpLkNvbnRhaW5zKCI6IikgfHwgcGF0aC5JbmRleE9mQW55KG5ldyBjaGFyW10geyAnXHInLCAnXG4nLCAnXDAnLCAnIicgfSkgPj0gMCkKICAgICAgICAgICAgeyB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIkxpZmVjeWNsZSBwYXRocyBtdXN0IGJlIGFic29sdXRlIGxvY2FsIGRyaXZlIHBhdGhzLiIpOyB9CiAgICAgICAgICAgIGZvcmVhY2goc3RyaW5nIHBhcnQgaW4gcGF0aC5TdWJzdHJpbmcoMykuU3BsaXQoJ1xcJykpIHsKICAgICAgICAgICAgICAgIGlmKHBhcnQuRW5kc1dpdGgoIiAiLFN0cmluZ0NvbXBhcmlzb24uT3JkaW5hbCkgfHwgcGFydC5FbmRzV2l0aCgiLiIsU3RyaW5nQ29tcGFyaXNvbi5PcmRpbmFsKSB8fAogICAgICAgICAgICAgICAgICAgIFN5c3RlbS5UZXh0LlJlZ3VsYXJFeHByZXNzaW9ucy5SZWdleC5Jc01hdGNoKHBhcnQsQCJeKENPTnxQUk58QVVYfE5VTHxDT01bMS05XXxMUFRbMS05XSkoXC4uKik/JCIsU3lzdGVtLlRleHQuUmVndWxhckV4cHJlc3Npb25zLlJlZ2V4T3B0aW9ucy5JZ25vcmVDYXNlKSkgewogICAgICAgICAgICAgICAgICAgIHRocm93IG5ldyBJbnZhbGlkRGF0YUV4Y2VwdGlvbigiTGlmZWN5Y2xlIHBhdGhzIGNhbm5vdCB1c2UgYW1iaWd1b3VzIFdpbmRvd3MgbmFtZXMuIik7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0KICAgICAgICAgICAgcmV0dXJuIFBhdGguR2V0RnVsbFBhdGgocGF0aCk7CiAgICAgICAgfQoKICAgICAgICBwdWJsaWMgdm9pZCBWYWxpZGF0ZURpcmVjdG9yeSgpCiAgICAgICAgewogICAgICAgICAgICBzdHJpbmcgcGF0aCA9IERpcmVjdG9yeVBhdGg7CiAgICAgICAgICAgIGlmICghRGlyZWN0b3J5LkV4aXN0cyhwYXRoKSkgeyB0aHJvdyBuZXcgRGlyZWN0b3J5Tm90Rm91bmRFeGNlcHRpb24oIkNyZWF0ZSB0aGUgb3duZWQgb3BlcmF0aW9uIGRpcmVjdG9yeSBiZWZvcmUgaW52b2tpbmcgc2V0dXAuIik7IH0KICAgICAgICAgICAgU2FmZVBhdGguQ2hlY2socGF0aCk7CiAgICAgICAgICAgIFZhbGlkYXRlQWNsKERpcmVjdG9yeS5HZXRBY2Nlc3NDb250cm9sKERpcmVjdG9yeVBhdGgpLCBPd25lclNpZCk7CiAgICAgICAgfQoKICAgICAgICBwcml2YXRlIHN0YXRpYyB2b2lkIFZhbGlkYXRlQWNsKEZpbGVTeXN0ZW1TZWN1cml0eSBzZWN1cml0eSwgc3RyaW5nIG93bmVyKQogICAgICAgIHsKICAgICAgICAgICAgc3RyaW5nIGFjdHVhbCA9IHNlY3VyaXR5LkdldE93bmVyKHR5cGVvZihTZWN1cml0eUlkZW50aWZpZXIpKS5WYWx1ZTsKICAgICAgICAgICAgaWYgKGFjdHVhbCAhPSBvd25lciAmJiBhY3R1YWwgIT0gIlMtMS01LTMyLTU0NCIpIHsgdGhyb3cgbmV3IFVuYXV0aG9yaXplZEFjY2Vzc0V4Y2VwdGlvbigiTGlmZWN5Y2xlIGZpbGVzIG11c3QgYmVsb25nIHRvIHRoZSBjdXJyZW50IFdpbmRvd3MgYWNjb3VudC4iKTsgfQogICAgICAgICAgICBGaWxlU3lzdGVtUmlnaHRzIHdyaXRlID0gRmlsZVN5c3RlbVJpZ2h0cy5Xcml0ZSB8IEZpbGVTeXN0ZW1SaWdodHMuRGVsZXRlIHwgRmlsZVN5c3RlbVJpZ2h0cy5EZWxldGVTdWJkaXJlY3Rvcmllc0FuZEZpbGVzIHwgRmlsZVN5c3RlbVJpZ2h0cy5DaGFuZ2VQZXJtaXNzaW9ucyB8IEZpbGVTeXN0ZW1SaWdodHMuVGFrZU93bmVyc2hpcDsKICAgICAgICAgICAgZm9yZWFjaCAoRmlsZVN5c3RlbUFjY2Vzc1J1bGUgcnVsZSBpbiBzZWN1cml0eS5HZXRBY2Nlc3NSdWxlcyh0cnVlLCB0cnVlLCB0eXBlb2YoU2VjdXJpdHlJZGVudGlmaWVyKSkpIHsKICAgICAgICAgICAgICAgIHN0cmluZyBzaWQgPSBydWxlLklkZW50aXR5UmVmZXJlbmNlLlZhbHVlOwogICAgICAgICAgICAgICAgaWYgKHJ1bGUuQWNjZXNzQ29udHJvbFR5cGUgPT0gQWNjZXNzQ29udHJvbFR5cGUuQWxsb3cgJiYgKHJ1bGUuRmlsZVN5c3RlbVJpZ2h0cyAmIHdyaXRlKSAhPSAwCiAgICAgICAgICAgICAgICAgICAgJiYgc2lkICE9IG93bmVyICYmIHNpZCAhPSAiUy0xLTUtMTgiICYmIHNpZCAhPSAiUy0xLTUtMzItNTQ0IiAmJiBzaWQgIT0gIlMtMS0zLTAiKQogICAgICAgICAgICAgICAgeyB0aHJvdyBuZXcgVW5hdXRob3JpemVkQWNjZXNzRXhjZXB0aW9uKCJMaWZlY3ljbGUgZGlyZWN0b3J5IG9yIGZpbGUgcGVybWl0cyB3cml0ZXMgYnkgYW5vdGhlciBhY2NvdW50LiIpOyB9CiAgICAgICAgICAgIH0KICAgICAgICB9CgogICAgICAgIHByaXZhdGUgc3RhdGljIHZvaWQgVmFsaWRhdGVGaWxlKHN0cmluZyBwYXRoLCBzdHJpbmcgb3duZXIsIGJvb2wgcmVxdWlyZWQpCiAgICAgICAgewogICAgICAgICAgICBpZiAoIUZpbGUuRXhpc3RzKHBhdGgpKSB7IGlmIChyZXF1aXJlZCkgeyB0aHJvdyBuZXcgRmlsZU5vdEZvdW5kRXhjZXB0aW9uKCJMaWZlY3ljbGUgcmVxdWVzdCBpcyBtaXNzaW5nLiIsIHBhdGgpOyB9IHJldHVybjsgfQogICAgICAgICAgICBTYWZlUGF0aC5DaGVjayhwYXRoKTsKICAgICAgICAgICAgaWYgKChGaWxlLkdldEF0dHJpYnV0ZXMocGF0aCkgJiBGaWxlQXR0cmlidXRlcy5EaXJlY3RvcnkpICE9IDApIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJMaWZlY3ljbGUgZmlsZSBpcyBhIGRpcmVjdG9yeS4iKTsgfQogICAgICAgICAgICBWYWxpZGF0ZUFjbChGaWxlLkdldEFjY2Vzc0NvbnRyb2wocGF0aCksIG93bmVyKTsKICAgICAgICB9CgogICAgICAgIHB1YmxpYyBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBSZWFkUmVzdWx0KCkKICAgICAgICB7CiAgICAgICAgICAgIC8vIFZhbGlkYXRlIGFuZCByZWFkIHRoZSBzYW1lIHB1Ymxpc2hlZCBzbmFwc2hvdCB3aGlsZSBjb29wZXJhdGluZwogICAgICAgICAgICAvLyB3cml0ZXJzIGFyZSBleGNsdWRlZC4gQW4gb2xkIHJlYWRlciBoYW5kbGUgY2FuIGxlZ2l0aW1hdGVseSBoYXZlCiAgICAgICAgICAgIC8vIHplcm8gbGlua3MgYWZ0ZXIgYSBQT1NJWCByZXBsYWNlbWVudDsgZG8gbm90IHdlYWtlbiBTYWZlUGF0aCdzCiAgICAgICAgICAgIC8vIGhhcmQtbGluayBjaGVja3MgdG8gYWNjb21tb2RhdGUgdGhhdCBwYXRobmFtZS12YWxpZGF0aW9uIHJhY2UuCiAgICAgICAgICAgIHVzaW5nKEF0b21pY0ZpbGUuQWNxdWlyZShSZXN1bHRQYXRoKSkgewogICAgICAgICAgICBWYWxpZGF0ZURpcmVjdG9yeSgpOwogICAgICAgICAgICBpZiAoIUZpbGUuRXhpc3RzKFJlc3VsdFBhdGgpKSB7IHJldHVybiBudWxsOyB9CiAgICAgICAgICAgIFZhbGlkYXRlRmlsZShSZXN1bHRQYXRoLCBPd25lclNpZCwgdHJ1ZSk7CiAgICAgICAgICAgIGlmIChuZXcgRmlsZUluZm8oUmVzdWx0UGF0aCkuTGVuZ3RoID4gMTAyNCAqIDEwMjQpIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJMaWZlY3ljbGUgcmVzdWx0IGlzIHRvbyBsYXJnZS4iKTsgfQogICAgICAgICAgICBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBkYXRhOwogICAgICAgICAgICB1c2luZyAoRmlsZVN0cmVhbSBzdHJlYW0gPSBuZXcgRmlsZVN0cmVhbShSZXN1bHRQYXRoLCBGaWxlTW9kZS5PcGVuLCBGaWxlQWNjZXNzLlJlYWQsIEZpbGVTaGFyZS5SZWFkIHwgRmlsZVNoYXJlLkRlbGV0ZSkpCiAgICAgICAgICAgIHVzaW5nIChTdHJlYW1SZWFkZXIgcmVhZGVyID0gbmV3IFN0cmVhbVJlYWRlcihzdHJlYW0sIEVuY29kaW5nLlVURjgpKSB7CiAgICAgICAgICAgICAgICBkYXRhID0ganNvbi5EZXNlcmlhbGl6ZTxEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0Pj4ocmVhZGVyLlJlYWRUb0VuZCgpKTsKICAgICAgICAgICAgfQogICAgICAgICAgICBEYXRlVGltZSB1cGRhdGVkOwogICAgICAgICAgICBpZiAoZGF0YSA9PSBudWxsIHx8ICFJc1NjaGVtYU9uZShkYXRhKSB8fCBUZXh0KGRhdGEsICJvcGVyYXRpb25JZCIpICE9IE9wZXJhdGlvbklkCiAgICAgICAgICAgICAgICB8fCBUZXh0KGRhdGEsICJwcm9kdWN0SWQiKSAhPSBQcm9kdWN0SWQgfHwgVGV4dChkYXRhLCAiYWN0aW9uIikgIT0gQWN0aW9uCiAgICAgICAgICAgICAgICB8fCBBcnJheS5JbmRleE9mKE91dGNvbWVzLCBUZXh0KGRhdGEsICJvdXRjb21lIikpIDwgMCB8fCAhZGF0YS5Db250YWluc0tleSgibWVzc2FnZSIpCiAgICAgICAgICAgICAgICB8fCAhRGF0ZVRpbWUuVHJ5UGFyc2UoVGV4dChkYXRhLCAidXBkYXRlZFV0YyIpLCBvdXQgdXBkYXRlZCkpCiAgICAgICAgICAgIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJTdGFsZSBvciBtaXNtYXRjaGVkIGxpZmVjeWNsZSByZXN1bHQ7IHJlZnVzaW5nIHRvIG92ZXJ3cml0ZSBpdC4iKTsgfQogICAgICAgICAgICByZXR1cm4gZGF0YTsKICAgICAgICAgICAgfQogICAgICAgIH0KCiAgICAgICAgcHVibGljIHZvaWQgQ29udGludWVBdHRlbXB0KCkgeyBBdHRlbXB0Kys7IH0KCiAgICAgICAgcHVibGljIHZvaWQgV3JpdGUoc3RyaW5nIG91dGNvbWUsIHN0cmluZyBtZXNzYWdlLCBzdHJpbmcgc3RhZ2UsIHN0cmluZyBlcnJvckNvZGUsIHN0cmluZyBuZXh0QWN0aW9uLCBzdHJpbmcgZXh0cmFzSnNvbikKICAgICAgICB7CiAgICAgICAgICAgIGlmIChBcnJheS5JbmRleE9mKE91dGNvbWVzLCBvdXRjb21lKSA8IDApIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJVbnN1cHBvcnRlZCBsaWZlY3ljbGUgb3V0Y29tZS4iKTsgfQogICAgICAgICAgICB1c2luZyhBdG9taWNGaWxlLkFjcXVpcmUoUmVzdWx0UGF0aCkpIHsKICAgICAgICAgICAgVmFsaWRhdGVEaXJlY3RvcnkoKTsKICAgICAgICAgICAgUmVhZFJlc3VsdCgpOwogICAgICAgICAgICBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBkYXRhID0gU3RyaW5nLklzTnVsbE9yRW1wdHkoZXh0cmFzSnNvbikgPyBuZXcgRGljdGlvbmFyeTxzdHJpbmcsIG9iamVjdD4oKSA6IGpzb24uRGVzZXJpYWxpemU8RGljdGlvbmFyeTxzdHJpbmcsIG9iamVjdD4+KGV4dHJhc0pzb24pOwogICAgICAgICAgICBkYXRhWyJzY2hlbWFWZXJzaW9uIl0gPSAxOyBkYXRhWyJvcGVyYXRpb25JZCJdID0gT3BlcmF0aW9uSWQ7IGRhdGFbInByb2R1Y3RJZCJdID0gUHJvZHVjdElkOyBkYXRhWyJhY3Rpb24iXSA9IEFjdGlvbjsKICAgICAgICAgICAgZGF0YVsib3V0Y29tZSJdID0gb3V0Y29tZTsgZGF0YVsidXBkYXRlZFV0YyJdID0gRGF0ZVRpbWUuVXRjTm93LlRvU3RyaW5nKCJvIik7IGRhdGFbIm1lc3NhZ2UiXSA9IG1lc3NhZ2UgPz8gIiI7CiAgICAgICAgICAgIGRhdGFbImF0dGVtcHQiXSA9IEF0dGVtcHQ7IGRhdGFbInN0YWdlIl0gPSBzdGFnZSA/PyAiIjsgZGF0YVsiZXJyb3JDb2RlIl0gPSBlcnJvckNvZGUgPz8gIiI7IGRhdGFbIm5leHRBY3Rpb24iXSA9IG5leHRBY3Rpb24gPz8gIiI7CiAgICAgICAgICAgIGRhdGFbInJlc3RhcnRSZXF1aXJlZCJdID0gb3V0Y29tZSA9PSAicmVzdGFydC1yZXF1aXJlZCI7CiAgICAgICAgICAgIEF0b21pY1dyaXRlKFJlc3VsdFBhdGgsIGpzb24uU2VyaWFsaXplKGRhdGEpKTsKICAgICAgICAgICAgfQogICAgICAgIH0KCiAgICAgICAgcHVibGljIHZvaWQgQXRvbWljV3JpdGUoc3RyaW5nIHBhdGgsIHN0cmluZyB0ZXh0KQogICAgICAgIHsKICAgICAgICAgICAgcGF0aCA9IEZ1bGxMb2NhbFBhdGgocGF0aCk7CiAgICAgICAgICAgIGlmICghU3RyaW5nLkVxdWFscyhQYXRoLkdldERpcmVjdG9yeU5hbWUocGF0aCksIERpcmVjdG9yeVBhdGgsIFN0cmluZ0NvbXBhcmlzb24uT3JkaW5hbElnbm9yZUNhc2UpIHx8IFN0cmluZy5FcXVhbHMocGF0aCwgUmVxdWVzdFBhdGgsIFN0cmluZ0NvbXBhcmlzb24uT3JkaW5hbElnbm9yZUNhc2UpKSB7IHRocm93IG5ldyBJbnZhbGlkRGF0YUV4Y2VwdGlvbigiTGlmZWN5Y2xlIG91dHB1dCBlc2NhcGVkIGl0cyBvcGVyYXRpb24gZGlyZWN0b3J5LiIpOyB9CiAgICAgICAgICAgIHVzaW5nKEF0b21pY0ZpbGUuQWNxdWlyZShwYXRoKSkgewogICAgICAgICAgICBWYWxpZGF0ZURpcmVjdG9yeSgpOyBWYWxpZGF0ZUZpbGUocGF0aCwgT3duZXJTaWQsIGZhbHNlKTsKICAgICAgICAgICAgc3RyaW5nIHRlbXBvcmFyeSA9IFBhdGguQ29tYmluZShEaXJlY3RvcnlQYXRoLCAiLndyaXRlLSIgKyBHdWlkLk5ld0d1aWQoKS5Ub1N0cmluZygiTiIpICsgIi50bXAiKTsKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIHVzaW5nIChGaWxlU3RyZWFtIHN0cmVhbSA9IG5ldyBGaWxlU3RyZWFtKHRlbXBvcmFyeSwgRmlsZU1vZGUuQ3JlYXRlTmV3LCBGaWxlQWNjZXNzLldyaXRlLCBGaWxlU2hhcmUuTm9uZSkpIHsKICAgICAgICAgICAgICAgICAgICBieXRlW10gYnl0ZXMgPSBuZXcgVVRGOEVuY29kaW5nKGZhbHNlKS5HZXRCeXRlcyh0ZXh0KTsgc3RyZWFtLldyaXRlKGJ5dGVzLCAwLCBieXRlcy5MZW5ndGgpOyBzdHJlYW0uRmx1c2godHJ1ZSk7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBBdG9taWNGaWxlLkNvbW1pdCh0ZW1wb3JhcnksIHBhdGgsIGRlbGVnYXRlIHsgVmFsaWRhdGVEaXJlY3RvcnkoKTsgVmFsaWRhdGVGaWxlKHBhdGgsIE93bmVyU2lkLCBmYWxzZSk7IH0pOwogICAgICAgICAgICB9IGZpbmFsbHkgeyBpZiAoRmlsZS5FeGlzdHModGVtcG9yYXJ5KSkgeyBGaWxlLkRlbGV0ZSh0ZW1wb3JhcnkpOyB9IH0KICAgICAgICAgICAgfQogICAgICAgIH0KCiAgICAgICAgcHVibGljIHN0YXRpYyBpbnQgRXhpdENvZGUoc3RyaW5nIG91dGNvbWUsIHN0cmluZyBlcnJvckNvZGUpCiAgICAgICAgewogICAgICAgICAgICBpZiAob3V0Y29tZSA9PSAic3VjY2VlZGVkIiB8fCBvdXRjb21lID09ICJuby1jaGFuZ2UiKSB7IHJldHVybiAwOyB9CiAgICAgICAgICAgIGlmIChvdXRjb21lID09ICJjYW5jZWxsZWQiKSB7IHJldHVybiAxNjAyOyB9CiAgICAgICAgICAgIGlmIChvdXRjb21lID09ICJyZXN0YXJ0LXJlcXVpcmVkIikgeyByZXR1cm4gMzAxMDsgfQogICAgICAgICAgICBpZiAoZXJyb3JDb2RlID09ICJvcGVyYXRpb24tY29uZmxpY3QiKSB7IHJldHVybiAxNjE4OyB9CiAgICAgICAgICAgIHJldHVybiAxOwogICAgICAgIH0KICAgICAgICBwdWJsaWMgc3RhdGljIHN0cmluZyBUZXh0KElEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBkYXRhLCBzdHJpbmcga2V5KSB7IG9iamVjdCB2YWx1ZTsgcmV0dXJuIGRhdGEgIT0gbnVsbCAmJiBkYXRhLlRyeUdldFZhbHVlKGtleSwgb3V0IHZhbHVlKSAmJiB2YWx1ZSAhPSBudWxsID8gQ29udmVydC5Ub1N0cmluZyh2YWx1ZSwgU3lzdGVtLkdsb2JhbGl6YXRpb24uQ3VsdHVyZUluZm8uSW52YXJpYW50Q3VsdHVyZSkgOiAiIjsgfQogICAgICAgIHB1YmxpYyBzdGF0aWMgaW50IE51bWJlcihJRGljdGlvbmFyeTxzdHJpbmcsIG9iamVjdD4gZGF0YSwgc3RyaW5nIGtleSkgeyBpbnQgdmFsdWU7IHJldHVybiBJbnQzMi5UcnlQYXJzZShUZXh0KGRhdGEsIGtleSksIG91dCB2YWx1ZSkgPyB2YWx1ZSA6IC0xOyB9CiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgYm9vbCBJc1NjaGVtYU9uZShJRGljdGlvbmFyeTxzdHJpbmcsIG9iamVjdD4gZGF0YSkgeyBvYmplY3QgdmFsdWU7IHJldHVybiBkYXRhLlRyeUdldFZhbHVlKCJzY2hlbWFWZXJzaW9uIiwgb3V0IHZhbHVlKSAmJiB2YWx1ZSBpcyBpbnQgJiYgKGludCl2YWx1ZSA9PSAxOyB9CiAgICB9Cn0K'))
+        Add-Type -TypeDefinition $source -ReferencedAssemblies @('System.dll','System.Core.dll','System.Web.Extensions.dll')
     }
-    if ($Capture) {
-        return @($output | ForEach-Object { [string]$_ })
+}
+
+function Initialize-Lifecycle {
+    if (-not (Get-Variable LifecycleRequestPath -ValueOnly -ErrorAction SilentlyContinue) -or $script:Lifecycle) { return }
+    Initialize-LifecycleProtocol
+    $script:Lifecycle = [KiloLink.Lifecycle.Request]::Load($LifecycleRequestPath)
+    if ($Role -and $script:Lifecycle.Role -and $Role -ne $script:Lifecycle.Role) { throw 'Reviewed role does not match the requested role.' }
+    if (-not $Role) { $script:Role=$script:Lifecycle.Role }
+    if ($script:Lifecycle.RequestedVersion -and $script:Lifecycle.RequestedVersion -ne $script:ProductVersion) {
+        $script:Lifecycle.Write('blocked','This installer does not match requestedVersion.','preflight','version-mismatch','Use the verified requested installer.','{}')
+        throw 'Lifecycle requested version differs from this installer.'
     }
+    if ($Action -eq 'Menu') {
+        $script:Action = switch ($script:Lifecycle.Action) {
+            inspect { 'Inspect' } install { if ($Role -eq 'client') { 'InstallClient' } else { 'Setup' } }
+            update { if ($Role -eq 'client') { 'InstallClient' } else { 'Update' } }
+            repair { if ($Role -eq 'client') { 'InstallClient' } else { 'Repair' } }
+            remove-role { 'Uninstall' } remove-app { 'RemoveApp' } uninstall { 'Uninstall' }
+            backup { 'Backup' } maintain-runtime { 'MaintainRuntime' }
+        }
+    }
+    $allowed = switch ($script:Lifecycle.Action) {
+        inspect { @('Inspect') } install { @('Setup','Install','InstallClient','Resume') }
+        update { @('Update','InstallClient','Resume') } repair { @('Repair','InstallClient','Resume') }
+        remove-role { @('Uninstall') } remove-app { @('RemoveApp') } uninstall { @('Uninstall') }
+        backup { @('Backup') } maintain-runtime { @('MaintainRuntime','Resume') }
+    }
+    if ($Action -notin $allowed) { throw 'Requested lifecycle action does not match the engine action.' }
+    if ($Role -eq 'server' -and $Action -eq 'InstallClient') { throw 'Requested role does not match the engine action.' }
+    if ($Role -eq 'client' -and $Action -in @('Setup','Repair','Update','Backup','MaintainRuntime')) { throw 'Requested role does not match the engine action.' }
+    if (-not $Role -and $Action -notin @('Inspect','RemoveApp','Resume')) { throw 'Choose Client or Server in the Environment setup window before applying this request.' }
+    $script:PreserveData = -not $PurgeData
+    if ($PurgeData -and ($script:Lifecycle.PreserveData -or -not $ConfirmRemoval)) { throw 'Data purge requires an explicit non-preserving request and the reviewed removal confirmation.' }
+    $script:ForceComponentRepair = $script:Lifecycle.Action -eq 'repair'
+    $previous = $script:Lifecycle.ReadResult()
+    if($previous -and $previous.ContainsKey('partialEffects')){$script:LifecycleEffects=@($previous['partialEffects'])}
+    if ($Action -eq 'Resume' -and $previous) { $script:Lifecycle.ContinueAttempt() }
+    # Heartbeats reuse OperationMessage before the action sets its own status.
+    $script:OperationMessage='Checking requirements.'
+    Write-LifecycleResult 'running' $script:OperationMessage -Stage 'preflight'
+}
+
+function Write-LifecycleResult {
+    param([string]$Outcome='running',[string]$Message='', [string]$Stage, [string]$ErrorCode, [string]$NextAction, $Components, [hashtable]$Evidence=@{})
+    if (-not $script:Lifecycle) { return }
+    if ($Stage) { $script:LifecycleStage=$Stage }
+    if ($ErrorCode) { $script:LifecycleErrorCode=$ErrorCode }
+    if ($NextAction) { $script:LifecycleNextAction=$NextAction }
+    if ($null -ne $Components) { $script:LifecycleComponents=@($Components) }
+    $extras=@{safeToCancel=$false; partialEffects=@($script:LifecycleEffects); recoveryRequired=[bool]$script:LifecycleRecoveryRequired;
+        components=@($script:LifecycleComponents); logPath=$script:InstallerLogPath}
+    foreach ($key in $Evidence.Keys) { $extras[$key]=$Evidence[$key] }
+    if($Evidence.ContainsKey('nextAction')){$script:LifecycleNextAction=[string]$Evidence['nextAction']}
+    if ($script:ActiveJournal) { $extras['journalPath']=Join-Path $script:StateRoot ('Operations\'+$script:ActiveJournal.operationId+'.json') }
+    if ($Outcome -eq 'failed' -and $script:LifecycleEffects.Count) { $Outcome='partial' }
+    try {
+        $script:Lifecycle.Write($Outcome,$Message,$script:LifecycleStage,$script:LifecycleErrorCode,$script:LifecycleNextAction,($extras|ConvertTo-Json -Depth 12 -Compress))
+    } catch {
+        $failure=$_.Exception.Message
+        $intendedErrorCode=$script:LifecycleErrorCode
+        $script:LifecycleErrorCode='lifecycle-result-write-failed'
+        $script:LifecycleNextAction='Inspect the operation journal, result-write diagnostics and installed components before retrying the intended operation. Do not assume completed steps were rolled back.'
+        # Preserve the first intended outcome even if the outer failure handler
+        # also cannot save its result. Storage failure must not replace the cause.
+        if($script:ActiveJournal -and -not $script:ActiveJournal.Contains('resultWriteFailure')) {
+            $script:ActiveJournal['resultWriteFailure']=@{intendedOutcome=$Outcome;operationOutcome=$script:OperationOutcome;originalErrorCode=$intendedErrorCode;message=$Message;error=$failure;nextAction=$script:LifecycleNextAction}
+            try{Save-DeploymentJournal}catch{Write-InstallerLog ('Could not record result-write failure in the journal: '+$_.Exception.Message)}
+        }
+        $detail="Could not save lifecycle outcome '$Outcome': $Message Result persistence failed: $failure $script:LifecycleNextAction"
+        Write-InstallerLog $detail
+        throw $detail
+    }
+    $script:LifecycleLastHeartbeat=[datetime]::UtcNow
+}
+
+function Write-LifecycleHeartbeat {
+    if ($script:Lifecycle -and ([datetime]::UtcNow-$script:LifecycleLastHeartbeat).TotalSeconds -ge 5) {
+        Write-LifecycleResult 'running' $script:OperationMessage
+    }
+}
+
+function Add-LifecycleEffect([string]$Message) {
+    if ($Message -notin $script:LifecycleEffects) { $script:LifecycleEffects+= $Message }
+    Write-LifecycleResult 'running' $Message
+}
+
+function Get-LifecycleResultOutcome([string]$Outcome) {
+    switch ($Outcome) {
+        Completed { 'succeeded' } NoChange { 'no-change' } Cancelled { if ($script:LifecycleEffects.Count) { 'partial' } else { 'cancelled' } }
+        RestartRequired { 'restart-required' } Blocked { 'blocked' } Partial { 'partial' } Failed { if ($script:LifecycleEffects.Count) { 'partial' } else { 'failed' } }
+        default { 'running' }
+    }
+}
+
+function Get-RegisteredManagedDistro {
+    # Registry inspection does not launch wsl.exe or start a stopped distribution.
+    $root='HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'
+    if (-not (Test-Path -LiteralPath $root)) { return $false }
+    foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction Stop)) {
+        $entry=Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+        if ((Get-PropertyValue $entry 'DistributionName' '') -eq $script:ManagedDistroName) { return $true }
+    }
+    return $false
+}
+
+function Get-ObservedComponents {
+    $items=New-Object 'Collections.Generic.List[object]'
+    $app=Join-Path ${env:ProgramFiles} 'Kiloview\Environment Setup\Kiloview-Environment-Setup.exe'
+    $msiApp=Test-Path -LiteralPath $app -PathType Leaf
+    if(-not $msiApp){
+        foreach($candidate in @($script:PersistentLauncherPath,(Join-Path $script:StateRoot 'Launcher\Kiloview-Environment-Setup.exe'))){if(Test-Path -LiteralPath $candidate -PathType Leaf){$app=$candidate;break}}
+    }
+    $items.Add([pscustomobject]@{productId='environment';installed=(Test-Path -LiteralPath $app -PathType Leaf);configurationAppInstalled=$msiApp;configured=$null;running=$null;healthy=$null;
+        version=$(if(Test-Path -LiteralPath $app){(Get-Item -LiteralPath $app).VersionInfo.FileVersion}else{$null});channel=$null;inspectionVersion=$script:ProductVersion;inspectionChannel=$script:ProductChannel})
+    try {
+        $registration=Get-NdiRegistration
+        $ndiVersion=if($registration){[string](Get-PropertyValue $registration 'DisplayVersion' '')}else{$null}
+        $items.Add([pscustomobject]@{productId='ndi-tools';installed=[bool]$registration;configured=$null;running=$null;healthy=$null;version=$ndiVersion;channel='vendor-stable'})
+    } catch { $items.Add([pscustomobject]@{productId='ndi-tools';installed=$null;configured=$null;running=$null;healthy=$null;version=$null;error=$_.Exception.Message}) }
+    try {
+        $service=Get-NdiDiscoveryService
+        $exe=Get-NdiDiscoveryExe
+        $running=if($service){$service.Status -eq 'Running'}else{$null}
+        $healthy=if($running){Test-NdiServerReady ([pscustomobject]@{NdiDiscoveryPort=5959})}elseif($null -ne $running){$false}else{$null}
+        $items.Add([pscustomobject]@{productId='ndi-discovery';installed=[bool]$exe;configured=(Test-Path -LiteralPath (Get-DiscoveryConfigPath));running=$running;healthy=$healthy;version=$(if($exe){(Get-Item -LiteralPath $exe).VersionInfo.FileVersion}else{$null})})
+    } catch { $items.Add([pscustomobject]@{productId='ndi-discovery';installed=$null;configured=$null;running=$null;healthy=$null;version=$null;error=$_.Exception.Message}) }
+    try {
+        $registered=Get-RegisteredManagedDistro
+        $config=Get-SavedConfig
+        $retained=Test-Path -LiteralPath (Join-Path $script:StateRoot 'retained-server.json')
+        $items.Add([pscustomobject]@{productId='kilolink';installed=$(if($registered){$null}else{$false});configured=[bool]$config;running=$null;healthy=$null;version=$null;retainedEnvironment=$retained;roleActive=[bool]$config;
+            distroRegistered=$registered;inspection='Runtime state was not probed; inspection never starts WSL.'})
+    } catch { $items.Add([pscustomobject]@{productId='kilolink';installed=$null;configured=$null;running=$null;healthy=$null;version=$null;error=$_.Exception.Message}) }
+    try {
+        $agentRoot=Join-Path $env:ProgramFiles 'NDI Configurator\PC Agent'
+        $entry=Get-PcAgentLifecycleEntry $agentRoot 'inspect'
+        if($entry){
+            $owned=Invoke-PcAgentLifecycle $entry 'inspect'
+            $component=@($owned.components|Where-Object productId -eq 'pc-agent')
+            if($owned.outcome -ne 'succeeded' -or $component.Count -ne 1){throw 'Agent inspection did not return verified component evidence.'}
+            $items.Add($component[0])
+        } else {
+        $agent=Join-Path $agentRoot 'NDI Configurator PC Agent.exe'
+        $setup=Join-Path $agentRoot 'NDI Configurator PC Agent Setup.exe'
+        $version=Get-PcAgentBinaryVersion $agent 'NDI Configurator PC Agent'
+        $setupVersion=Get-PcAgentBinaryVersion $setup 'NDI Configurator PC Agent'
+        $installed=[bool]($version -and $setupVersion -and (Compare-PcAgentVersion $version $setupVersion) -eq 0)
+        $running=@(Get-Process -ErrorAction Stop|Where-Object { $_.Path -and [string]::Equals($_.Path,$agent,[StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+        $items.Add([pscustomobject]@{productId='pc-agent';installed=$installed;version=$version;setupVersion=$setupVersion;configured=(Test-PcAgentConfigured);running=$running;healthy=$null;onboarded=$null;channel='stable';inspection='Legacy local evidence; onboarding/health require the Agent-owned lifecycle descriptor.'})
+        }
+    } catch { $items.Add([pscustomobject]@{productId='pc-agent';installed=$null;configured=$null;running=$null;healthy=$null;version=$null;error=$_.Exception.Message}) }
+    return $items.ToArray()
+}
+
+function Get-LifecycleInspection {
+    $recovery=$false; $active=$null; $safe=$false; $journal=$null
+    $mutex=New-Object Threading.Mutex($false,'Global\KiloviewProvisioner')
+    $launcherMutex=New-Object Threading.Mutex($false,'Global\KiloviewEnvironmentSetup')
+    $owned=$false
+    $launcherOwned=$false
+    try {
+        try{$owned=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException] {$owned=$true}
+        try{$launcherOwned=$launcherMutex.WaitOne(0)}catch [Threading.AbandonedMutexException] {$launcherOwned=$true}
+        $last=Join-Path $script:StateRoot 'last-operation.json'
+        if(Test-Path -LiteralPath $last){try{$journal=Get-Content -Encoding UTF8 -LiteralPath $last -Raw|ConvertFrom-Json}catch{$recovery=$true}}
+        foreach($backup in @(Get-ChildItem -LiteralPath (Join-Path $script:StateRoot 'Backups') -Directory -ErrorAction SilentlyContinue)){
+            $status=Join-Path $backup.FullName 'status'
+            if((Test-Path -LiteralPath $status) -and (Get-Content -Encoding UTF8 -LiteralPath $status -Raw).Trim() -notin @('committed','rolled-back','backup-complete')){$recovery=$true}
+        }
+        if($journal -and $journal.outcome -in @('Running','RestartRequired')) {
+            if(-not $owned -or $journal.outcome -eq 'RestartRequired'){$active=$journal.operationId}
+            elseif(Get-PropertyValue $journal 'mutationStarted' $true){$recovery=$true}
+        }
+        if($journal -and (Get-PropertyValue $journal 'recoveryRequired' $false)){$recovery=$true}
+        $pending=Join-Path $script:StateRoot 'pending-process.json'
+        if(Test-Path -LiteralPath $pending){$recovery=$true}
+        if(Get-PendingWatchdogRecovery){$recovery=$true}
+        $safe=$owned -and $launcherOwned -and -not $recovery -and -not $active
+        $next=if($recovery){'Wait for the previous operation to finish. Open Environment Setup and choose Verify after an interrupted operation. If verification reports unresolved backup recovery, follow the recovery instructions shown with its log.'}elseif($active -or -not $launcherOwned){'Wait for the active setup window or complete its restart continuation.'}else{''}
+        [pscustomobject]@{schemaVersion=1;components=@(Get-ObservedComponents);ownerSid=(Get-ServerOwnerSid);activeOperationId=$active;safeToRetry=$safe;recoveryRequired=$recovery;nextAction=$next;configuration=(Get-SavedConfig);plan=(Get-DeploymentPlan (Get-SavedConfig))}
+    } finally {if($owned){$mutex.ReleaseMutex()};$mutex.Dispose();if($launcherOwned){$launcherMutex.ReleaseMutex()};$launcherMutex.Dispose()}
+}
+
+function Assert-NoPendingNativeProcess {
+    $path=Join-Path $script:StateRoot 'pending-process.json'
+    if(Test-Path -LiteralPath $path){$pending=Get-Content -Encoding UTF8 -LiteralPath $path -Raw|ConvertFrom-Json}
+    else {
+        # A pending-file write can fail independently of the operation journal.
+        # Retained command identity in that journal still blocks an unsafe retry.
+        $journalPath=Join-Path $script:StateRoot 'last-operation.json'
+        $journal=if(Test-Path -LiteralPath $journalPath){Get-Content -Encoding UTF8 -LiteralPath $journalPath -Raw|ConvertFrom-Json}else{$null}
+        $pending=Get-PropertyValue $journal 'pendingNativeProcess' $null
+        if(-not $pending){return}
+    }
+    $jobName=Get-PropertyValue $pending 'jobName' ''
+    if ($jobName) {
+        Initialize-LifecycleProtocol
+        if ([KiloLink.Lifecycle.ConsoleBootstrapProcess]::IsJobActive($jobName)) {
+            throw 'The previous WSL bootstrap or a descendant is still running. Wait for its tracked process tree to finish before verifying or retrying.'
+        }
+    }
+    $receipt=if(Get-PropertyValue $pending 'bootstrapResult' ''){Get-WslBootstrapReceipt $pending}else{$null}
+    $processId=[int]$pending.processId;$startedUtc=[string]$pending.startedUtc
+    if($processId -le 0 -and $receipt){$processId=[int]$receipt.hostProcessId;$startedUtc=[string]$receipt.hostStartedUtc}
+    $process=if($processId -gt 0){Get-Process -Id $processId -ErrorAction SilentlyContinue}else{$null}
+    if($process -and $process.StartTime.ToUniversalTime().ToString('o') -eq $startedUtc) {
+        throw 'The previous native command is still running. Wait for it to finish before verifying or retrying.'
+    }
+    if(Get-PropertyValue $pending 'bootstrapResult' '') {
+        if(-not $receipt -or $receipt.phase -ne 'completed') {throw 'The interrupted WSL bootstrap has no confirmed process-tree completion. Preserve its recovery records and inspect the bootstrap supervisor before retrying.'}
+    }
+    if($Action -ne 'Verify'){throw 'The previous native command has unverified completion. Inspect recovery records and run -Action Verify before retrying.'}
+}
+
+function Remove-VerifiedPendingProcess {
+    $path=Join-Path $script:StateRoot 'pending-process.json'
+    if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force -ErrorAction Stop}
+}
+
+function Test-NonServerRecovery {
+    $pendingPath=Join-Path $script:StateRoot 'pending-process.json'
+    $pending=if(Test-Path -LiteralPath $pendingPath){Get-Content -Encoding UTF8 -LiteralPath $pendingPath -Raw|ConvertFrom-Json}else{$null}
+    if($pending -and (Get-PropertyValue $pending 'action' '') -eq 'RemoveApp'){
+        if(@(Get-ConfigurationProducts).Count){throw 'Configuration app removal is incomplete. Complete or repair Windows Installer removal before verifying.'}
+        return
+    }
+    if($pending -and (Get-PropertyValue $pending 'reason' '') -match 'Windows Installer'){
+        if(@(Get-ConfigurationProducts).Count -ne 1){throw 'Windows Installer did not leave one verified configuration application. Repair it in Windows Apps before verifying.'}
+        $installed=Join-Path $env:ProgramFiles 'Kiloview\Environment Setup'
+        foreach($file in @('Install-KiloLinkSuite.ps1','QuietInstaller.cs')){
+            if((Get-FileHash -LiteralPath (Join-Path $installed $file)).Hash -ne (Get-FileHash -LiteralPath (Join-Path (Split-Path $script:PersistentLauncherPath) $file)).Hash){throw 'Configuration application payload is incomplete. Repair it in Windows Apps before verifying.'}
+        }
+        return
+    }
+    if($pending -and (Get-PropertyValue $pending 'childResult' '')){
+        $requestPath=Join-Path (Split-Path $pending.childResult) 'request.json'
+        Initialize-LifecycleProtocol
+        $child=[KiloLink.Lifecycle.Request]::LoadForProduct($requestPath,'pc-agent')
+        $result=$child.ReadResult()
+        if(-not $result -or $result['outcome'] -in @('running','restart-required') -or ($result.ContainsKey('recoveryRequired') -and $result['recoveryRequired'])){
+            throw "PC Agent still requires its own recovery. Inspect $($pending.childResult) before verifying Environment."
+        }
+    }
+    $components=@(Get-ObservedComponents)
+    foreach($id in @('ndi-tools','pc-agent')){
+        $component=@($components|Where-Object productId -eq $id)
+        if($component.Count -ne 1 -or $component[0].installed -ne $true){throw "The $id installation is not verified. Repair it with its own verified installer before verifying Environment."}
+    }
+    if(-not(Test-NdiClientToolsReady)){throw 'Required NDI Client applications are missing. Repair NDI Tools before verifying Environment.'}
 }
 
 # Durable deployment state and package policy. No machine changes at import time.
@@ -446,18 +792,22 @@ function Write-StateJson {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $temporary = Join-Path $directory ([IO.Path]::GetFileName($Path) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
-        [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Depth 15), [Text.UTF8Encoding]::new($false))
-        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
-        else { [IO.File]::Move($temporary, $Path) }
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth 15))
+        $stream=[IO.FileStream]::new($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+        Initialize-LifecycleProtocol
+        [KiloLink.Lifecycle.AtomicFile]::Commit($temporary,$Path,$null)
     } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
 }
 
 function Start-DeploymentJournal {
     param([string]$Operation, $Config)
-    $id = [guid]::NewGuid().ToString('N')
+    if ($script:ActiveJournal -and $script:ActiveJournal.outcome -eq 'Running') { $script:ActiveJournal.desired=$Config; Save-DeploymentJournal; return }
+    $id = if ($script:Lifecycle) { $script:Lifecycle.OperationId } else { [guid]::NewGuid().ToString('D') }
     $script:ActiveJournal = [ordered]@{schemaVersion=1; operationId=$id; action=$Operation; productVersion=$script:ProductVersion;
         policy=$script:ApplicationManifest.policy; ownerSid=(Get-CurrentUserSid); startedUtc=[datetime]::UtcNow.ToString('o');
-        updatedUtc=[datetime]::UtcNow.ToString('o'); outcome='Running'; desired=$Config; steps=@()}
+        updatedUtc=[datetime]::UtcNow.ToString('o'); outcome='Running'; desired=$Config; steps=@(); mutationStarted=$false;
+        attempt=$(if($script:Lifecycle){$script:Lifecycle.Attempt}else{1})}
     Save-DeploymentJournal
 }
 
@@ -478,14 +828,22 @@ function Save-DeploymentJournal {
 }
 
 function Invoke-DeploymentStep {
-    param([string]$Name, [scriptblock]$Body)
+    param([string]$Name, [scriptblock]$Body, [switch]$IncompleteOnFalse)
     if (-not $script:ActiveJournal) { & $Body; return }
     $step = [ordered]@{name=$Name; state='Running'; startedUtc=[datetime]::UtcNow.ToString('o'); finishedUtc=$null; error=$null}
     $script:ActiveJournal.steps += $step
+    $script:ActiveJournal.mutationStarted=$true
+    Write-LifecycleResult 'running' $Name -Stage $Name
     Save-DeploymentJournal
     try {
-        & $Body
-        $step.state = if ($script:OperationOutcome -eq 'RestartRequired') { 'RestartRequired' } else { 'Completed' }
+        if ($IncompleteOnFalse) {
+            $result = & $Body
+            $step.state = if ($result -is [bool] -and -not $result) { 'Incomplete' } elseif ($script:OperationOutcome -eq 'RestartRequired') { 'RestartRequired' } else { 'Completed' }
+            $result
+        } else {
+            & $Body
+            $step.state = if ($script:OperationOutcome -eq 'RestartRequired') { 'RestartRequired' } else { 'Completed' }
+        }
     } catch {
         $step.state = 'Failed'; $step.error = $_.Exception.Message
         $script:ActiveJournal.outcome = 'Failed'
@@ -510,7 +868,122 @@ function Save-InstalledPackageSet {
         ndiToolsVersion=[string](Get-PropertyValue (Get-NdiRegistration) 'DisplayVersion' 'unknown')})
 }
 
+function Test-WslRuntimeInstalled {
+    # System32\wsl.exe also exists on a clean PC. Calling that stub, even for
+    # --list/--status, can launch a detached interactive installation prompt.
+    # Require passive evidence of the separately installed runtime first.
+    $serviceKey='HKLM:\SYSTEM\CurrentControlSet\Services\WslService'
+    if (Test-Path -LiteralPath $serviceKey) {
+        $image=[Environment]::ExpandEnvironmentVariables([string](Get-ItemProperty -LiteralPath $serviceKey -Name ImagePath -ErrorAction Stop).ImagePath)
+        if ($image -match '^"?(.+?\.exe)"?(?:\s|$)' -and (Split-Path -Leaf $Matches[1]) -ieq 'wslservice.exe' -and
+            (Test-Path -LiteralPath $Matches[1] -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Matches[1]) 'wsl.exe') -PathType Leaf)) { return $true }
+    }
+    if (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue) {
+        foreach ($package in @(Get-AppxPackage -Name 'MicrosoftCorporationII.WindowsSubsystemForLinux' -ErrorAction Stop)) {
+            if ($package.InstallLocation -and (Test-Path -LiteralPath (Join-Path $package.InstallLocation 'wsl.exe') -PathType Leaf)) { return $true }
+        }
+    }
+    return $false
+}
+
+function New-WslBootstrapHost {
+    $directory=New-OwnedOperationDirectory
+    $path=Join-Path $directory 'WslBootstrapHost.exe'
+    $protocol=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('Ly8gQ29weXJpZ2h0IChjKSAyMDI2IEpvaG4gTGlnaHRmb290LiBTUERYLUxpY2Vuc2UtSWRlbnRpZmllcjogTUlUCi8vIFNoYXJlZCBieSB0aGUgbmF0aXZlIGhvc3QgYW5kIHRoZSBnZW5lcmF0ZWQgUG93ZXJTaGVsbCBlbmdpbmUuCnVzaW5nIFN5c3RlbTsKdXNpbmcgU3lzdGVtLkNvbGxlY3Rpb25zLkdlbmVyaWM7CnVzaW5nIFN5c3RlbS5JTzsKdXNpbmcgU3lzdGVtLlNlY3VyaXR5LkFjY2Vzc0NvbnRyb2w7CnVzaW5nIFN5c3RlbS5TZWN1cml0eS5QcmluY2lwYWw7CnVzaW5nIFN5c3RlbS5UZXh0Owp1c2luZyBTeXN0ZW0uUnVudGltZS5JbnRlcm9wU2VydmljZXM7CnVzaW5nIE1pY3Jvc29mdC5XaW4zMi5TYWZlSGFuZGxlczsKdXNpbmcgU3lzdGVtLldlYi5TY3JpcHQuU2VyaWFsaXphdGlvbjsKCm5hbWVzcGFjZSBLaWxvTGluay5MaWZlY3ljbGUKewogICAgcHVibGljIHN0YXRpYyBjbGFzcyBBdG9taWNGaWxlCiAgICB7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIiwgU2V0TGFzdEVycm9yPXRydWUpXQogICAgICAgIHByaXZhdGUgc3RhdGljIGV4dGVybiBib29sIFNldEZpbGVJbmZvcm1hdGlvbkJ5SGFuZGxlKFNhZmVGaWxlSGFuZGxlIGZpbGUsaW50IGluZm9ybWF0aW9uQ2xhc3MsSW50UHRyIGluZm9ybWF0aW9uLHVpbnQgc2l6ZSk7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIiwgQ2hhclNldD1DaGFyU2V0LlVuaWNvZGUsIFNldExhc3RFcnJvcj10cnVlKV0KICAgICAgICBwcml2YXRlIHN0YXRpYyBleHRlcm4gU2FmZUZpbGVIYW5kbGUgQ3JlYXRlRmlsZShzdHJpbmcgcGF0aCx1aW50IGFjY2Vzcyx1aW50IHNoYXJlLEludFB0ciBzZWN1cml0eSx1aW50IGNyZWF0aW9uLHVpbnQgZmxhZ3MsSW50UHRyIHRlbXBsYXRlKTsKCiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgYm9vbCBEZWxldGVTaGFyaW5nQ29uZmxpY3Qoc3RyaW5nIHBhdGgpCiAgICAgICAgewogICAgICAgICAgICAvLyBSZW5hbWUtb3Zlci1leGlzdGluZyBjYW4gcmVwb3J0IEFDQ0VTU19ERU5JRUQgZm9yIGFuIG9wZW4gdGFyZ2V0CiAgICAgICAgICAgIC8vIHdoaWNoIGxhY2tzIEZJTEVfU0hBUkVfREVMRVRFLiBSZXRyeSBvbmx5IHdoZW4gYSBERUxFVEUtYWNjZXNzCiAgICAgICAgICAgIC8vIHByb2JlIGNvbmZpcm1zIHNoYXJpbmcsIG5vdCBmb3IgQUNMIG9yIHJlYWQtb25seSBmYWlsdXJlcy4KICAgICAgICAgICAgdXNpbmcoU2FmZUZpbGVIYW5kbGUgaGFuZGxlPUNyZWF0ZUZpbGUocGF0aCwweDEwMDAwLDcsSW50UHRyLlplcm8sMywweDAwMjAwMDAwLEludFB0ci5aZXJvKSkgewogICAgICAgICAgICAgICAgaW50IGVycm9yPU1hcnNoYWwuR2V0TGFzdFdpbjMyRXJyb3IoKTsKICAgICAgICAgICAgICAgIHJldHVybiBoYW5kbGUuSXNJbnZhbGlkICYmIChlcnJvcj09MzIgfHwgZXJyb3I9PTMzKTsKICAgICAgICAgICAgfQogICAgICAgIH0KCiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBSZW5hbWVPdmVyRXhpc3Rpbmcoc3RyaW5nIHRlbXBvcmFyeSxzdHJpbmcgdGFyZ2V0KQogICAgICAgIHsKICAgICAgICAgICAgdXNpbmcoU2FmZUZpbGVIYW5kbGUgaGFuZGxlPUNyZWF0ZUZpbGUodGVtcG9yYXJ5LDB4MTAwMDAsNyxJbnRQdHIuWmVybywzLDB4MDAyMDAwMDAsSW50UHRyLlplcm8pKSB7CiAgICAgICAgICAgICAgICBpZihoYW5kbGUuSXNJbnZhbGlkKXtUaHJvd1JlbmFtZUVycm9yKE1hcnNoYWwuR2V0TGFzdFdpbjMyRXJyb3IoKSk7fQogICAgICAgICAgICAgICAgYnl0ZVtdIG5hbWU9RW5jb2RpbmcuVW5pY29kZS5HZXRCeXRlcyh0YXJnZXQpOwogICAgICAgICAgICAgICAgaW50IHJvb3RPZmZzZXQ9SW50UHRyLlNpemUsIGxlbmd0aE9mZnNldD1yb290T2Zmc2V0K0ludFB0ci5TaXplLCBuYW1lT2Zmc2V0PWxlbmd0aE9mZnNldCs0OwogICAgICAgICAgICAgICAgaW50IGJ1ZmZlclNpemU9bmFtZU9mZnNldCtuYW1lLkxlbmd0aCtJbnRQdHIuU2l6ZTsKICAgICAgICAgICAgICAgIEludFB0ciBidWZmZXI9TWFyc2hhbC5BbGxvY0hHbG9iYWwoYnVmZmVyU2l6ZSk7CiAgICAgICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgICAgIC8vIEluY2x1ZGUgdGhlIHRyYWlsaW5nIFdDSEFSIGFuZCBuYXRpdmUgc3RydWN0dXJlIHBhZGRpbmc7CiAgICAgICAgICAgICAgICAgICAgLy8gRmlsZU5hbWVMZW5ndGggaXRzZWxmIGV4Y2x1ZGVzIHRoYXQgdGVybWluYXRvci4KICAgICAgICAgICAgICAgICAgICBmb3IoaW50IGk9MDtpPGJ1ZmZlclNpemU7aSsrKXtNYXJzaGFsLldyaXRlQnl0ZShidWZmZXIsaSwwKTt9CiAgICAgICAgICAgICAgICAgICAgLy8gRmlsZVJlbmFtZUluZm9FeDogUkVQTEFDRV9JRl9FWElTVFMgfCBQT1NJWF9TRU1BTlRJQ1MuCiAgICAgICAgICAgICAgICAgICAgLy8gRXhpc3RpbmcgY29vcGVyYXRpdmUgcmVhZGVyIGhhbmRsZXMga2VlcCB0aGVpciBvbGQgY29tcGxldGUKICAgICAgICAgICAgICAgICAgICAvLyBzbmFwc2hvdDsgbmV3IG9wZW5zIHNlZSB0aGUgcmVwbGFjZW1lbnQuIE5vIGRlbGV0ZS9jb3B5IGdhcC4KICAgICAgICAgICAgICAgICAgICBNYXJzaGFsLldyaXRlSW50MzIoYnVmZmVyLDAsMyk7CiAgICAgICAgICAgICAgICAgICAgTWFyc2hhbC5Xcml0ZUludFB0cihidWZmZXIscm9vdE9mZnNldCxJbnRQdHIuWmVybyk7CiAgICAgICAgICAgICAgICAgICAgTWFyc2hhbC5Xcml0ZUludDMyKGJ1ZmZlcixsZW5ndGhPZmZzZXQsbmFtZS5MZW5ndGgpOwogICAgICAgICAgICAgICAgICAgIE1hcnNoYWwuQ29weShuYW1lLDAsSW50UHRyLkFkZChidWZmZXIsbmFtZU9mZnNldCksbmFtZS5MZW5ndGgpOwogICAgICAgICAgICAgICAgICAgIGlmKCFTZXRGaWxlSW5mb3JtYXRpb25CeUhhbmRsZShoYW5kbGUsMjIsYnVmZmVyLCh1aW50KWJ1ZmZlclNpemUpKXtUaHJvd1JlbmFtZUVycm9yKE1hcnNoYWwuR2V0TGFzdFdpbjMyRXJyb3IoKSk7fQogICAgICAgICAgICAgICAgfSBmaW5hbGx5IHtNYXJzaGFsLkZyZWVIR2xvYmFsKGJ1ZmZlcik7fQogICAgICAgICAgICB9CiAgICAgICAgfQoKICAgICAgICBwcml2YXRlIHN0YXRpYyB2b2lkIFRocm93UmVuYW1lRXJyb3IoaW50IGVycm9yKSB7CiAgICAgICAgICAgIHRocm93IG5ldyBJT0V4Y2VwdGlvbigiQXRvbWljIHJlbmFtZSBmYWlsZWQgKFdpbmRvd3MgZXJyb3IgIitlcnJvcisiKTogIituZXcgU3lzdGVtLkNvbXBvbmVudE1vZGVsLldpbjMyRXhjZXB0aW9uKGVycm9yKS5NZXNzYWdlLAogICAgICAgICAgICAgICAgdW5jaGVja2VkKChpbnQpMHg4MDA3MDAwMCl8ZXJyb3IpOwogICAgICAgIH0KCiAgICAgICAgcHJpdmF0ZSBzZWFsZWQgY2xhc3MgV3JpdGVyTGVhc2UgOiBJRGlzcG9zYWJsZQogICAgICAgIHsKICAgICAgICAgICAgcHJpdmF0ZSBTeXN0ZW0uVGhyZWFkaW5nLk11dGV4IG11dGV4OwogICAgICAgICAgICBwdWJsaWMgV3JpdGVyTGVhc2UoU3lzdGVtLlRocmVhZGluZy5NdXRleCB2YWx1ZSkgeyBtdXRleD12YWx1ZTsgfQogICAgICAgICAgICBwdWJsaWMgdm9pZCBEaXNwb3NlKCkgewogICAgICAgICAgICAgICAgU3lzdGVtLlRocmVhZGluZy5NdXRleCB2YWx1ZT1TeXN0ZW0uVGhyZWFkaW5nLkludGVybG9ja2VkLkV4Y2hhbmdlKHJlZiBtdXRleCxudWxsKTsKICAgICAgICAgICAgICAgIGlmKHZhbHVlIT1udWxsKXt0cnl7dmFsdWUuUmVsZWFzZU11dGV4KCk7fWZpbmFsbHl7dmFsdWUuRGlzcG9zZSgpO319CiAgICAgICAgICAgIH0KICAgICAgICB9CgogICAgICAgIHB1YmxpYyBzdGF0aWMgSURpc3Bvc2FibGUgQWNxdWlyZShzdHJpbmcgdGFyZ2V0KQogICAgICAgIHsKICAgICAgICAgICAgc3RyaW5nIGlkZW50aXR5PVBhdGguR2V0RnVsbFBhdGgodGFyZ2V0KS5Ub1VwcGVySW52YXJpYW50KCk7CiAgICAgICAgICAgIHN0cmluZyBkaWdlc3Q7CiAgICAgICAgICAgIHVzaW5nKFN5c3RlbS5TZWN1cml0eS5DcnlwdG9ncmFwaHkuU0hBMjU2IGhhc2g9U3lzdGVtLlNlY3VyaXR5LkNyeXB0b2dyYXBoeS5TSEEyNTYuQ3JlYXRlKCkpIHsKICAgICAgICAgICAgICAgIGRpZ2VzdD1CaXRDb252ZXJ0ZXIuVG9TdHJpbmcoaGFzaC5Db21wdXRlSGFzaChFbmNvZGluZy5Vbmljb2RlLkdldEJ5dGVzKGlkZW50aXR5KSkpLlJlcGxhY2UoIi0iLCIiKTsKICAgICAgICAgICAgfQogICAgICAgICAgICAvLyBTeW5jaHJvbml6ZSBlbGV2YXRlZC9uYXRpdmUvUG93ZXJTaGVsbCB3cml0ZXJzIGFjcm9zcyBXaW5kb3dzIHNlc3Npb25zLgogICAgICAgICAgICBNdXRleFNlY3VyaXR5IHNlY3VyaXR5PW5ldyBNdXRleFNlY3VyaXR5KCk7c2VjdXJpdHkuU2V0QWNjZXNzUnVsZVByb3RlY3Rpb24odHJ1ZSxmYWxzZSk7CiAgICAgICAgICAgIGZvcmVhY2goU2VjdXJpdHlJZGVudGlmaWVyIHNpZCBpbiBuZXdbXXtXaW5kb3dzSWRlbnRpdHkuR2V0Q3VycmVudCgpLlVzZXIsbmV3IFNlY3VyaXR5SWRlbnRpZmllcihXZWxsS25vd25TaWRUeXBlLkxvY2FsU3lzdGVtU2lkLG51bGwpLG5ldyBTZWN1cml0eUlkZW50aWZpZXIoV2VsbEtub3duU2lkVHlwZS5CdWlsdGluQWRtaW5pc3RyYXRvcnNTaWQsbnVsbCl9KSB7CiAgICAgICAgICAgICAgICBzZWN1cml0eS5BZGRBY2Nlc3NSdWxlKG5ldyBNdXRleEFjY2Vzc1J1bGUoc2lkLE11dGV4UmlnaHRzLkZ1bGxDb250cm9sLEFjY2Vzc0NvbnRyb2xUeXBlLkFsbG93KSk7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgYm9vbCBjcmVhdGVkOwogICAgICAgICAgICBTeXN0ZW0uVGhyZWFkaW5nLk11dGV4IG11dGV4PW5ldyBTeXN0ZW0uVGhyZWFkaW5nLk11dGV4KGZhbHNlLEAiR2xvYmFsXEtpbG92aWV3LkF0b21pY0ZpbGUuIitkaWdlc3Qsb3V0IGNyZWF0ZWQsc2VjdXJpdHkpOwogICAgICAgICAgICBib29sIGFjcXVpcmVkPWZhbHNlOwogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgdHJ5IHthY3F1aXJlZD1tdXRleC5XYWl0T25lKDUwMDApO30gY2F0Y2goU3lzdGVtLlRocmVhZGluZy5BYmFuZG9uZWRNdXRleEV4Y2VwdGlvbil7YWNxdWlyZWQ9dHJ1ZTt9CiAgICAgICAgICAgICAgICBpZighYWNxdWlyZWQpe3Rocm93IG5ldyBJT0V4Y2VwdGlvbigiQW5vdGhlciB3cml0ZXIgc3RpbGwgb3ducyB0aGUgYXRvbWljIHJlc3VsdCBjb21taXQgYWZ0ZXIgZml2ZSBzZWNvbmRzOiAiK3RhcmdldCk7fQogICAgICAgICAgICAgICAgcmV0dXJuIG5ldyBXcml0ZXJMZWFzZShtdXRleCk7CiAgICAgICAgICAgIH0gY2F0Y2gge2lmKGFjcXVpcmVkKXttdXRleC5SZWxlYXNlTXV0ZXgoKTt9bXV0ZXguRGlzcG9zZSgpO3Rocm93O30KICAgICAgICB9CgogICAgICAgIC8vIFJlbmFtZSBhIGZsdXNoZWQgc2libGluZyBvdmVyIHRoZSBvbGQgZmlsZSBpbiBvbmUgZmlsZXN5c3RlbSBvcGVyYXRpb24uCiAgICAgICAgLy8gUmVwbGFjZUZpbGUncyBBQ0wvc3RyZWFtIG1lcmdlIGNhbiBwYXJ0aWFsbHkgcmVuYW1lIGZpbGVzIG9uIGVycm9ycyAxMTc2LwogICAgICAgIC8vIDExNzcuIERvIG5vdCB1c2UgdGhhdCBvcGVyYXRpb24sIGRlbGV0ZS90cnVuY2F0ZSB0aGUgdGFyZ2V0LCBvciBjb3B5IGl0LgogICAgICAgIHB1YmxpYyBzdGF0aWMgdm9pZCBDb21taXQoc3RyaW5nIHRlbXBvcmFyeSwgc3RyaW5nIHRhcmdldCwgQWN0aW9uIHZhbGlkYXRlKQogICAgICAgIHsKICAgICAgICAgICAgdGVtcG9yYXJ5PVBhdGguR2V0RnVsbFBhdGgodGVtcG9yYXJ5KTt0YXJnZXQ9UGF0aC5HZXRGdWxsUGF0aCh0YXJnZXQpOwogICAgICAgICAgICBpZighU3RyaW5nLkVxdWFscyhQYXRoLkdldERpcmVjdG9yeU5hbWUodGVtcG9yYXJ5KSxQYXRoLkdldERpcmVjdG9yeU5hbWUodGFyZ2V0KSxTdHJpbmdDb21wYXJpc29uLk9yZGluYWxJZ25vcmVDYXNlKQogICAgICAgICAgICAgICAgfHwgU3RyaW5nLkVxdWFscyh0ZW1wb3JhcnksdGFyZ2V0LFN0cmluZ0NvbXBhcmlzb24uT3JkaW5hbElnbm9yZUNhc2UpKSB7CiAgICAgICAgICAgICAgICB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIkF0b21pYyByZXBsYWNlbWVudCByZXF1aXJlcyBhIGRpc3RpbmN0IHN0YWdlZCBmaWxlIGluIHRoZSBkZXN0aW5hdGlvbiBkaXJlY3RvcnkuIik7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgdXNpbmcoQWNxdWlyZSh0YXJnZXQpKSB7CiAgICAgICAgICAgIFN5c3RlbS5EaWFnbm9zdGljcy5TdG9wd2F0Y2ggZWxhcHNlZCA9IFN5c3RlbS5EaWFnbm9zdGljcy5TdG9wd2F0Y2guU3RhcnROZXcoKTsKICAgICAgICAgICAgaW50IGRlbGF5ID0gMjU7CiAgICAgICAgICAgIHdoaWxlICh0cnVlKSB7CiAgICAgICAgICAgICAgICBpZiAodmFsaWRhdGUgIT0gbnVsbCkgeyB2YWxpZGF0ZSgpOyB9CiAgICAgICAgICAgICAgICBTYWZlUGF0aC5DaGVjayh0ZW1wb3JhcnkpO1NhZmVQYXRoLkNoZWNrUGFyZW50KHRhcmdldCk7CiAgICAgICAgICAgICAgICBpZihGaWxlLkV4aXN0cyh0YXJnZXQpKSB7CiAgICAgICAgICAgICAgICAgICAgLy8gQSBzdGFnZWQgZmlsZSBpbmhlcml0cyB0aGUgZGlyZWN0b3J5IEFDTC4gUHJlc2VydmUgYW55CiAgICAgICAgICAgICAgICAgICAgLy8gc3RyaWN0ZXIgYWNjZXNzIEFDTCBvbiB0aGUgZXhpc3RpbmcgcmVzdWx0IGJlZm9yZSByZW5hbWUuCiAgICAgICAgICAgICAgICAgICAgRmlsZVNlY3VyaXR5IGFjY2Vzcz1uZXcgRmlsZVNlY3VyaXR5KCk7CiAgICAgICAgICAgICAgICAgICAgYWNjZXNzLlNldFNlY3VyaXR5RGVzY3JpcHRvckJpbmFyeUZvcm0oRmlsZS5HZXRBY2Nlc3NDb250cm9sKHRhcmdldCxBY2Nlc3NDb250cm9sU2VjdGlvbnMuQWNjZXNzKS5HZXRTZWN1cml0eURlc2NyaXB0b3JCaW5hcnlGb3JtKCksQWNjZXNzQ29udHJvbFNlY3Rpb25zLkFjY2Vzcyk7CiAgICAgICAgICAgICAgICAgICAgRmlsZS5TZXRBY2Nlc3NDb250cm9sKHRlbXBvcmFyeSxhY2Nlc3MpOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgICAgICBSZW5hbWVPdmVyRXhpc3RpbmcodGVtcG9yYXJ5LHRhcmdldCk7CiAgICAgICAgICAgICAgICAgICAgcmV0dXJuOwogICAgICAgICAgICAgICAgfSBjYXRjaCAoSU9FeGNlcHRpb24gZXhjZXB0aW9uKSB7CiAgICAgICAgICAgICAgICAgICAgaW50IGNvZGUgPSBleGNlcHRpb24uSFJlc3VsdCAmIDB4ZmZmZjsKICAgICAgICAgICAgICAgICAgICBpZiAoY29kZSAhPSAzMiAmJiBjb2RlICE9IDMzICYmICEoY29kZT09NSAmJiAoRGVsZXRlU2hhcmluZ0NvbmZsaWN0KHRhcmdldCkgfHwgRGVsZXRlU2hhcmluZ0NvbmZsaWN0KHRlbXBvcmFyeSkpKSkgeyB0aHJvdzsgfQogICAgICAgICAgICAgICAgICAgIGlmIChlbGFwc2VkLkVsYXBzZWRNaWxsaXNlY29uZHMgPj0gNTAwMCkgewogICAgICAgICAgICAgICAgICAgICAgICB0aHJvdyBuZXcgSU9FeGNlcHRpb24oIkNvdWxkIG5vdCBhdG9taWNhbGx5IHNhdmUgIiArIHRhcmdldAogICAgICAgICAgICAgICAgICAgICAgICAgICAgKyAiIGJlY2F1c2UgV2luZG93cyBrZXB0IHJlcG9ydGluZyBmaWxlIHNoYXJpbmcgY29uZmxpY3RzIGZvciBmaXZlIHNlY29uZHMuIFRoZSBwcmV2aW91cyBmaWxlIHdhcyByZXRhaW5lZC4gSW5zcGVjdCB0aGUgb3BlcmF0aW9uIGpvdXJuYWwgYW5kIHdyaXRlciBkaWFnbm9zdGljcyBiZWZvcmUgcmV0cnlpbmcuIiwgZXhjZXB0aW9uKTsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgU3lzdGVtLlRocmVhZGluZy5UaHJlYWQuU2xlZXAoTWF0aC5NYXgoMSwgTWF0aC5NaW4oZGVsYXksIChpbnQpKDUwMDAgLSBlbGFwc2VkLkVsYXBzZWRNaWxsaXNlY29uZHMpKSkpOwogICAgICAgICAgICAgICAgICAgIGRlbGF5ID0gTWF0aC5NaW4oMjUwLCBkZWxheSAqIDIpOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICB9CiAgICAgICAgICAgIH0KICAgICAgICB9CiAgICB9CgogICAgcHVibGljIHN0YXRpYyBjbGFzcyBDb25maWd1cmF0aW9uTXNpCiAgICB7CiAgICAgICAgW0RsbEltcG9ydCgibXNpLmRsbCIsQ2hhclNldD1DaGFyU2V0LlVuaWNvZGUpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gdWludCBNc2lFbnVtUmVsYXRlZFByb2R1Y3RzKHN0cmluZyB1cGdyYWRlLHVpbnQgcmVzZXJ2ZWQsdWludCBpbmRleCxTdHJpbmdCdWlsZGVyIHByb2R1Y3QpOwogICAgICAgIFtEbGxJbXBvcnQoIm1zaS5kbGwiLENoYXJTZXQ9Q2hhclNldC5Vbmljb2RlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGludCBNc2lRdWVyeVByb2R1Y3RTdGF0ZShzdHJpbmcgcHJvZHVjdCk7CiAgICAgICAgcHVibGljIHN0YXRpYyBzdHJpbmdbXSBJbnN0YWxsZWRQcm9kdWN0cygpIHsKICAgICAgICAgICAgTGlzdDxzdHJpbmc+IHByb2R1Y3RzPW5ldyBMaXN0PHN0cmluZz4oKTsKICAgICAgICAgICAgZm9yKHVpbnQgaW5kZXg9MDs7aW5kZXgrKykgewogICAgICAgICAgICAgICAgU3RyaW5nQnVpbGRlciBwcm9kdWN0PW5ldyBTdHJpbmdCdWlsZGVyKDM5KTt1aW50IGNvZGU9TXNpRW51bVJlbGF0ZWRQcm9kdWN0cygie0VCMTVGNzlELTY1OTgtNEFCMS04RTM5LUI4RDkyN0IwNTg2Mn0iLDAsaW5kZXgscHJvZHVjdCk7CiAgICAgICAgICAgICAgICBpZihjb2RlPT0yNTkpe2JyZWFrO31pZihjb2RlIT0wKXt0aHJvdyBuZXcgU3lzdGVtLkNvbXBvbmVudE1vZGVsLldpbjMyRXhjZXB0aW9uKChpbnQpY29kZSk7fQogICAgICAgICAgICAgICAgaWYoTXNpUXVlcnlQcm9kdWN0U3RhdGUocHJvZHVjdC5Ub1N0cmluZygpKT09NSl7cHJvZHVjdHMuQWRkKHByb2R1Y3QuVG9TdHJpbmcoKSk7fQogICAgICAgICAgICB9CiAgICAgICAgICAgIHJldHVybiBwcm9kdWN0cy5Ub0FycmF5KCk7CiAgICAgICAgfQogICAgfQoKICAgIHB1YmxpYyBzdGF0aWMgY2xhc3MgU2FmZVBhdGgKICAgIHsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLCBDaGFyU2V0PUNoYXJTZXQuVW5pY29kZSwgU2V0TGFzdEVycm9yPXRydWUpXQogICAgICAgIHByaXZhdGUgc3RhdGljIGV4dGVybiBTYWZlRmlsZUhhbmRsZSBDcmVhdGVGaWxlKHN0cmluZyBwYXRoLHVpbnQgYWNjZXNzLHVpbnQgc2hhcmUsSW50UHRyIHNlY3VyaXR5LHVpbnQgY3JlYXRpb24sdWludCBmbGFncyxJbnRQdHIgdGVtcGxhdGUpOwogICAgICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsIFNldExhc3RFcnJvcj10cnVlKV0KICAgICAgICBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBEZXZpY2VJb0NvbnRyb2woU2FmZUZpbGVIYW5kbGUgZmlsZSx1aW50IGNvZGUsSW50UHRyIGlucHV0LGludCBpbnB1dFNpemUsYnl0ZVtdIG91dHB1dCxpbnQgb3V0cHV0U2l6ZSxvdXQgaW50IHJldHVybmVkLEludFB0ciBvdmVybGFwKTsKICAgICAgICBbU3RydWN0TGF5b3V0KExheW91dEtpbmQuU2VxdWVudGlhbCldIHByaXZhdGUgc3RydWN0IEZpbGVJbmZvIHsKICAgICAgICAgICAgaW50ZXJuYWwgdWludCBBdHRyaWJ1dGVzO2ludGVybmFsIFN5c3RlbS5SdW50aW1lLkludGVyb3BTZXJ2aWNlcy5Db21UeXBlcy5GSUxFVElNRSBDcmVhdGlvbixBY2Nlc3MsV3JpdGU7CiAgICAgICAgICAgIGludGVybmFsIHVpbnQgVm9sdW1lU2VyaWFsLFNpemVIaWdoLFNpemVMb3csTGlua3MsSWRIaWdoLElkTG93OwogICAgICAgIH0KICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgR2V0RmlsZUluZm9ybWF0aW9uQnlIYW5kbGUoU2FmZUZpbGVIYW5kbGUgZmlsZSxvdXQgRmlsZUluZm8gaW5mbyk7CiAgICAgICAgcHVibGljIHN0YXRpYyBib29sIElzQWxsb3dlZENsb3VkVGFnKHVpbnQgdGFnKSB7IHJldHVybiAodGFnICYgMHhmZmZmMGZmZlUpID09IDB4OTAwMDAwMWFVOyB9CiAgICAgICAgcHVibGljIHN0YXRpYyB2b2lkIENoZWNrUGFyZW50KHN0cmluZyBwYXRoKSB7CiAgICAgICAgICAgIHBhdGg9UGF0aC5HZXRGdWxsUGF0aChwYXRoKTsKICAgICAgICAgICAgd2hpbGUoIURpcmVjdG9yeS5FeGlzdHMocGF0aCkgJiYgIUZpbGUuRXhpc3RzKHBhdGgpKXtwYXRoPVBhdGguR2V0RGlyZWN0b3J5TmFtZShwYXRoKTtpZihTdHJpbmcuSXNOdWxsT3JFbXB0eShwYXRoKSl7dGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJObyBleGlzdGluZyBwYXJlbnQgZGlyZWN0b3J5LiIpO319CiAgICAgICAgICAgIENoZWNrKHBhdGgpOwogICAgICAgIH0KICAgICAgICBwdWJsaWMgc3RhdGljIHZvaWQgQ2hlY2soc3RyaW5nIHBhdGgpCiAgICAgICAgewogICAgICAgICAgICBwYXRoPVBhdGguR2V0RnVsbFBhdGgocGF0aCk7CiAgICAgICAgICAgIHdoaWxlKCFTdHJpbmcuSXNOdWxsT3JFbXB0eShwYXRoKSkgewogICAgICAgICAgICAgICAgRmlsZUF0dHJpYnV0ZXMgYXR0cmlidXRlcz1GaWxlLkdldEF0dHJpYnV0ZXMocGF0aCk7CiAgICAgICAgICAgICAgICBpZigoYXR0cmlidXRlcyAmIEZpbGVBdHRyaWJ1dGVzLkRpcmVjdG9yeSk9PTApIHsKICAgICAgICAgICAgICAgICAgICB1c2luZyhTYWZlRmlsZUhhbmRsZSBoYW5kbGU9Q3JlYXRlRmlsZShwYXRoLDAsNyxJbnRQdHIuWmVybywzLDB4MDAyMDAwMDAsSW50UHRyLlplcm8pKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIEZpbGVJbmZvIGluZm87CiAgICAgICAgICAgICAgICAgICAgICAgIGlmKGhhbmRsZS5Jc0ludmFsaWQgfHwgIUdldEZpbGVJbmZvcm1hdGlvbkJ5SGFuZGxlKGhhbmRsZSxvdXQgaW5mbykgfHwgaW5mby5MaW5rcyE9MSl7dGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJMaWZlY3ljbGUvbWFpbnRlbmFuY2UgZmlsZXMgY2Fubm90IGhhdmUgbXVsdGlwbGUgaGFyZCBsaW5rczogIitwYXRoKTt9CiAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgaWYgKChhdHRyaWJ1dGVzICYgRmlsZUF0dHJpYnV0ZXMuUmVwYXJzZVBvaW50KSAhPSAwKSB7CiAgICAgICAgICAgICAgICAgICAgdXNpbmcoU2FmZUZpbGVIYW5kbGUgaGFuZGxlPUNyZWF0ZUZpbGUocGF0aCwwLDcsSW50UHRyLlplcm8sMywweDAyMjAwMDAwLEludFB0ci5aZXJvKSkgewogICAgICAgICAgICAgICAgICAgICAgICBieXRlW10gZGF0YT1uZXcgYnl0ZVsxNjM4NF07IGludCBjb3VudDsKICAgICAgICAgICAgICAgICAgICAgICAgaWYoaGFuZGxlLklzSW52YWxpZCB8fCAhRGV2aWNlSW9Db250cm9sKGhhbmRsZSwweDkwMGE4LEludFB0ci5aZXJvLDAsZGF0YSxkYXRhLkxlbmd0aCxvdXQgY291bnQsSW50UHRyLlplcm8pCiAgICAgICAgICAgICAgICAgICAgICAgICAgICB8fCBjb3VudDw4IHx8ICFJc0FsbG93ZWRDbG91ZFRhZyhCaXRDb252ZXJ0ZXIuVG9VSW50MzIoZGF0YSwwKSkpIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHRocm93IG5ldyBJbnZhbGlkRGF0YUV4Y2VwdGlvbigiUGF0aCB0cmF2ZXJzZXMgYW4gdW5zdXBwb3J0ZWQgbGluayBvciByZXBhcnNlIHBvaW50OiAiICsgcGF0aCk7CiAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBwYXRoPVBhdGguR2V0RGlyZWN0b3J5TmFtZShwYXRoKTsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgIH0KCiAgICBwdWJsaWMgc2VhbGVkIGNsYXNzIE5hdGl2ZVByb2Nlc3MgOiBJRGlzcG9zYWJsZQogICAgewogICAgICAgIHByaXZhdGUgcmVhZG9ubHkgU3lzdGVtLkRpYWdub3N0aWNzLlByb2Nlc3MgcHJvY2VzczsKICAgICAgICBwcml2YXRlIHJlYWRvbmx5IFN5c3RlbS5Db2xsZWN0aW9ucy5Db25jdXJyZW50LkNvbmN1cnJlbnRRdWV1ZTxzdHJpbmc+IGxpbmVzID0gbmV3IFN5c3RlbS5Db2xsZWN0aW9ucy5Db25jdXJyZW50LkNvbmN1cnJlbnRRdWV1ZTxzdHJpbmc+KCk7CiAgICAgICAgcHJpdmF0ZSBsb25nIGxhc3RPdXRwdXQgPSBEYXRlVGltZS5VdGNOb3cuVGlja3M7CiAgICAgICAgcHVibGljIERhdGVUaW1lIFN0YXJ0ZWRVdGMgeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIERhdGVUaW1lIExhc3RPdXRwdXRVdGMgeyBnZXQgeyByZXR1cm4gbmV3IERhdGVUaW1lKFN5c3RlbS5UaHJlYWRpbmcuSW50ZXJsb2NrZWQuUmVhZChyZWYgbGFzdE91dHB1dCksIERhdGVUaW1lS2luZC5VdGMpOyB9IH0KICAgICAgICBwdWJsaWMgYm9vbCBIYXNFeGl0ZWQgeyBnZXQgeyByZXR1cm4gcHJvY2Vzcy5IYXNFeGl0ZWQ7IH0gfQogICAgICAgIHB1YmxpYyBpbnQgRXhpdENvZGUgeyBnZXQgeyBwcm9jZXNzLldhaXRGb3JFeGl0KCk7IHJldHVybiBwcm9jZXNzLkV4aXRDb2RlOyB9IH0KICAgICAgICBwdWJsaWMgaW50IElkIHsgZ2V0IHsgcmV0dXJuIHByb2Nlc3MuSWQ7IH0gfQogICAgICAgIHB1YmxpYyBOYXRpdmVQcm9jZXNzKHN0cmluZyBmaWxlLCBzdHJpbmdbXSBhcmd1bWVudHMpCiAgICAgICAgewogICAgICAgICAgICBwcm9jZXNzID0gbmV3IFN5c3RlbS5EaWFnbm9zdGljcy5Qcm9jZXNzKCk7CiAgICAgICAgICAgIExpc3Q8c3RyaW5nPiBxdW90ZWQgPSBuZXcgTGlzdDxzdHJpbmc+KCk7CiAgICAgICAgICAgIGZvcmVhY2ggKHN0cmluZyBhcmd1bWVudCBpbiBhcmd1bWVudHMpIHsgcXVvdGVkLkFkZChRdW90ZShhcmd1bWVudCkpOyB9CiAgICAgICAgICAgIHByb2Nlc3MuU3RhcnRJbmZvID0gbmV3IFN5c3RlbS5EaWFnbm9zdGljcy5Qcm9jZXNzU3RhcnRJbmZvKGZpbGUsIFN0cmluZy5Kb2luKCIgIiwgcXVvdGVkKSkgewogICAgICAgICAgICAgICAgVXNlU2hlbGxFeGVjdXRlID0gZmFsc2UsIENyZWF0ZU5vV2luZG93ID0gdHJ1ZSwgUmVkaXJlY3RTdGFuZGFyZE91dHB1dCA9IHRydWUsIFJlZGlyZWN0U3RhbmRhcmRFcnJvciA9IHRydWUsIFJlZGlyZWN0U3RhbmRhcmRJbnB1dCA9IHRydWUgfTsKICAgICAgICAgICAgcHJvY2Vzcy5PdXRwdXREYXRhUmVjZWl2ZWQgKz0gUmVjZWl2ZTsgcHJvY2Vzcy5FcnJvckRhdGFSZWNlaXZlZCArPSBSZWNlaXZlOwogICAgICAgICAgICBpZiAoIXByb2Nlc3MuU3RhcnQoKSkgeyB0aHJvdyBuZXcgSU9FeGNlcHRpb24oIldpbmRvd3MgZGlkIG5vdCBzdGFydCB0aGUgcmVxdWVzdGVkIGNvbW1hbmQuIik7IH0KICAgICAgICAgICAgU3RhcnRlZFV0YyA9IHByb2Nlc3MuU3RhcnRUaW1lLlRvVW5pdmVyc2FsVGltZSgpOyBwcm9jZXNzLlN0YW5kYXJkSW5wdXQuQ2xvc2UoKTsKICAgICAgICAgICAgcHJvY2Vzcy5CZWdpbk91dHB1dFJlYWRMaW5lKCk7IHByb2Nlc3MuQmVnaW5FcnJvclJlYWRMaW5lKCk7CiAgICAgICAgfQogICAgICAgIHByaXZhdGUgdm9pZCBSZWNlaXZlKG9iamVjdCBzZW5kZXIsIFN5c3RlbS5EaWFnbm9zdGljcy5EYXRhUmVjZWl2ZWRFdmVudEFyZ3MgYXJncykgewogICAgICAgICAgICBpZiAoYXJncy5EYXRhICE9IG51bGwpIHsgbGluZXMuRW5xdWV1ZShhcmdzLkRhdGEuUmVwbGFjZSgiXDAiLCAiIikpOyBTeXN0ZW0uVGhyZWFkaW5nLkludGVybG9ja2VkLkV4Y2hhbmdlKHJlZiBsYXN0T3V0cHV0LCBEYXRlVGltZS5VdGNOb3cuVGlja3MpOyB9CiAgICAgICAgfQogICAgICAgIHB1YmxpYyBzdHJpbmdbXSBEcmFpbigpIHsgTGlzdDxzdHJpbmc+IHJlc3VsdCA9IG5ldyBMaXN0PHN0cmluZz4oKTsgc3RyaW5nIGxpbmU7IHdoaWxlKGxpbmVzLlRyeURlcXVldWUob3V0IGxpbmUpKSB7IHJlc3VsdC5BZGQobGluZSk7IH0gcmV0dXJuIHJlc3VsdC5Ub0FycmF5KCk7IH0KICAgICAgICBwdWJsaWMgdm9pZCBTdG9wUHJvYmUoKSB7IGlmICghcHJvY2Vzcy5IYXNFeGl0ZWQpIHsgcHJvY2Vzcy5LaWxsKCk7IHByb2Nlc3MuV2FpdEZvckV4aXQoNTAwMCk7IH0gfQogICAgICAgIHB1YmxpYyB2b2lkIERpc3Bvc2UoKSB7IHByb2Nlc3MuRGlzcG9zZSgpOyB9CiAgICAgICAgcHVibGljIHN0YXRpYyBzdHJpbmcgUXVvdGUoc3RyaW5nIHZhbHVlKSB7CiAgICAgICAgICAgIC8vIFdTTCBkaXNwYXRjaGVzIGl0cyBsZWFkaW5nIHN3aXRjaGVzIGZyb20gcmF3IGNvbW1hbmQtbGluZSB0b2tlbnM7CiAgICAgICAgICAgIC8vIHdyYXBwaW5nIC0taW5zdGFsbC8tLXN0YXR1cyBpbiBxdW90ZXMgcHJldmVudHMgdGhlaXIgcmVjb2duaXRpb24uCiAgICAgICAgICAgIC8vIFF1b3RlIG9ubHkgd2hlbiBuZWVkZWQsIHJldGFpbmluZyBXaW5kb3dzIGVzY2FwaW5nIGZvciBhcmd1bWVudCBkYXRhLgogICAgICAgICAgICBpZiAoIVN0cmluZy5Jc051bGxPckVtcHR5KHZhbHVlKSkgewogICAgICAgICAgICAgICAgYm9vbCByZXF1aXJlZCA9IGZhbHNlOwogICAgICAgICAgICAgICAgZm9yZWFjaChjaGFyIGMgaW4gdmFsdWUpIHsgaWYgKENoYXIuSXNXaGl0ZVNwYWNlKGMpIHx8IGMgPT0gJyInKSB7IHJlcXVpcmVkID0gdHJ1ZTsgYnJlYWs7IH0gfQogICAgICAgICAgICAgICAgaWYgKCFyZXF1aXJlZCkgeyByZXR1cm4gdmFsdWU7IH0KICAgICAgICAgICAgfQogICAgICAgICAgICBTdHJpbmdCdWlsZGVyIHJlc3VsdCA9IG5ldyBTdHJpbmdCdWlsZGVyKCJcIiIpOyBpbnQgc2xhc2hlcyA9IDA7CiAgICAgICAgICAgIGZvcmVhY2goY2hhciBjIGluIHZhbHVlID8/ICIiKSB7CiAgICAgICAgICAgICAgICBpZihjID09ICdcXCcpIHsgc2xhc2hlcysrOyBjb250aW51ZTsgfQogICAgICAgICAgICAgICAgaWYoYyA9PSAnIicpIHsgcmVzdWx0LkFwcGVuZCgnXFwnLCBzbGFzaGVzICogMiArIDEpLkFwcGVuZChjKTsgfQogICAgICAgICAgICAgICAgZWxzZSB7IHJlc3VsdC5BcHBlbmQoJ1xcJywgc2xhc2hlcykuQXBwZW5kKGMpOyB9CiAgICAgICAgICAgICAgICBzbGFzaGVzID0gMDsKICAgICAgICAgICAgfQogICAgICAgICAgICByZXR1cm4gcmVzdWx0LkFwcGVuZCgnXFwnLCBzbGFzaGVzICogMikuQXBwZW5kKCciJykuVG9TdHJpbmcoKTsKICAgICAgICB9CiAgICB9CgogICAgLy8gVGhlIFdpbmRvd3MgaW5ib3ggV1NMIGJvb3RzdHJhcCBuZWVkcyBjb25zb2xlIGhhbmRsZXMuIEtlZXAgdGhpcyBwYXRoCiAgICAvLyBzZXBhcmF0ZSBmcm9tIHJlZGlyZWN0ZWQgcHJvYmVzOiBpdCBoYXMgYSBoaWRkZW4gY29uc29sZS9wcml2YXRlIGRlc2t0b3AKICAgIC8vIGFuZCBhIGpvYiBhc3NpZ25lZCBiZWZvcmUgaXRzIGZpcnN0IGluc3RydWN0aW9uLiBBIHJvb3QgZXhpdCBpcyBub3QgYQogICAgLy8gY29tcGxldGVkIG9wZXJhdGlvbiB3aGlsZSBkZXNjZW5kYW50cyByZW1haW4uIENsb3Npbmcgb3VyIGhhbmRsZXMgbmV2ZXIKICAgIC8vIHRlcm1pbmF0ZXMgc2VydmljaW5nLiBBbiBpbmRlcGVuZGVudCBob3N0IHJldGFpbnMgdGhpcyBpbnN0YW5jZSB1bnRpbCB0aGUKICAgIC8vIHRyZWUgZXhpdHMgYW5kIHdyaXRlcyBhIGR1cmFibGUgY29tcGxldGlvbiByZWNlaXB0IGZvciBsYXRlciByZWNvdmVyeS4KICAgIHB1YmxpYyBzZWFsZWQgY2xhc3MgQ29uc29sZUJvb3RzdHJhcFByb2Nlc3MgOiBJRGlzcG9zYWJsZQogICAgewogICAgICAgIHByaXZhdGUgSW50UHRyIGRlc2t0b3AsIGpvYiwgcHJvY2VzczsKICAgICAgICBwdWJsaWMgaW50IElkIHsgZ2V0OyBwcml2YXRlIHNldDsgfQogICAgICAgIHB1YmxpYyBEYXRlVGltZSBTdGFydGVkVXRjIHsgZ2V0OyBwcml2YXRlIHNldDsgfQogICAgICAgIHB1YmxpYyBzdHJpbmcgSm9iTmFtZSB7IGdldDsgcHJpdmF0ZSBzZXQ7IH0KICAgICAgICBwcml2YXRlIGNvbnN0IHN0cmluZyBKb2JQcmVmaXggPSAiR2xvYmFsXFxLaWxvdmlld1dzbEJvb3RzdHJhcF8iOwoKICAgICAgICBwdWJsaWMgQ29uc29sZUJvb3RzdHJhcFByb2Nlc3Moc3RyaW5nIGZpbGUsIHN0cmluZ1tdIGFyZ3VtZW50cywgc3RyaW5nIGpvYk5hbWUpCiAgICAgICAgewogICAgICAgICAgICBWYWxpZGF0ZUpvYk5hbWUoam9iTmFtZSk7CiAgICAgICAgICAgIEpvYk5hbWUgPSBqb2JOYW1lOwogICAgICAgICAgICBQcm9jZXNzSW5mb3JtYXRpb24gY2hpbGQgPSBuZXcgUHJvY2Vzc0luZm9ybWF0aW9uKCk7CiAgICAgICAgICAgIHRyeSB7CiAgICAgICAgICAgICAgICBqb2IgPSBDcmVhdGVKb2JPYmplY3QoSW50UHRyLlplcm8sIGpvYk5hbWUpOwogICAgICAgICAgICAgICAgaW50IGVycm9yID0gTWFyc2hhbC5HZXRMYXN0V2luMzJFcnJvcigpOwogICAgICAgICAgICAgICAgaWYgKGpvYiA9PSBJbnRQdHIuWmVybykgeyB0aHJvdyBuZXcgU3lzdGVtLkNvbXBvbmVudE1vZGVsLldpbjMyRXhjZXB0aW9uKGVycm9yKTsgfQogICAgICAgICAgICAgICAgaWYgKGVycm9yID09IDE4MykgeyB0aHJvdyBuZXcgSU9FeGNlcHRpb24oIlRoZSBib290c3RyYXAgam9iIGFscmVhZHkgZXhpc3RzLiIpOyB9CiAgICAgICAgICAgICAgICBzdHJpbmcgZGVza3RvcE5hbWUgPSAiS2lsb3ZpZXdXc2xfIiArIEd1aWQuTmV3R3VpZCgpLlRvU3RyaW5nKCJOIik7CiAgICAgICAgICAgICAgICBkZXNrdG9wID0gQ3JlYXRlRGVza3RvcChkZXNrdG9wTmFtZSwgbnVsbCwgSW50UHRyLlplcm8sIDAsIDB4MDFGRiwgSW50UHRyLlplcm8pOwogICAgICAgICAgICAgICAgaWYgKGRlc2t0b3AgPT0gSW50UHRyLlplcm8pIHsgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOyB9CiAgICAgICAgICAgICAgICBMaXN0PHN0cmluZz4gcXVvdGVkID0gbmV3IExpc3Q8c3RyaW5nPigpOwogICAgICAgICAgICAgICAgZm9yZWFjaCAoc3RyaW5nIGFyZ3VtZW50IGluIGFyZ3VtZW50cykgeyBxdW90ZWQuQWRkKE5hdGl2ZVByb2Nlc3MuUXVvdGUoYXJndW1lbnQpKTsgfQogICAgICAgICAgICAgICAgU3RhcnR1cEluZm9ybWF0aW9uIHN0YXJ0dXAgPSBuZXcgU3RhcnR1cEluZm9ybWF0aW9uKCk7CiAgICAgICAgICAgICAgICBzdGFydHVwLmNiID0gTWFyc2hhbC5TaXplT2Yoc3RhcnR1cCk7IHN0YXJ0dXAubHBEZXNrdG9wID0gZGVza3RvcE5hbWU7CiAgICAgICAgICAgICAgICBzdGFydHVwLmR3RmxhZ3MgPSAxOyBzdGFydHVwLndTaG93V2luZG93ID0gMDsgLy8gU1RBUlRGX1VTRVNIT1dXSU5ET1cgLyBTV19ISURFCiAgICAgICAgICAgICAgICAvLyBObyBTVEFSVEZfVVNFU1RESEFORExFUzogV2luZG93cyBzdXBwbGllcyB0aGUgbmV3IGNvbnNvbGUncwogICAgICAgICAgICAgICAgLy8gaW5wdXQvb3V0cHV0IGhhbmRsZXMsIHJhdGhlciB0aGFuIGluaGVyaXRpbmcgY2xvc2VkIHBpcGVzLgogICAgICAgICAgICAgICAgaWYgKCFDcmVhdGVQcm9jZXNzKGZpbGUsIG5ldyBTdHJpbmdCdWlsZGVyKE5hdGl2ZVByb2Nlc3MuUXVvdGUoZmlsZSkgKyAiICIgKyBTdHJpbmcuSm9pbigiICIsIHF1b3RlZCkpLAogICAgICAgICAgICAgICAgICAgIEludFB0ci5aZXJvLCBJbnRQdHIuWmVybywgZmFsc2UsIDB4MTQsIEludFB0ci5aZXJvLCBQYXRoLkdldERpcmVjdG9yeU5hbWUoZmlsZSksIHJlZiBzdGFydHVwLCBvdXQgY2hpbGQpKSB7CiAgICAgICAgICAgICAgICAgICAgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgcHJvY2VzcyA9IGNoaWxkLmhQcm9jZXNzOyBJZCA9IHVuY2hlY2tlZCgoaW50KWNoaWxkLmR3UHJvY2Vzc0lkKTsKICAgICAgICAgICAgICAgIGlmICghQXNzaWduUHJvY2Vzc1RvSm9iT2JqZWN0KGpvYiwgcHJvY2VzcykpIHsgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOyB9CiAgICAgICAgICAgICAgICBsb25nIGNyZWF0aW9uLCBleGl0LCBrZXJuZWwsIHVzZXI7CiAgICAgICAgICAgICAgICBpZiAoIUdldFByb2Nlc3NUaW1lcyhwcm9jZXNzLCBvdXQgY3JlYXRpb24sIG91dCBleGl0LCBvdXQga2VybmVsLCBvdXQgdXNlcikpIHsgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOyB9CiAgICAgICAgICAgICAgICBTdGFydGVkVXRjID0gRGF0ZVRpbWUuRnJvbUZpbGVUaW1lVXRjKGNyZWF0aW9uKTsKICAgICAgICAgICAgICAgIGlmIChSZXN1bWVUaHJlYWQoY2hpbGQuaFRocmVhZCkgPT0gVUludDMyLk1heFZhbHVlKSB7IHRocm93IG5ldyBTeXN0ZW0uQ29tcG9uZW50TW9kZWwuV2luMzJFeGNlcHRpb24oKTsgfQogICAgICAgICAgICB9IGNhdGNoIHsKICAgICAgICAgICAgICAgIC8vIENvbnN0cnVjdG9yIGZhaWx1cmVzIG9jY3VyIGJlZm9yZSBleGVjdXRpb247IG9ubHkgb3VyIHN1c3BlbmRlZAogICAgICAgICAgICAgICAgLy8gY2hpbGQgaXMgdGVybWluYXRlZC4gUnVubmluZyBzZXJ2aWNpbmcgaXMgbmV2ZXIga2lsbGVkIGhlcmUuCiAgICAgICAgICAgICAgICBpZiAoY2hpbGQuaFByb2Nlc3MgIT0gSW50UHRyLlplcm8pIHsgVGVybWluYXRlUHJvY2VzcyhjaGlsZC5oUHJvY2VzcywgMSk7IH0KICAgICAgICAgICAgICAgIERpc3Bvc2UoKTsgdGhyb3c7CiAgICAgICAgICAgIH0gZmluYWxseSB7IGlmIChjaGlsZC5oVGhyZWFkICE9IEludFB0ci5aZXJvKSB7IENsb3NlSGFuZGxlKGNoaWxkLmhUaHJlYWQpOyB9IH0KICAgICAgICB9CiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBWYWxpZGF0ZUpvYk5hbWUoc3RyaW5nIG5hbWUpIHsKICAgICAgICAgICAgR3VpZCBpZDsKICAgICAgICAgICAgaWYgKG5hbWUgPT0gbnVsbCB8fCAhbmFtZS5TdGFydHNXaXRoKEpvYlByZWZpeCwgU3RyaW5nQ29tcGFyaXNvbi5PcmRpbmFsKSB8fAogICAgICAgICAgICAgICAgIUd1aWQuVHJ5UGFyc2VFeGFjdChuYW1lLlN1YnN0cmluZyhKb2JQcmVmaXguTGVuZ3RoKSwgIk4iLCBvdXQgaWQpKSB7CiAgICAgICAgICAgICAgICB0aHJvdyBuZXcgQXJndW1lbnRFeGNlcHRpb24oIkludmFsaWQgYm9vdHN0cmFwIGpvYiBuYW1lLiIpOwogICAgICAgICAgICB9CiAgICAgICAgfQogICAgICAgIHB1YmxpYyBzdGF0aWMgYm9vbCBJc0pvYkFjdGl2ZShzdHJpbmcgbmFtZSkgewogICAgICAgICAgICBWYWxpZGF0ZUpvYk5hbWUobmFtZSk7CiAgICAgICAgICAgIEludFB0ciBoYW5kbGUgPSBPcGVuSm9iT2JqZWN0KDQsIGZhbHNlLCBuYW1lKTsgLy8gSk9CX09CSkVDVF9RVUVSWQogICAgICAgICAgICBpZiAoaGFuZGxlID09IEludFB0ci5aZXJvKSB7CiAgICAgICAgICAgICAgICBpbnQgZXJyb3IgPSBNYXJzaGFsLkdldExhc3RXaW4zMkVycm9yKCk7CiAgICAgICAgICAgICAgICBpZiAoZXJyb3IgPT0gMikgeyByZXR1cm4gZmFsc2U7IH0KICAgICAgICAgICAgICAgIHRocm93IG5ldyBTeXN0ZW0uQ29tcG9uZW50TW9kZWwuV2luMzJFeGNlcHRpb24oZXJyb3IpOwogICAgICAgICAgICB9CiAgICAgICAgICAgIHRyeSB7IHJldHVybiBBY3RpdmVDb3VudChoYW5kbGUpICE9IDA7IH0gZmluYWxseSB7IENsb3NlSGFuZGxlKGhhbmRsZSk7IH0KICAgICAgICB9CiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgdWludCBBY3RpdmVDb3VudChJbnRQdHIgaGFuZGxlKSB7CiAgICAgICAgICAgIEFjY291bnRpbmdJbmZvcm1hdGlvbiBpbmZvOwogICAgICAgICAgICBpZiAoIVF1ZXJ5SW5mb3JtYXRpb25Kb2JPYmplY3QoaGFuZGxlLCAxLCBvdXQgaW5mbywgKHVpbnQpTWFyc2hhbC5TaXplT2YodHlwZW9mKEFjY291bnRpbmdJbmZvcm1hdGlvbikpLCBJbnRQdHIuWmVybykpIHsKICAgICAgICAgICAgICAgIHRocm93IG5ldyBTeXN0ZW0uQ29tcG9uZW50TW9kZWwuV2luMzJFeGNlcHRpb24oKTsKICAgICAgICAgICAgfQogICAgICAgICAgICByZXR1cm4gaW5mby5BY3RpdmVQcm9jZXNzZXM7CiAgICAgICAgfQogICAgICAgIHB1YmxpYyBib29sIEhhc0V4aXRlZCB7IGdldCB7CiAgICAgICAgICAgIHVpbnQgc3RhdHVzID0gV2FpdEZvclNpbmdsZU9iamVjdChwcm9jZXNzLCAwKTsKICAgICAgICAgICAgaWYgKHN0YXR1cyA9PSBVSW50MzIuTWF4VmFsdWUpIHsgdGhyb3cgbmV3IFN5c3RlbS5Db21wb25lbnRNb2RlbC5XaW4zMkV4Y2VwdGlvbigpOyB9CiAgICAgICAgICAgIHJldHVybiBzdGF0dXMgPT0gMCAmJiBBY3RpdmVDb3VudChqb2IpID09IDA7CiAgICAgICAgfSB9CiAgICAgICAgcHVibGljIGludCBFeGl0Q29kZSB7IGdldCB7CiAgICAgICAgICAgIGlmICghSGFzRXhpdGVkKSB7IHRocm93IG5ldyBJbnZhbGlkT3BlcmF0aW9uRXhjZXB0aW9uKCJUaGUgV1NMIGJvb3RzdHJhcCBvciBhIGRlc2NlbmRhbnQgaXMgc3RpbGwgcnVubmluZy4iKTsgfQogICAgICAgICAgICB1aW50IGNvZGU7CiAgICAgICAgICAgIGlmICghR2V0RXhpdENvZGVQcm9jZXNzKHByb2Nlc3MsIG91dCBjb2RlKSkgeyB0aHJvdyBuZXcgU3lzdGVtLkNvbXBvbmVudE1vZGVsLldpbjMyRXhjZXB0aW9uKCk7IH0KICAgICAgICAgICAgcmV0dXJuIHVuY2hlY2tlZCgoaW50KWNvZGUpOwogICAgICAgIH0gfQogICAgICAgIHB1YmxpYyB2b2lkIERpc3Bvc2UoKSB7CiAgICAgICAgICAgIGlmIChwcm9jZXNzICE9IEludFB0ci5aZXJvKSB7IENsb3NlSGFuZGxlKHByb2Nlc3MpOyBwcm9jZXNzID0gSW50UHRyLlplcm87IH0KICAgICAgICAgICAgLy8gTm8gS0lMTF9PTl9KT0JfQ0xPU0U6IG5ldmVyIGtpbGwgc2VydmljaW5nLiBUaGUgaW5kZXBlbmRlbnQgaG9zdAogICAgICAgICAgICAvLyBtdXN0IGtlZXAgdGhpcyBoYW5kbGUgb3BlbiB1bnRpbCBpdHMgcHJvY2VzcyB0cmVlIGhhcyBjb21wbGV0ZWQuCiAgICAgICAgICAgIGlmIChqb2IgIT0gSW50UHRyLlplcm8pIHsgQ2xvc2VIYW5kbGUoam9iKTsgam9iID0gSW50UHRyLlplcm87IH0KICAgICAgICAgICAgaWYgKGRlc2t0b3AgIT0gSW50UHRyLlplcm8pIHsgQ2xvc2VEZXNrdG9wKGRlc2t0b3ApOyBkZXNrdG9wID0gSW50UHRyLlplcm87IH0KICAgICAgICAgICAgR0MuU3VwcHJlc3NGaW5hbGl6ZSh0aGlzKTsKICAgICAgICB9CiAgICAgICAgfkNvbnNvbGVCb290c3RyYXBQcm9jZXNzKCkgeyBEaXNwb3NlKCk7IH0KICAgICAgICBbU3RydWN0TGF5b3V0KExheW91dEtpbmQuU2VxdWVudGlhbCwgQ2hhclNldD1DaGFyU2V0LlVuaWNvZGUpXQogICAgICAgIHByaXZhdGUgc3RydWN0IFN0YXJ0dXBJbmZvcm1hdGlvbiB7CiAgICAgICAgICAgIHB1YmxpYyBpbnQgY2I7IHB1YmxpYyBzdHJpbmcgbHBSZXNlcnZlZCwgbHBEZXNrdG9wLCBscFRpdGxlOwogICAgICAgICAgICBwdWJsaWMgaW50IGR3WCwgZHdZLCBkd1hTaXplLCBkd1lTaXplLCBkd1hDb3VudENoYXJzLCBkd1lDb3VudENoYXJzLCBkd0ZpbGxBdHRyaWJ1dGUsIGR3RmxhZ3M7CiAgICAgICAgICAgIHB1YmxpYyBzaG9ydCB3U2hvd1dpbmRvdywgY2JSZXNlcnZlZDI7IHB1YmxpYyBJbnRQdHIgbHBSZXNlcnZlZDIsIGhTdGRJbnB1dCwgaFN0ZE91dHB1dCwgaFN0ZEVycm9yOwogICAgICAgIH0KICAgICAgICBbU3RydWN0TGF5b3V0KExheW91dEtpbmQuU2VxdWVudGlhbCldCiAgICAgICAgcHJpdmF0ZSBzdHJ1Y3QgUHJvY2Vzc0luZm9ybWF0aW9uIHsgcHVibGljIEludFB0ciBoUHJvY2VzcywgaFRocmVhZDsgcHVibGljIHVpbnQgZHdQcm9jZXNzSWQsIGR3VGhyZWFkSWQ7IH0KICAgICAgICBbU3RydWN0TGF5b3V0KExheW91dEtpbmQuU2VxdWVudGlhbCldCiAgICAgICAgcHJpdmF0ZSBzdHJ1Y3QgQWNjb3VudGluZ0luZm9ybWF0aW9uIHsKICAgICAgICAgICAgcHVibGljIGxvbmcgVG90YWxVc2VyVGltZSwgVG90YWxLZXJuZWxUaW1lLCBUaGlzUGVyaW9kVG90YWxVc2VyVGltZSwgVGhpc1BlcmlvZFRvdGFsS2VybmVsVGltZTsKICAgICAgICAgICAgcHVibGljIHVpbnQgVG90YWxQYWdlRmF1bHRDb3VudCwgVG90YWxQcm9jZXNzZXMsIEFjdGl2ZVByb2Nlc3NlcywgVG90YWxUZXJtaW5hdGVkUHJvY2Vzc2VzOwogICAgICAgIH0KICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLENoYXJTZXQ9Q2hhclNldC5Vbmljb2RlLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIEludFB0ciBDcmVhdGVKb2JPYmplY3QoSW50UHRyIGF0dHJpYnV0ZXMsc3RyaW5nIG5hbWUpOwogICAgICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsQ2hhclNldD1DaGFyU2V0LlVuaWNvZGUsU2V0TGFzdEVycm9yPXRydWUpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gSW50UHRyIE9wZW5Kb2JPYmplY3QodWludCBhY2Nlc3MsYm9vbCBpbmhlcml0LHN0cmluZyBuYW1lKTsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQXNzaWduUHJvY2Vzc1RvSm9iT2JqZWN0KEludFB0ciBqb2IsSW50UHRyIHByb2Nlc3MpOwogICAgICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsU2V0TGFzdEVycm9yPXRydWUpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBRdWVyeUluZm9ybWF0aW9uSm9iT2JqZWN0KEludFB0ciBqb2IsaW50IGtpbmQsb3V0IEFjY291bnRpbmdJbmZvcm1hdGlvbiBpbmZvLHVpbnQgc2l6ZSxJbnRQdHIgbGVuZ3RoKTsKICAgICAgICBbRGxsSW1wb3J0KCJ1c2VyMzIuZGxsIixDaGFyU2V0PUNoYXJTZXQuVW5pY29kZSxTZXRMYXN0RXJyb3I9dHJ1ZSldIHByaXZhdGUgc3RhdGljIGV4dGVybiBJbnRQdHIgQ3JlYXRlRGVza3RvcChzdHJpbmcgbmFtZSxzdHJpbmcgZGV2aWNlLEludFB0ciBtb2RlLHVpbnQgZmxhZ3MsdWludCBhY2Nlc3MsSW50UHRyIGF0dHJpYnV0ZXMpOwogICAgICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQ2xvc2VEZXNrdG9wKEludFB0ciBkZXNrdG9wKTsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLENoYXJTZXQ9Q2hhclNldC5Vbmljb2RlLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQ3JlYXRlUHJvY2VzcyhzdHJpbmcgYXBwLFN0cmluZ0J1aWxkZXIgY29tbWFuZCxJbnRQdHIgcHJvY2Vzc0F0dHJpYnV0ZXMsSW50UHRyIHRocmVhZEF0dHJpYnV0ZXMsYm9vbCBpbmhlcml0LHVpbnQgZmxhZ3MsSW50UHRyIGVudmlyb25tZW50LHN0cmluZyBkaXJlY3RvcnkscmVmIFN0YXJ0dXBJbmZvcm1hdGlvbiBzdGFydHVwLG91dCBQcm9jZXNzSW5mb3JtYXRpb24gcHJvY2Vzcyk7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIixTZXRMYXN0RXJyb3I9dHJ1ZSldIHByaXZhdGUgc3RhdGljIGV4dGVybiB1aW50IFJlc3VtZVRocmVhZChJbnRQdHIgdGhyZWFkKTsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgVGVybWluYXRlUHJvY2VzcyhJbnRQdHIgcHJvY2Vzcyx1aW50IGNvZGUpOwogICAgICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIsU2V0TGFzdEVycm9yPXRydWUpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBHZXRQcm9jZXNzVGltZXMoSW50UHRyIHByb2Nlc3Msb3V0IGxvbmcgY3JlYXRpb24sb3V0IGxvbmcgZXhpdCxvdXQgbG9uZyBrZXJuZWwsb3V0IGxvbmcgdXNlcik7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIixTZXRMYXN0RXJyb3I9dHJ1ZSldIHByaXZhdGUgc3RhdGljIGV4dGVybiB1aW50IFdhaXRGb3JTaW5nbGVPYmplY3QoSW50UHRyIGhhbmRsZSx1aW50IG1pbGxpc2Vjb25kcyk7CiAgICAgICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIixTZXRMYXN0RXJyb3I9dHJ1ZSldIHByaXZhdGUgc3RhdGljIGV4dGVybiBib29sIEdldEV4aXRDb2RlUHJvY2VzcyhJbnRQdHIgcHJvY2VzcyxvdXQgdWludCBjb2RlKTsKICAgICAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiLFNldExhc3RFcnJvcj10cnVlKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQ2xvc2VIYW5kbGUoSW50UHRyIGhhbmRsZSk7CiAgICB9CgogICAgcHVibGljIHNlYWxlZCBjbGFzcyBSZXF1ZXN0CiAgICB7CiAgICAgICAgcHVibGljIHN0cmluZyBSZXF1ZXN0UGF0aCB7IGdldDsgcHJpdmF0ZSBzZXQ7IH0KICAgICAgICBwdWJsaWMgc3RyaW5nIERpcmVjdG9yeVBhdGggeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBSZXN1bHRQYXRoIHsgZ2V0OyBwcml2YXRlIHNldDsgfQogICAgICAgIHB1YmxpYyBzdHJpbmcgT3BlcmF0aW9uSWQgeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBQcm9kdWN0SWQgeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBBY3Rpb24geyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBSb2xlIHsgZ2V0OyBwcml2YXRlIHNldDsgfQogICAgICAgIHB1YmxpYyBib29sIFByZXNlcnZlRGF0YSB7IGdldDsgcHJpdmF0ZSBzZXQ7IH0KICAgICAgICBwdWJsaWMgc3RyaW5nIFJlcXVlc3RlZFZlcnNpb24geyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0cmluZyBPd25lclNpZCB7IGdldDsgcHJpdmF0ZSBzZXQ7IH0KICAgICAgICBwdWJsaWMgaW50IEF0dGVtcHQgeyBnZXQ7IHByaXZhdGUgc2V0OyB9CiAgICAgICAgcHVibGljIHN0YXRpYyByZWFkb25seSBzdHJpbmdbXSBBY3Rpb25zID0geyAiaW5zcGVjdCIsICJpbnN0YWxsIiwgInVwZGF0ZSIsICJyZXBhaXIiLCAidW5pbnN0YWxsIiwgInJlbW92ZS1yb2xlIiwgInJlbW92ZS1hcHAiLCAiYmFja3VwIiwgIm1haW50YWluLXJ1bnRpbWUiIH07CiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgcmVhZG9ubHkgc3RyaW5nW10gT3V0Y29tZXMgPSB7ICJydW5uaW5nIiwgInN1Y2NlZWRlZCIsICJuby1jaGFuZ2UiLCAiY2FuY2VsbGVkIiwgInBhcnRpYWwiLCAiZmFpbGVkIiwgImJsb2NrZWQiLCAicmVzdGFydC1yZXF1aXJlZCIgfTsKICAgICAgICBwcml2YXRlIHJlYWRvbmx5IEphdmFTY3JpcHRTZXJpYWxpemVyIGpzb24gPSBuZXcgSmF2YVNjcmlwdFNlcmlhbGl6ZXIgeyBNYXhKc29uTGVuZ3RoID0gMTAyNCAqIDEwMjQgfTsKCiAgICAgICAgcHVibGljIHN0YXRpYyBSZXF1ZXN0IExvYWQoc3RyaW5nIHBhdGgpCiAgICAgICAgeyByZXR1cm4gTG9hZEZvclByb2R1Y3QocGF0aCwiZW52aXJvbm1lbnQiKTsgfQoKICAgICAgICBwdWJsaWMgc3RhdGljIFJlcXVlc3QgTG9hZEZvclByb2R1Y3Qoc3RyaW5nIHBhdGgsc3RyaW5nIHByb2R1Y3RJZCkKICAgICAgICB7CiAgICAgICAgICAgIGlmKHByb2R1Y3RJZCE9ImVudmlyb25tZW50IiAmJiBwcm9kdWN0SWQhPSJwYy1hZ2VudCIpIHt0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIlVuc3VwcG9ydGVkIHByb2R1Y3QgaWRlbnRpdHkuIik7fQogICAgICAgICAgICBSZXF1ZXN0IHZhbHVlID0gbmV3IFJlcXVlc3QoKTsKICAgICAgICAgICAgdmFsdWUuUHJvZHVjdElkPXByb2R1Y3RJZDsKICAgICAgICAgICAgdmFsdWUuT3duZXJTaWQgPSBXaW5kb3dzSWRlbnRpdHkuR2V0Q3VycmVudCgpLlVzZXIuVmFsdWU7CiAgICAgICAgICAgIHZhbHVlLlJlcXVlc3RQYXRoID0gRnVsbExvY2FsUGF0aChwYXRoKTsKICAgICAgICAgICAgdmFsdWUuRGlyZWN0b3J5UGF0aCA9IFBhdGguR2V0RGlyZWN0b3J5TmFtZSh2YWx1ZS5SZXF1ZXN0UGF0aCk7CiAgICAgICAgICAgIHZhbHVlLlZhbGlkYXRlRGlyZWN0b3J5KCk7CiAgICAgICAgICAgIFZhbGlkYXRlRmlsZSh2YWx1ZS5SZXF1ZXN0UGF0aCwgdmFsdWUuT3duZXJTaWQsIHRydWUpOwogICAgICAgICAgICBpZiAobmV3IEZpbGVJbmZvKHZhbHVlLlJlcXVlc3RQYXRoKS5MZW5ndGggPiA2NTUzNikgeyB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIkxpZmVjeWNsZSByZXF1ZXN0IGlzIHRvbyBsYXJnZS4iKTsgfQogICAgICAgICAgICBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBkYXRhID0gdmFsdWUuanNvbi5EZXNlcmlhbGl6ZTxEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0Pj4oRmlsZS5SZWFkQWxsVGV4dCh2YWx1ZS5SZXF1ZXN0UGF0aCwgRW5jb2RpbmcuVVRGOCkpOwogICAgICAgICAgICBHdWlkIGlkOwogICAgICAgICAgICBpZiAoZGF0YSA9PSBudWxsIHx8ICFJc1NjaGVtYU9uZShkYXRhKSB8fCBUZXh0KGRhdGEsICJwcm9kdWN0SWQiKSAhPSBwcm9kdWN0SWQKICAgICAgICAgICAgICAgIHx8ICFHdWlkLlRyeVBhcnNlRXhhY3QoVGV4dChkYXRhLCAib3BlcmF0aW9uSWQiKSwgIkQiLCBvdXQgaWQpIHx8IGlkID09IEd1aWQuRW1wdHkKICAgICAgICAgICAgICAgIHx8IEFycmF5LkluZGV4T2YoQWN0aW9ucywgVGV4dChkYXRhLCAiYWN0aW9uIikpIDwgMCkKICAgICAgICAgICAgeyB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIlVuc3VwcG9ydGVkIG9yIG1hbGZvcm1lZCBFbnZpcm9ubWVudCBsaWZlY3ljbGUgcmVxdWVzdC4iKTsgfQogICAgICAgICAgICB2YWx1ZS5PcGVyYXRpb25JZCA9IGlkLlRvU3RyaW5nKCJEIik7CiAgICAgICAgICAgIHZhbHVlLkFjdGlvbiA9IFRleHQoZGF0YSwgImFjdGlvbiIpOwogICAgICAgICAgICB2YWx1ZS5Sb2xlID0gVGV4dChkYXRhLCAicm9sZSIpOwogICAgICAgICAgICBpZiAodmFsdWUuUm9sZS5MZW5ndGggIT0gMCAmJiB2YWx1ZS5Sb2xlICE9ICJjbGllbnQiICYmIHZhbHVlLlJvbGUgIT0gInNlcnZlciIpIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJVbnN1cHBvcnRlZCByb2xlLiIpOyB9CiAgICAgICAgICAgIG9iamVjdCBwcmVzZXJ2ZTsKICAgICAgICAgICAgdmFsdWUuUHJlc2VydmVEYXRhID0gdHJ1ZTsKICAgICAgICAgICAgaWYgKGRhdGEuVHJ5R2V0VmFsdWUoInByZXNlcnZlRGF0YSIsIG91dCBwcmVzZXJ2ZSkpIHsKICAgICAgICAgICAgICAgIGlmICghKHByZXNlcnZlIGlzIGJvb2wpKSB7IHRocm93IG5ldyBJbnZhbGlkRGF0YUV4Y2VwdGlvbigicHJlc2VydmVEYXRhIG11c3QgYmUgYSBib29sZWFuLiIpOyB9CiAgICAgICAgICAgICAgICB2YWx1ZS5QcmVzZXJ2ZURhdGEgPSAoYm9vbClwcmVzZXJ2ZTsKICAgICAgICAgICAgfQogICAgICAgICAgICB2YWx1ZS5SZXF1ZXN0ZWRWZXJzaW9uID0gVGV4dChkYXRhLCAicmVxdWVzdGVkVmVyc2lvbiIpOwogICAgICAgICAgICB2YWx1ZS5SZXN1bHRQYXRoID0gRnVsbExvY2FsUGF0aChUZXh0KGRhdGEsICJyZXN1bHRQYXRoIikpOwogICAgICAgICAgICBpZiAoIVN0cmluZy5FcXVhbHMoUGF0aC5HZXREaXJlY3RvcnlOYW1lKHZhbHVlLlJlc3VsdFBhdGgpLCB2YWx1ZS5EaXJlY3RvcnlQYXRoLCBTdHJpbmdDb21wYXJpc29uLk9yZGluYWxJZ25vcmVDYXNlKQogICAgICAgICAgICAgICAgfHwgU3RyaW5nLkVxdWFscyh2YWx1ZS5SZXN1bHRQYXRoLCB2YWx1ZS5SZXF1ZXN0UGF0aCwgU3RyaW5nQ29tcGFyaXNvbi5PcmRpbmFsSWdub3JlQ2FzZSkKICAgICAgICAgICAgICAgIHx8ICFTdHJpbmcuRXF1YWxzKFBhdGguR2V0RXh0ZW5zaW9uKHZhbHVlLlJlc3VsdFBhdGgpLCAiLmpzb24iLCBTdHJpbmdDb21wYXJpc29uLk9yZGluYWxJZ25vcmVDYXNlKSkKICAgICAgICAgICAgeyB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIlJlc3VsdCBtdXN0IGJlIGEgc2VwYXJhdGUgSlNPTiBmaWxlIGluIHRoZSBvd25lZCBvcGVyYXRpb24gZGlyZWN0b3J5LiIpOyB9CiAgICAgICAgICAgIHZhbHVlLkF0dGVtcHQgPSAxOwogICAgICAgICAgICBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBwcmV2aW91cyA9IHZhbHVlLlJlYWRSZXN1bHQoKTsKICAgICAgICAgICAgaWYgKHByZXZpb3VzICE9IG51bGwpIHsgdmFsdWUuQXR0ZW1wdCA9IE1hdGguTWF4KDEsIE51bWJlcihwcmV2aW91cywgImF0dGVtcHQiKSk7IH0KICAgICAgICAgICAgcmV0dXJuIHZhbHVlOwogICAgICAgIH0KCiAgICAgICAgcHVibGljIHN0YXRpYyBzdHJpbmcgRnVsbExvY2FsUGF0aChzdHJpbmcgcGF0aCkKICAgICAgICB7CiAgICAgICAgICAgIGlmIChTdHJpbmcuSXNOdWxsT3JXaGl0ZVNwYWNlKHBhdGgpIHx8IHBhdGguTGVuZ3RoIDwgNCB8fCAhQ2hhci5Jc0xldHRlcihwYXRoWzBdKSB8fCBwYXRoWzFdICE9ICc6JyB8fCBwYXRoWzJdICE9ICdcXCcKICAgICAgICAgICAgICAgIHx8IHBhdGguU3Vic3RyaW5nKDIpLkNvbnRhaW5zKCI6IikgfHwgcGF0aC5JbmRleE9mQW55KG5ldyBjaGFyW10geyAnXHInLCAnXG4nLCAnXDAnLCAnIicgfSkgPj0gMCkKICAgICAgICAgICAgeyB0aHJvdyBuZXcgSW52YWxpZERhdGFFeGNlcHRpb24oIkxpZmVjeWNsZSBwYXRocyBtdXN0IGJlIGFic29sdXRlIGxvY2FsIGRyaXZlIHBhdGhzLiIpOyB9CiAgICAgICAgICAgIGZvcmVhY2goc3RyaW5nIHBhcnQgaW4gcGF0aC5TdWJzdHJpbmcoMykuU3BsaXQoJ1xcJykpIHsKICAgICAgICAgICAgICAgIGlmKHBhcnQuRW5kc1dpdGgoIiAiLFN0cmluZ0NvbXBhcmlzb24uT3JkaW5hbCkgfHwgcGFydC5FbmRzV2l0aCgiLiIsU3RyaW5nQ29tcGFyaXNvbi5PcmRpbmFsKSB8fAogICAgICAgICAgICAgICAgICAgIFN5c3RlbS5UZXh0LlJlZ3VsYXJFeHByZXNzaW9ucy5SZWdleC5Jc01hdGNoKHBhcnQsQCJeKENPTnxQUk58QVVYfE5VTHxDT01bMS05XXxMUFRbMS05XSkoXC4uKik/JCIsU3lzdGVtLlRleHQuUmVndWxhckV4cHJlc3Npb25zLlJlZ2V4T3B0aW9ucy5JZ25vcmVDYXNlKSkgewogICAgICAgICAgICAgICAgICAgIHRocm93IG5ldyBJbnZhbGlkRGF0YUV4Y2VwdGlvbigiTGlmZWN5Y2xlIHBhdGhzIGNhbm5vdCB1c2UgYW1iaWd1b3VzIFdpbmRvd3MgbmFtZXMuIik7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0KICAgICAgICAgICAgcmV0dXJuIFBhdGguR2V0RnVsbFBhdGgocGF0aCk7CiAgICAgICAgfQoKICAgICAgICBwdWJsaWMgdm9pZCBWYWxpZGF0ZURpcmVjdG9yeSgpCiAgICAgICAgewogICAgICAgICAgICBzdHJpbmcgcGF0aCA9IERpcmVjdG9yeVBhdGg7CiAgICAgICAgICAgIGlmICghRGlyZWN0b3J5LkV4aXN0cyhwYXRoKSkgeyB0aHJvdyBuZXcgRGlyZWN0b3J5Tm90Rm91bmRFeGNlcHRpb24oIkNyZWF0ZSB0aGUgb3duZWQgb3BlcmF0aW9uIGRpcmVjdG9yeSBiZWZvcmUgaW52b2tpbmcgc2V0dXAuIik7IH0KICAgICAgICAgICAgU2FmZVBhdGguQ2hlY2socGF0aCk7CiAgICAgICAgICAgIFZhbGlkYXRlQWNsKERpcmVjdG9yeS5HZXRBY2Nlc3NDb250cm9sKERpcmVjdG9yeVBhdGgpLCBPd25lclNpZCk7CiAgICAgICAgfQoKICAgICAgICBwcml2YXRlIHN0YXRpYyB2b2lkIFZhbGlkYXRlQWNsKEZpbGVTeXN0ZW1TZWN1cml0eSBzZWN1cml0eSwgc3RyaW5nIG93bmVyKQogICAgICAgIHsKICAgICAgICAgICAgc3RyaW5nIGFjdHVhbCA9IHNlY3VyaXR5LkdldE93bmVyKHR5cGVvZihTZWN1cml0eUlkZW50aWZpZXIpKS5WYWx1ZTsKICAgICAgICAgICAgaWYgKGFjdHVhbCAhPSBvd25lciAmJiBhY3R1YWwgIT0gIlMtMS01LTMyLTU0NCIpIHsgdGhyb3cgbmV3IFVuYXV0aG9yaXplZEFjY2Vzc0V4Y2VwdGlvbigiTGlmZWN5Y2xlIGZpbGVzIG11c3QgYmVsb25nIHRvIHRoZSBjdXJyZW50IFdpbmRvd3MgYWNjb3VudC4iKTsgfQogICAgICAgICAgICBGaWxlU3lzdGVtUmlnaHRzIHdyaXRlID0gRmlsZVN5c3RlbVJpZ2h0cy5Xcml0ZSB8IEZpbGVTeXN0ZW1SaWdodHMuRGVsZXRlIHwgRmlsZVN5c3RlbVJpZ2h0cy5EZWxldGVTdWJkaXJlY3Rvcmllc0FuZEZpbGVzIHwgRmlsZVN5c3RlbVJpZ2h0cy5DaGFuZ2VQZXJtaXNzaW9ucyB8IEZpbGVTeXN0ZW1SaWdodHMuVGFrZU93bmVyc2hpcDsKICAgICAgICAgICAgZm9yZWFjaCAoRmlsZVN5c3RlbUFjY2Vzc1J1bGUgcnVsZSBpbiBzZWN1cml0eS5HZXRBY2Nlc3NSdWxlcyh0cnVlLCB0cnVlLCB0eXBlb2YoU2VjdXJpdHlJZGVudGlmaWVyKSkpIHsKICAgICAgICAgICAgICAgIHN0cmluZyBzaWQgPSBydWxlLklkZW50aXR5UmVmZXJlbmNlLlZhbHVlOwogICAgICAgICAgICAgICAgaWYgKHJ1bGUuQWNjZXNzQ29udHJvbFR5cGUgPT0gQWNjZXNzQ29udHJvbFR5cGUuQWxsb3cgJiYgKHJ1bGUuRmlsZVN5c3RlbVJpZ2h0cyAmIHdyaXRlKSAhPSAwCiAgICAgICAgICAgICAgICAgICAgJiYgc2lkICE9IG93bmVyICYmIHNpZCAhPSAiUy0xLTUtMTgiICYmIHNpZCAhPSAiUy0xLTUtMzItNTQ0IiAmJiBzaWQgIT0gIlMtMS0zLTAiKQogICAgICAgICAgICAgICAgeyB0aHJvdyBuZXcgVW5hdXRob3JpemVkQWNjZXNzRXhjZXB0aW9uKCJMaWZlY3ljbGUgZGlyZWN0b3J5IG9yIGZpbGUgcGVybWl0cyB3cml0ZXMgYnkgYW5vdGhlciBhY2NvdW50LiIpOyB9CiAgICAgICAgICAgIH0KICAgICAgICB9CgogICAgICAgIHByaXZhdGUgc3RhdGljIHZvaWQgVmFsaWRhdGVGaWxlKHN0cmluZyBwYXRoLCBzdHJpbmcgb3duZXIsIGJvb2wgcmVxdWlyZWQpCiAgICAgICAgewogICAgICAgICAgICBpZiAoIUZpbGUuRXhpc3RzKHBhdGgpKSB7IGlmIChyZXF1aXJlZCkgeyB0aHJvdyBuZXcgRmlsZU5vdEZvdW5kRXhjZXB0aW9uKCJMaWZlY3ljbGUgcmVxdWVzdCBpcyBtaXNzaW5nLiIsIHBhdGgpOyB9IHJldHVybjsgfQogICAgICAgICAgICBTYWZlUGF0aC5DaGVjayhwYXRoKTsKICAgICAgICAgICAgaWYgKChGaWxlLkdldEF0dHJpYnV0ZXMocGF0aCkgJiBGaWxlQXR0cmlidXRlcy5EaXJlY3RvcnkpICE9IDApIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJMaWZlY3ljbGUgZmlsZSBpcyBhIGRpcmVjdG9yeS4iKTsgfQogICAgICAgICAgICBWYWxpZGF0ZUFjbChGaWxlLkdldEFjY2Vzc0NvbnRyb2wocGF0aCksIG93bmVyKTsKICAgICAgICB9CgogICAgICAgIHB1YmxpYyBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBSZWFkUmVzdWx0KCkKICAgICAgICB7CiAgICAgICAgICAgIC8vIFZhbGlkYXRlIGFuZCByZWFkIHRoZSBzYW1lIHB1Ymxpc2hlZCBzbmFwc2hvdCB3aGlsZSBjb29wZXJhdGluZwogICAgICAgICAgICAvLyB3cml0ZXJzIGFyZSBleGNsdWRlZC4gQW4gb2xkIHJlYWRlciBoYW5kbGUgY2FuIGxlZ2l0aW1hdGVseSBoYXZlCiAgICAgICAgICAgIC8vIHplcm8gbGlua3MgYWZ0ZXIgYSBQT1NJWCByZXBsYWNlbWVudDsgZG8gbm90IHdlYWtlbiBTYWZlUGF0aCdzCiAgICAgICAgICAgIC8vIGhhcmQtbGluayBjaGVja3MgdG8gYWNjb21tb2RhdGUgdGhhdCBwYXRobmFtZS12YWxpZGF0aW9uIHJhY2UuCiAgICAgICAgICAgIHVzaW5nKEF0b21pY0ZpbGUuQWNxdWlyZShSZXN1bHRQYXRoKSkgewogICAgICAgICAgICBWYWxpZGF0ZURpcmVjdG9yeSgpOwogICAgICAgICAgICBpZiAoIUZpbGUuRXhpc3RzKFJlc3VsdFBhdGgpKSB7IHJldHVybiBudWxsOyB9CiAgICAgICAgICAgIFZhbGlkYXRlRmlsZShSZXN1bHRQYXRoLCBPd25lclNpZCwgdHJ1ZSk7CiAgICAgICAgICAgIGlmIChuZXcgRmlsZUluZm8oUmVzdWx0UGF0aCkuTGVuZ3RoID4gMTAyNCAqIDEwMjQpIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJMaWZlY3ljbGUgcmVzdWx0IGlzIHRvbyBsYXJnZS4iKTsgfQogICAgICAgICAgICBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBkYXRhOwogICAgICAgICAgICB1c2luZyAoRmlsZVN0cmVhbSBzdHJlYW0gPSBuZXcgRmlsZVN0cmVhbShSZXN1bHRQYXRoLCBGaWxlTW9kZS5PcGVuLCBGaWxlQWNjZXNzLlJlYWQsIEZpbGVTaGFyZS5SZWFkIHwgRmlsZVNoYXJlLkRlbGV0ZSkpCiAgICAgICAgICAgIHVzaW5nIChTdHJlYW1SZWFkZXIgcmVhZGVyID0gbmV3IFN0cmVhbVJlYWRlcihzdHJlYW0sIEVuY29kaW5nLlVURjgpKSB7CiAgICAgICAgICAgICAgICBkYXRhID0ganNvbi5EZXNlcmlhbGl6ZTxEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0Pj4ocmVhZGVyLlJlYWRUb0VuZCgpKTsKICAgICAgICAgICAgfQogICAgICAgICAgICBEYXRlVGltZSB1cGRhdGVkOwogICAgICAgICAgICBpZiAoZGF0YSA9PSBudWxsIHx8ICFJc1NjaGVtYU9uZShkYXRhKSB8fCBUZXh0KGRhdGEsICJvcGVyYXRpb25JZCIpICE9IE9wZXJhdGlvbklkCiAgICAgICAgICAgICAgICB8fCBUZXh0KGRhdGEsICJwcm9kdWN0SWQiKSAhPSBQcm9kdWN0SWQgfHwgVGV4dChkYXRhLCAiYWN0aW9uIikgIT0gQWN0aW9uCiAgICAgICAgICAgICAgICB8fCBBcnJheS5JbmRleE9mKE91dGNvbWVzLCBUZXh0KGRhdGEsICJvdXRjb21lIikpIDwgMCB8fCAhZGF0YS5Db250YWluc0tleSgibWVzc2FnZSIpCiAgICAgICAgICAgICAgICB8fCAhRGF0ZVRpbWUuVHJ5UGFyc2UoVGV4dChkYXRhLCAidXBkYXRlZFV0YyIpLCBvdXQgdXBkYXRlZCkpCiAgICAgICAgICAgIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJTdGFsZSBvciBtaXNtYXRjaGVkIGxpZmVjeWNsZSByZXN1bHQ7IHJlZnVzaW5nIHRvIG92ZXJ3cml0ZSBpdC4iKTsgfQogICAgICAgICAgICByZXR1cm4gZGF0YTsKICAgICAgICAgICAgfQogICAgICAgIH0KCiAgICAgICAgcHVibGljIHZvaWQgQ29udGludWVBdHRlbXB0KCkgeyBBdHRlbXB0Kys7IH0KCiAgICAgICAgcHVibGljIHZvaWQgV3JpdGUoc3RyaW5nIG91dGNvbWUsIHN0cmluZyBtZXNzYWdlLCBzdHJpbmcgc3RhZ2UsIHN0cmluZyBlcnJvckNvZGUsIHN0cmluZyBuZXh0QWN0aW9uLCBzdHJpbmcgZXh0cmFzSnNvbikKICAgICAgICB7CiAgICAgICAgICAgIGlmIChBcnJheS5JbmRleE9mKE91dGNvbWVzLCBvdXRjb21lKSA8IDApIHsgdGhyb3cgbmV3IEludmFsaWREYXRhRXhjZXB0aW9uKCJVbnN1cHBvcnRlZCBsaWZlY3ljbGUgb3V0Y29tZS4iKTsgfQogICAgICAgICAgICB1c2luZyhBdG9taWNGaWxlLkFjcXVpcmUoUmVzdWx0UGF0aCkpIHsKICAgICAgICAgICAgVmFsaWRhdGVEaXJlY3RvcnkoKTsKICAgICAgICAgICAgUmVhZFJlc3VsdCgpOwogICAgICAgICAgICBEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBkYXRhID0gU3RyaW5nLklzTnVsbE9yRW1wdHkoZXh0cmFzSnNvbikgPyBuZXcgRGljdGlvbmFyeTxzdHJpbmcsIG9iamVjdD4oKSA6IGpzb24uRGVzZXJpYWxpemU8RGljdGlvbmFyeTxzdHJpbmcsIG9iamVjdD4+KGV4dHJhc0pzb24pOwogICAgICAgICAgICBkYXRhWyJzY2hlbWFWZXJzaW9uIl0gPSAxOyBkYXRhWyJvcGVyYXRpb25JZCJdID0gT3BlcmF0aW9uSWQ7IGRhdGFbInByb2R1Y3RJZCJdID0gUHJvZHVjdElkOyBkYXRhWyJhY3Rpb24iXSA9IEFjdGlvbjsKICAgICAgICAgICAgZGF0YVsib3V0Y29tZSJdID0gb3V0Y29tZTsgZGF0YVsidXBkYXRlZFV0YyJdID0gRGF0ZVRpbWUuVXRjTm93LlRvU3RyaW5nKCJvIik7IGRhdGFbIm1lc3NhZ2UiXSA9IG1lc3NhZ2UgPz8gIiI7CiAgICAgICAgICAgIGRhdGFbImF0dGVtcHQiXSA9IEF0dGVtcHQ7IGRhdGFbInN0YWdlIl0gPSBzdGFnZSA/PyAiIjsgZGF0YVsiZXJyb3JDb2RlIl0gPSBlcnJvckNvZGUgPz8gIiI7IGRhdGFbIm5leHRBY3Rpb24iXSA9IG5leHRBY3Rpb24gPz8gIiI7CiAgICAgICAgICAgIGRhdGFbInJlc3RhcnRSZXF1aXJlZCJdID0gb3V0Y29tZSA9PSAicmVzdGFydC1yZXF1aXJlZCI7CiAgICAgICAgICAgIEF0b21pY1dyaXRlKFJlc3VsdFBhdGgsIGpzb24uU2VyaWFsaXplKGRhdGEpKTsKICAgICAgICAgICAgfQogICAgICAgIH0KCiAgICAgICAgcHVibGljIHZvaWQgQXRvbWljV3JpdGUoc3RyaW5nIHBhdGgsIHN0cmluZyB0ZXh0KQogICAgICAgIHsKICAgICAgICAgICAgcGF0aCA9IEZ1bGxMb2NhbFBhdGgocGF0aCk7CiAgICAgICAgICAgIGlmICghU3RyaW5nLkVxdWFscyhQYXRoLkdldERpcmVjdG9yeU5hbWUocGF0aCksIERpcmVjdG9yeVBhdGgsIFN0cmluZ0NvbXBhcmlzb24uT3JkaW5hbElnbm9yZUNhc2UpIHx8IFN0cmluZy5FcXVhbHMocGF0aCwgUmVxdWVzdFBhdGgsIFN0cmluZ0NvbXBhcmlzb24uT3JkaW5hbElnbm9yZUNhc2UpKSB7IHRocm93IG5ldyBJbnZhbGlkRGF0YUV4Y2VwdGlvbigiTGlmZWN5Y2xlIG91dHB1dCBlc2NhcGVkIGl0cyBvcGVyYXRpb24gZGlyZWN0b3J5LiIpOyB9CiAgICAgICAgICAgIHVzaW5nKEF0b21pY0ZpbGUuQWNxdWlyZShwYXRoKSkgewogICAgICAgICAgICBWYWxpZGF0ZURpcmVjdG9yeSgpOyBWYWxpZGF0ZUZpbGUocGF0aCwgT3duZXJTaWQsIGZhbHNlKTsKICAgICAgICAgICAgc3RyaW5nIHRlbXBvcmFyeSA9IFBhdGguQ29tYmluZShEaXJlY3RvcnlQYXRoLCAiLndyaXRlLSIgKyBHdWlkLk5ld0d1aWQoKS5Ub1N0cmluZygiTiIpICsgIi50bXAiKTsKICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgIHVzaW5nIChGaWxlU3RyZWFtIHN0cmVhbSA9IG5ldyBGaWxlU3RyZWFtKHRlbXBvcmFyeSwgRmlsZU1vZGUuQ3JlYXRlTmV3LCBGaWxlQWNjZXNzLldyaXRlLCBGaWxlU2hhcmUuTm9uZSkpIHsKICAgICAgICAgICAgICAgICAgICBieXRlW10gYnl0ZXMgPSBuZXcgVVRGOEVuY29kaW5nKGZhbHNlKS5HZXRCeXRlcyh0ZXh0KTsgc3RyZWFtLldyaXRlKGJ5dGVzLCAwLCBieXRlcy5MZW5ndGgpOyBzdHJlYW0uRmx1c2godHJ1ZSk7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBBdG9taWNGaWxlLkNvbW1pdCh0ZW1wb3JhcnksIHBhdGgsIGRlbGVnYXRlIHsgVmFsaWRhdGVEaXJlY3RvcnkoKTsgVmFsaWRhdGVGaWxlKHBhdGgsIE93bmVyU2lkLCBmYWxzZSk7IH0pOwogICAgICAgICAgICB9IGZpbmFsbHkgeyBpZiAoRmlsZS5FeGlzdHModGVtcG9yYXJ5KSkgeyBGaWxlLkRlbGV0ZSh0ZW1wb3JhcnkpOyB9IH0KICAgICAgICAgICAgfQogICAgICAgIH0KCiAgICAgICAgcHVibGljIHN0YXRpYyBpbnQgRXhpdENvZGUoc3RyaW5nIG91dGNvbWUsIHN0cmluZyBlcnJvckNvZGUpCiAgICAgICAgewogICAgICAgICAgICBpZiAob3V0Y29tZSA9PSAic3VjY2VlZGVkIiB8fCBvdXRjb21lID09ICJuby1jaGFuZ2UiKSB7IHJldHVybiAwOyB9CiAgICAgICAgICAgIGlmIChvdXRjb21lID09ICJjYW5jZWxsZWQiKSB7IHJldHVybiAxNjAyOyB9CiAgICAgICAgICAgIGlmIChvdXRjb21lID09ICJyZXN0YXJ0LXJlcXVpcmVkIikgeyByZXR1cm4gMzAxMDsgfQogICAgICAgICAgICBpZiAoZXJyb3JDb2RlID09ICJvcGVyYXRpb24tY29uZmxpY3QiKSB7IHJldHVybiAxNjE4OyB9CiAgICAgICAgICAgIHJldHVybiAxOwogICAgICAgIH0KICAgICAgICBwdWJsaWMgc3RhdGljIHN0cmluZyBUZXh0KElEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0PiBkYXRhLCBzdHJpbmcga2V5KSB7IG9iamVjdCB2YWx1ZTsgcmV0dXJuIGRhdGEgIT0gbnVsbCAmJiBkYXRhLlRyeUdldFZhbHVlKGtleSwgb3V0IHZhbHVlKSAmJiB2YWx1ZSAhPSBudWxsID8gQ29udmVydC5Ub1N0cmluZyh2YWx1ZSwgU3lzdGVtLkdsb2JhbGl6YXRpb24uQ3VsdHVyZUluZm8uSW52YXJpYW50Q3VsdHVyZSkgOiAiIjsgfQogICAgICAgIHB1YmxpYyBzdGF0aWMgaW50IE51bWJlcihJRGljdGlvbmFyeTxzdHJpbmcsIG9iamVjdD4gZGF0YSwgc3RyaW5nIGtleSkgeyBpbnQgdmFsdWU7IHJldHVybiBJbnQzMi5UcnlQYXJzZShUZXh0KGRhdGEsIGtleSksIG91dCB2YWx1ZSkgPyB2YWx1ZSA6IC0xOyB9CiAgICAgICAgcHJpdmF0ZSBzdGF0aWMgYm9vbCBJc1NjaGVtYU9uZShJRGljdGlvbmFyeTxzdHJpbmcsIG9iamVjdD4gZGF0YSkgeyBvYmplY3QgdmFsdWU7IHJldHVybiBkYXRhLlRyeUdldFZhbHVlKCJzY2hlbWFWZXJzaW9uIiwgb3V0IHZhbHVlKSAmJiB2YWx1ZSBpcyBpbnQgJiYgKGludCl2YWx1ZSA9PSAxOyB9CiAgICB9Cn0K'))
+    $hostSource=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('Ly8gQ29weXJpZ2h0IChjKSAyMDI2IEpvaG4gTGlnaHRmb290LiBTUERYLUxpY2Vuc2UtSWRlbnRpZmllcjogTUlUCi8vIENvbXBpbGVkIGZyb20gdGhlIGVtYmVkZGVkIHNvdXJjZXMgaW50byBhbiBvd25lZCBvcGVyYXRpb24gZGlyZWN0b3J5LiBUaGlzCi8vIGluZGVwZW5kZW50IG9ic2VydmVyIGtlZXBzIHRoZSBqb2IgYWxpdmUgaWYgdGhlIFBvd2VyU2hlbGwgY2FsbGVyIHRpbWVzIG91dC4KbmFtZXNwYWNlIEtpbG9MaW5rLkxpZmVjeWNsZQp7CiAgICBpbnRlcm5hbCBzdGF0aWMgY2xhc3MgV3NsQm9vdHN0cmFwSG9zdAogICAgewogICAgICAgIHByaXZhdGUgc3RhdGljIGludCBNYWluKHN0cmluZ1tdIGFyZ3MpIHsKICAgICAgICAgICAgaWYgKGFyZ3MuTGVuZ3RoICE9IDIpIHsgcmV0dXJuIDg3OyB9CiAgICAgICAgICAgIHZhciBwcmluY2lwYWwgPSBuZXcgU3lzdGVtLlNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzUHJpbmNpcGFsKFN5c3RlbS5TZWN1cml0eS5QcmluY2lwYWwuV2luZG93c0lkZW50aXR5LkdldEN1cnJlbnQoKSk7CiAgICAgICAgICAgIGlmICghcHJpbmNpcGFsLklzSW5Sb2xlKFN5c3RlbS5TZWN1cml0eS5QcmluY2lwYWwuV2luZG93c0J1aWx0SW5Sb2xlLkFkbWluaXN0cmF0b3IpKSB7IHJldHVybiA1OyB9CiAgICAgICAgICAgIHJldHVybiBSdW4oU3lzdGVtLklPLlBhdGguQ29tYmluZShTeXN0ZW0uRW52aXJvbm1lbnQuU3lzdGVtRGlyZWN0b3J5LCJ3c2wuZXhlIiksCiAgICAgICAgICAgICAgICBuZXcgc3RyaW5nW117Ii0taW5zdGFsbCIsIi0tbm8tZGlzdHJpYnV0aW9uIiwiLS13ZWItZG93bmxvYWQifSxhcmdzWzBdLGFyZ3NbMV0pOwogICAgICAgIH0KICAgICAgICBpbnRlcm5hbCBzdGF0aWMgaW50IFJ1bihzdHJpbmcgZmlsZSxzdHJpbmdbXSBhcmd1bWVudHMsc3RyaW5nIGpvYk5hbWUsc3RyaW5nIHJlc3VsdFBhdGgpIHsKICAgICAgICAgICAgQ29uc29sZUJvb3RzdHJhcFByb2Nlc3Mgb3duZWQ9bnVsbDsKICAgICAgICAgICAgc3RyaW5nIGZhaWx1cmU9IiI7CiAgICAgICAgICAgIGludCBjb2RlPTE7CiAgICAgICAgICAgIHZhciBzdGF0ZT1uZXcgU3lzdGVtLkNvbGxlY3Rpb25zLkdlbmVyaWMuRGljdGlvbmFyeTxzdHJpbmcsb2JqZWN0PiB7CiAgICAgICAgICAgICAgICB7InNjaGVtYVZlcnNpb24iLDF9LHsiam9iTmFtZSIsam9iTmFtZX0seyJwaGFzZSIsInN0YXJ0aW5nIn0sCiAgICAgICAgICAgICAgICB7Imhvc3RQcm9jZXNzSWQiLFN5c3RlbS5EaWFnbm9zdGljcy5Qcm9jZXNzLkdldEN1cnJlbnRQcm9jZXNzKCkuSWR9LAogICAgICAgICAgICAgICAgeyJob3N0U3RhcnRlZFV0YyIsU3lzdGVtLkRpYWdub3N0aWNzLlByb2Nlc3MuR2V0Q3VycmVudFByb2Nlc3MoKS5TdGFydFRpbWUuVG9Vbml2ZXJzYWxUaW1lKCkuVG9TdHJpbmcoIm8iKX19OwogICAgICAgICAgICB0cnkgewogICAgICAgICAgICAgICAgV3JpdGUocmVzdWx0UGF0aCxzdGF0ZSk7CiAgICAgICAgICAgICAgICBvd25lZD1uZXcgQ29uc29sZUJvb3RzdHJhcFByb2Nlc3MoZmlsZSxhcmd1bWVudHMsam9iTmFtZSk7CiAgICAgICAgICAgICAgICBzdGF0ZVsicm9vdFByb2Nlc3NJZCJdPW93bmVkLklkO3N0YXRlWyJyb290U3RhcnRlZFV0YyJdPW93bmVkLlN0YXJ0ZWRVdGMuVG9TdHJpbmcoIm8iKTtzdGF0ZVsicGhhc2UiXT0icnVubmluZyI7CiAgICAgICAgICAgICAgICBXcml0ZShyZXN1bHRQYXRoLHN0YXRlKTsKICAgICAgICAgICAgICAgIHdoaWxlKCFvd25lZC5IYXNFeGl0ZWQpIHtTeXN0ZW0uVGhyZWFkaW5nLlRocmVhZC5TbGVlcCgxMDApO30KICAgICAgICAgICAgICAgIGNvZGU9b3duZWQuRXhpdENvZGU7CiAgICAgICAgICAgIH0gY2F0Y2goU3lzdGVtLkV4Y2VwdGlvbiBlcnJvcikgewogICAgICAgICAgICAgICAgZmFpbHVyZT1lcnJvci5NZXNzYWdlOwogICAgICAgICAgICAgICAgLy8gRXZlbiBhIHJlY2VpcHQgZmFpbHVyZSBtdXN0IG5vdCByZWxlYXNlIGpvYiBvd25lcnNoaXAgZHVyaW5nCiAgICAgICAgICAgICAgICAvLyBzZXJ2aWNpbmcuIFRoZSBjYWxsZXIgY2FuIHRpbWUgb3V0OyB0aGlzIG9ic2VydmVyIHN0YXlzIGFsaXZlLgogICAgICAgICAgICAgICAgaWYob3duZWQhPW51bGwpIHsKICAgICAgICAgICAgICAgICAgICB3aGlsZSghb3duZWQuSGFzRXhpdGVkKSB7U3lzdGVtLlRocmVhZGluZy5UaHJlYWQuU2xlZXAoMjAwKTt9CiAgICAgICAgICAgICAgICAgICAgY29kZT1vd25lZC5FeGl0Q29kZTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgfSBmaW5hbGx5IHsKICAgICAgICAgICAgICAgIGlmKG93bmVkIT1udWxsKSB7b3duZWQuRGlzcG9zZSgpO30KICAgICAgICAgICAgfQogICAgICAgICAgICBzdGF0ZVsicGhhc2UiXT0iY29tcGxldGVkIjtzdGF0ZVsiZXhpdENvZGUiXT1jb2RlO3N0YXRlWyJlcnJvciJdPWZhaWx1cmU7c3RhdGVbImZpbmlzaGVkVXRjIl09U3lzdGVtLkRhdGVUaW1lLlV0Y05vdy5Ub1N0cmluZygibyIpOwogICAgICAgICAgICB0cnkge1dyaXRlKHJlc3VsdFBhdGgsc3RhdGUpO30gY2F0Y2goU3lzdGVtLkV4Y2VwdGlvbiBlcnJvcikge1N5c3RlbS5Db25zb2xlLkVycm9yLldyaXRlTGluZShlcnJvci5NZXNzYWdlKTtyZXR1cm4gMTt9CiAgICAgICAgICAgIGlmKGZhaWx1cmUuTGVuZ3RoIT0wKSB7U3lzdGVtLkNvbnNvbGUuRXJyb3IuV3JpdGVMaW5lKGZhaWx1cmUpO3JldHVybiAxO30KICAgICAgICAgICAgcmV0dXJuIGNvZGU7CiAgICAgICAgfQogICAgICAgIHByaXZhdGUgc3RhdGljIHZvaWQgV3JpdGUoc3RyaW5nIHBhdGgsU3lzdGVtLkNvbGxlY3Rpb25zLkdlbmVyaWMuRGljdGlvbmFyeTxzdHJpbmcsb2JqZWN0PiBzdGF0ZSkgewogICAgICAgICAgICBwYXRoPVN5c3RlbS5JTy5QYXRoLkdldEZ1bGxQYXRoKHBhdGgpO1NhZmVQYXRoLkNoZWNrUGFyZW50KHBhdGgpOwogICAgICAgICAgICBpZihTeXN0ZW0uSU8uRmlsZS5FeGlzdHMocGF0aCkpIHtTYWZlUGF0aC5DaGVjayhwYXRoKTt9CiAgICAgICAgICAgIHVzaW5nKEF0b21pY0ZpbGUuQWNxdWlyZShwYXRoKSkgewogICAgICAgICAgICAgICAgc3RyaW5nIHRlbXBvcmFyeT1TeXN0ZW0uSU8uUGF0aC5Db21iaW5lKFN5c3RlbS5JTy5QYXRoLkdldERpcmVjdG9yeU5hbWUocGF0aCksIi5ib290c3RyYXAtIitTeXN0ZW0uR3VpZC5OZXdHdWlkKCkuVG9TdHJpbmcoIk4iKSsiLnRtcCIpOwogICAgICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgICAgICB1c2luZyh2YXIgc3RyZWFtPW5ldyBTeXN0ZW0uSU8uRmlsZVN0cmVhbSh0ZW1wb3JhcnksU3lzdGVtLklPLkZpbGVNb2RlLkNyZWF0ZU5ldyxTeXN0ZW0uSU8uRmlsZUFjY2Vzcy5Xcml0ZSxTeXN0ZW0uSU8uRmlsZVNoYXJlLk5vbmUpKSB7CiAgICAgICAgICAgICAgICAgICAgICAgIGJ5dGVbXSBieXRlcz1uZXcgU3lzdGVtLlRleHQuVVRGOEVuY29kaW5nKGZhbHNlKS5HZXRCeXRlcyhuZXcgU3lzdGVtLldlYi5TY3JpcHQuU2VyaWFsaXphdGlvbi5KYXZhU2NyaXB0U2VyaWFsaXplcigpLlNlcmlhbGl6ZShzdGF0ZSkpOwogICAgICAgICAgICAgICAgICAgICAgICBzdHJlYW0uV3JpdGUoYnl0ZXMsMCxieXRlcy5MZW5ndGgpO3N0cmVhbS5GbHVzaCh0cnVlKTsKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAgICAgQXRvbWljRmlsZS5Db21taXQodGVtcG9yYXJ5LHBhdGgsZGVsZWdhdGUge1NhZmVQYXRoLkNoZWNrUGFyZW50KHBhdGgpO2lmKFN5c3RlbS5JTy5GaWxlLkV4aXN0cyhwYXRoKSl7U2FmZVBhdGguQ2hlY2socGF0aCk7fX0pOwogICAgICAgICAgICAgICAgfSBmaW5hbGx5IHtpZihTeXN0ZW0uSU8uRmlsZS5FeGlzdHModGVtcG9yYXJ5KSl7U3lzdGVtLklPLkZpbGUuRGVsZXRlKHRlbXBvcmFyeSk7fX0KICAgICAgICAgICAgfQogICAgICAgIH0KICAgIH0KfQo='))
+    $provider=New-Object Microsoft.CSharp.CSharpCodeProvider
+    try {
+        $parameters=New-Object CodeDom.Compiler.CompilerParameters
+        $parameters.GenerateExecutable=$true;$parameters.GenerateInMemory=$false;$parameters.OutputAssembly=$path
+        $parameters.CompilerOptions='/optimize+ /platform:anycpu'
+        $parameters.ReferencedAssemblies.AddRange([string[]]@('System.dll','System.Core.dll','System.Web.Extensions.dll'))
+        $compiled=$provider.CompileAssemblyFromSource($parameters,[string[]]@($protocol,$hostSource))
+        if($compiled.Errors.HasErrors){throw ('WSL bootstrap supervisor compilation failed: '+($compiled.Errors|Out-String))}
+    } finally {$provider.Dispose()}
+    [KiloLink.Lifecycle.SafePath]::Check($path)
+    return $path
+}
+
+function Get-WslBootstrapReceipt($Pending) {
+    $path=[string](Get-PropertyValue $Pending 'bootstrapResult' '')
+    if (-not $path -or -not(Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    Initialize-LifecycleProtocol
+    [KiloLink.Lifecycle.SafePath]::Check($path)
+    $receipt=Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json
+    if($receipt.schemaVersion -ne 1 -or $receipt.jobName -cne $Pending.jobName){throw 'WSL bootstrap ownership receipt does not match its pending operation.'}
+    return $receipt
+}
+
+function Invoke-WslRuntimeBootstrap {
+    param([int]$TimeoutSeconds=$script:NativeTimeoutSeconds)
+    Initialize-LifecycleProtocol
+    $hostPath=New-WslBootstrapHost
+    if(-not(Test-Path -LiteralPath $hostPath -PathType Leaf)){throw 'The WSL bootstrap supervisor is missing; no process was started.'}
+    $jobName='Global\KiloviewWslBootstrap_'+[guid]::NewGuid().ToString('N')
+    $pendingPath=Join-Path $script:StateRoot 'pending-process.json'
+    $resultPath=Join-Path (Split-Path -Parent $hostPath) 'bootstrap-result.json'
+    $pending=@{processId=0;startedUtc=$null;jobName=$jobName;filePath=$hostPath;bootstrapResult=$resultPath;reason='WSL runtime console bootstrap';action=$Action;
+        operationId=$(if($script:Lifecycle){$script:Lifecycle.OperationId}else{$null})}
+    # Durable ownership exists before Windows can start a mutating child.
+    Write-StateJson $pendingPath $pending
+    $process=$null
+    try {
+        $process=New-Object KiloLink.Lifecycle.NativeProcess($hostPath,[string[]]@($jobName,$resultPath))
+        $pending.processId=$process.Id;$pending.startedUtc=$process.StartedUtc.ToString('o')
+        Write-StateJson $pendingPath $pending
+        Write-InstallerLog "WSL bootstrap started as process $($process.Id); tracked job $jobName."
+        while (-not $process.HasExited) {
+            foreach($line in $process.Drain()){Write-InstallerLog $line}
+            Update-SuiteProgressPulse
+            if (([datetime]::UtcNow-$process.StartedUtc).TotalSeconds -gt $TimeoutSeconds) {
+                $script:LifecycleErrorCode='command-timeout'
+                throw 'WSL runtime installation exceeded its deadline; its tracked process tree may still be running.'
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        $code=$process.ExitCode
+        foreach($line in $process.Drain()){Write-InstallerLog $line}
+        $receipt=Get-WslBootstrapReceipt ([pscustomobject]$pending)
+        if(-not $receipt -or $receipt.phase -ne 'completed' -or [KiloLink.Lifecycle.ConsoleBootstrapProcess]::IsJobActive($jobName)){
+            throw 'WSL bootstrap exited without confirming that its tracked process tree finished.'
+        }
+        Write-InstallerLog "WSL bootstrap supervisor and its tracked descendants exited; exit code $code."
+        Remove-Item -LiteralPath $pendingPath -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $pendingPath) { throw 'WSL bootstrap ownership record could not be cleared.' }
+        if ($code -notin @(0,3010) -or $receipt.error) { throw "WSL runtime console bootstrap failed with exit code $code. $($receipt.error)" }
+        return $code
+    } catch {
+        if (Test-Path -LiteralPath $pendingPath) {
+            # A constructor can fail after Windows started the supervisor. A
+            # missing wrapper instance is not proof that no child exists.
+            $script:LifecycleRecoveryRequired=$true
+            if (-not $script:LifecycleErrorCode) { $script:LifecycleErrorCode='wsl-runtime-install-incomplete' }
+            $script:LifecycleNextAction='WSL installation may still be running. Wait for its tracked process tree to finish, then use Verify before retrying. Do not start another installation or restart Windows while it is active.'
+        }
+        throw
+    } finally {
+        # No forced termination of Windows servicing. The named job and pending
+        # record survive an active child and keep subsequent operations blocked.
+        if ($null -ne $process) { $process.Dispose() }
+    }
+}
+
+function Write-WslProbeFailure {
+    param([string]$Probe,[string]$Message)
+    if (-not (Get-Variable WslProbeFailures -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) { $script:WslProbeFailures=@{} }
+    $messageText=($Message -replace '[\r\n]+',' ').Trim()
+    if($messageText.Length -gt 1024){$messageText=$messageText.Substring(0,1024)}
+    $now=[datetime]::UtcNow
+    $previous=$script:WslProbeFailures[$Probe]
+    if(-not $previous -or $previous.message -cne $messageText -or ($now-$previous.loggedUtc).TotalSeconds -ge 30){
+        Write-InstallerLog "WSL $Probe probe: $messageText"
+        $script:WslProbeFailures[$Probe]=@{message=$messageText;loggedUtc=$now}
+    }
+}
+
 function Get-WslDistroNames {
+    if (-not (Test-WslRuntimeInstalled)) { return @() }
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
         return @()
     }
@@ -520,30 +993,35 @@ function Get-WslDistroNames {
         # platform is not installed. Its expected diagnostic on stderr must not
         # terminate the installer menu while $ErrorActionPreference is Stop.
         $ErrorActionPreference = 'Continue'
-        $output = & wsl.exe --list --quiet 2>$null
+        $output = Invoke-Native wsl.exe @('--list','--quiet') -Capture -IgnoreExitCode -ReadOnly -TimeoutSeconds 30 -StallSeconds 30
         $code = $LASTEXITCODE
     } catch {
-        Write-InstallerLog "WSL distribution probe is not available: $($_.Exception.Message)"
+        Write-WslProbeFailure 'distribution' "Unavailable: $($_.Exception.Message)"
         return @()
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
     if ($code -ne 0) {
+        Write-WslProbeFailure 'distribution' "Exited with code $code."
         return @()
     }
     return @($output | ForEach-Object { ([string]$_ -replace [char]0, '').Trim() } | Where-Object { $_ })
 }
 
 function Test-WslRuntime {
+    if (-not (Test-WslRuntimeInstalled)) { return $false }
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
         return $false
     }
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & wsl.exe --status 2>$null | Out-Null
-        return $LASTEXITCODE -eq 0
+        Invoke-Native wsl.exe @('--status') -IgnoreExitCode -ReadOnly -TimeoutSeconds 30 -StallSeconds 30 | Out-Null
+        $code=$LASTEXITCODE
+        if($code -ne 0){Write-WslProbeFailure 'runtime status' "Exited with code $code.";return $false}
+        return $true
     } catch {
+        Write-WslProbeFailure 'runtime status' "Unavailable: $($_.Exception.Message)"
         return $false
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -567,7 +1045,7 @@ function Get-ResumeState {
         return $null
     }
     try {
-        return Get-Content -Raw -LiteralPath $script:ResumeStatePath | ConvertFrom-Json
+        return Get-Content -Encoding UTF8 -Raw -LiteralPath $script:ResumeStatePath | ConvertFrom-Json
     } catch {
         Write-InstallerLog "Resume state could not be read: $($_.Exception.Message)"
         return $null
@@ -575,12 +1053,82 @@ function Get-ResumeState {
 }
 
 function Remove-ResumeTask {
-    Unregister-ScheduledTask -TaskName $script:ResumeTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-OwnedTask $script:ResumeTaskName
 }
 
 function Clear-ResumeContinuation {
     Remove-ResumeTask
-    Remove-Item -LiteralPath $script:ResumeStatePath -Force -ErrorAction SilentlyContinue
+    Remove-OwnedFile $script:ResumeStatePath
+}
+
+function Get-ExactResumeTask {
+    $lookupErrors = @()
+    $tasks = @(Get-ScheduledTask -TaskName $script:ResumeTaskName -TaskPath '\' -ErrorAction SilentlyContinue -ErrorVariable lookupErrors)
+    if (@($lookupErrors | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }).Count) {
+        throw "The restart continuation task could not be inspected: $($lookupErrors[0])"
+    }
+    if ($tasks.Count -gt 1) { throw 'The restart continuation task identity is ambiguous.' }
+    if ($tasks.Count) { return $tasks[0] }
+    return $null
+}
+
+function Complete-FailedResumeContinuation {
+    # Called while the entry point still owns the operation mutex, after its
+    # terminal result. A pending/unconfirmed child retains its recovery owner.
+    if ($Action -ne 'Resume' -or $script:OperationOutcome -notin @('Failed','Partial') -or
+        $script:LifecycleRecoveryRequired -or $script:LifecycleErrorCode -eq 'lifecycle-result-write-failed' -or
+        (Test-Path -LiteralPath (Join-Path $script:StateRoot 'pending-process.json'))) { return }
+    $originalMessage = $script:OperationMessage
+    try {
+        $continuation = Get-ResumeState
+        if (-not $continuation) { return }
+        $outcome = Get-LifecycleResultOutcome $script:OperationOutcome
+        if ($script:Lifecycle) {
+            $result = $script:Lifecycle.ReadResult()
+            if (-not $result -or $result['outcome'] -notin @('failed','partial')) { return }
+            if ((Get-PropertyValue $continuation 'OperationId' '') -ne $script:Lifecycle.OperationId -or
+                (Get-PropertyValue $continuation 'LifecycleRequestPath' '') -ine $script:Lifecycle.RequestPath) {
+                throw 'Restart continuation belongs to a different operation; its task was not changed.'
+            }
+            $outcome = $result['outcome']
+        }
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        if ((Get-PropertyValue $continuation 'User' '') -ine $identity.Name) { throw 'Restart continuation belongs to a different Windows user.' }
+        $task = Get-ExactResumeTask
+        if ($task) {
+            $actions = @($task.Actions)
+            $expectedArguments = '--resume'
+            $request = Get-PropertyValue $continuation 'LifecycleRequestPath' ''
+            if ($request) { $expectedArguments += ' --lifecycle-request "' + $request + '"' }
+            $taskOwner = if ($task.Principal.UserId -match '^S-1-') {
+                [Security.Principal.SecurityIdentifier]::new($task.Principal.UserId)
+            } else {
+                [Security.Principal.NTAccount]::new($task.Principal.UserId).Translate([Security.Principal.SecurityIdentifier])
+            }
+            if ($actions.Count -ne 1 -or $actions[0].Execute -ine $script:PersistentLauncherPath -or
+                $actions[0].Arguments -cne $expectedArguments -or
+                $taskOwner.Value -ne $identity.User.Value) {
+                throw 'Restart continuation task no longer matches this operation and user; it was not changed.'
+            }
+            Unregister-ScheduledTask -TaskName $script:ResumeTaskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
+            if (Get-ExactResumeTask) { throw 'Windows still reports the restart continuation task after removal.' }
+        }
+        # Retain original request/configuration/restart counters for an explicit
+        # reviewed retry. A later required reboot registers a fresh trigger.
+        $continuation | Add-Member NoteProperty AutomaticContinuationStopped $true -Force
+        $continuation | Add-Member NoteProperty TerminalOutcome $outcome -Force
+        $continuation | Add-Member NoteProperty StoppedAtUtc ([datetime]::UtcNow.ToString('o')) -Force
+        Write-StateJson $script:ResumeStatePath $continuation
+        Write-InstallerLog 'Automatic restart continuation removed after terminal failure. Request, configuration and recovery records were retained for explicit retry.'
+    } catch {
+        $failure = $_.Exception.Message
+        $script:LifecycleRecoveryRequired = $true
+        if (-not $script:LifecycleErrorCode) { $script:LifecycleErrorCode = 'resume-continuation-stop-failed' }
+        $guidance = "Automatic restart continuation could not be confirmed stopped. Inspect the '$script:ResumeTaskName' task before signing in again or retrying. $failure"
+        $script:LifecycleNextAction = (@($script:LifecycleNextAction,$guidance) | Where-Object { $_ }) -join ' '
+        if ($script:ActiveJournal) { $script:ActiveJournal['resumeContinuationFailure'] = $failure }
+        Set-OperationOutcome $script:OperationOutcome ($originalMessage + ' ' + $guidance)
+    }
 }
 
 function Register-ResumeContinuation {
@@ -594,7 +1142,9 @@ function Register-ResumeContinuation {
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     if (Test-Path -LiteralPath $script:PersistentLauncherPath) {
-        $taskAction = New-ScheduledTaskAction -Execute $script:PersistentLauncherPath -Argument '--resume'
+        $resumeArguments='--resume'
+        if($script:Lifecycle){$resumeArguments+=' --lifecycle-request "'+$script:Lifecycle.RequestPath+'"'}
+        $taskAction = New-ScheduledTaskAction -Execute $script:PersistentLauncherPath -Argument $resumeArguments
     } else {
         if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
             throw 'Setup cannot create a restart continuation because neither the persistent launcher nor a script path is available.'
@@ -607,6 +1157,7 @@ function Register-ResumeContinuation {
         $quietSource = Join-Path $PSScriptRoot 'launcher\QuietInstaller.cs'
         if (Test-Path -LiteralPath $quietSource) { Copy-Item -LiteralPath $quietSource -Destination (Join-Path (Split-Path -Parent $resumeScript) 'QuietInstaller.cs') -Force }
         $arguments = "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$resumeScript`" -Action Resume -AcceptLicenses -LauncherMode -LogPath `"$(Join-Path $script:StateRoot 'setup-launcher.log')`""
+        if($script:Lifecycle){$arguments+=' -LifecycleRequestPath "'+$script:Lifecycle.RequestPath+'"'}
         $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
     }
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
@@ -621,14 +1172,18 @@ function Register-ResumeContinuation {
         throw 'Windows did not retain the scheduled continuation task, so Setup will not restart the computer.'
     }
 
-    [pscustomobject]@{
+    $resumeState=[pscustomobject]@{
         SchemaVersion = 1
         Attempt = $attempt
         Reason = $Reason
         RegisteredAt = (Get-Date).ToString('o')
         User = $identity
-        Action = if ($Action -eq 'Resume') { Get-PropertyValue $oldState 'Action' 'Repair' } elseif ($Action -in @('Setup','Update','MaintainRuntime')) { $Action } else { 'Repair' }
-    } | ConvertTo-Json | Set-Content -LiteralPath $script:ResumeStatePath -Encoding UTF8
+        Action = if ($Action -eq 'Resume') { Get-PropertyValue $oldState 'Action' 'Repair' } elseif ($Action -in @('Setup','InstallClient','Update','MaintainRuntime')) { $Action } else { 'Repair' }
+        LifecycleRequestPath=$(if($script:Lifecycle){$script:Lifecycle.RequestPath}else{$null})
+        OperationId=$(if($script:Lifecycle){$script:Lifecycle.OperationId}else{$null})
+        ConfigurationPath=$(Get-Variable ConfigurationPath -ValueOnly -ErrorAction SilentlyContinue)
+    }
+    Write-StateJson $script:ResumeStatePath $resumeState
     Write-InstallerLog "Registered restart continuation attempt $attempt for $identity. Reason: $Reason"
 }
 
@@ -683,41 +1238,40 @@ function Wait-WslDistroRegistration {
 }
 
 function Test-WslDistroReady {
-    param([string]$Distro)
-    if (-not $Distro -or -not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-        return $false
-    }
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        & wsl.exe -d $Distro -u root --cd / -- true 2>$null | Out-Null
-        return $LASTEXITCODE -eq 0
-    } catch {
-        return $false
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    param([string]$Distro, [double]$TimeoutSeconds=30, [ref]$ProbeResult)
+    $probe=Get-WslDistroLaunchProbe -Distro $Distro -TimeoutSeconds $TimeoutSeconds
+    if($ProbeResult){$ProbeResult.Value=$probe}
+    return $probe.Success
 }
 
 function Get-WslDistroLaunchProbe {
-    param([string]$Distro)
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $output = @(& wsl.exe -d $Distro -u root --cd / -- true 2>&1 | ForEach-Object {
-            ([string]$_ -replace [char]0, '').Trim()
-        } | Where-Object { $_ })
-        $code = $LASTEXITCODE
-    } catch {
-        $output = @($_.Exception.Message)
-        $code = -1
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+    param([string]$Distro, [double]$TimeoutSeconds=30)
+    if (-not $Distro) { throw 'A distribution name is required for the WSL launch probe.' }
+    if ($TimeoutSeconds -le 0) {
+        return [pscustomobject]@{Success=$false;ExitCode=$null;TimedOut=$true;Output=@('The WSL launch deadline expired before another probe could start.')}
     }
+    $previousErrorCode=$script:LifecycleErrorCode
+    $timedOut=$false
+    try {
+        $output=@(Invoke-Native wsl.exe @('-d',$Distro,'-u','root','--cd','/','--','true') -Capture -IgnoreExitCode -ReadOnly -TimeoutSeconds $TimeoutSeconds -StallSeconds $TimeoutSeconds)
+        $code = $LASTEXITCODE
+    } catch [TimeoutException] {
+        # Only a native deadline is a retryable probe result. In particular,
+        # heartbeat/result persistence failures must escape after CLI cleanup.
+        if (-not $_.Exception.Data['NativeCommandTimeout']) { throw }
+        $output=@($_.Exception.Data['NativeOutput']) + "The WSL launch probe exceeded its $TimeoutSeconds-second time limit; its owned CLI was stopped."
+        $code=$null
+        $timedOut=$true
+        # A later successful retry must not retain this transient timeout as
+        # the operation's error. Terminal wait failure is assigned by its caller.
+        $script:LifecycleErrorCode=$previousErrorCode
+    }
+    $output=@($output | ForEach-Object {([string]$_ -replace [char]0,'').Trim()} | Where-Object {$_})
     foreach ($line in $output) { Write-InstallerLog "WSL launch probe: $line" }
     return [pscustomobject]@{
-        Success = $code -eq 0
+        Success = -not $timedOut -and $code -eq 0
         ExitCode = $code
+        TimedOut = $timedOut
         Output = @($output)
     }
 }
@@ -736,8 +1290,9 @@ function Get-WslDistroVersion {
 }
 
 function Get-WslLaunchFailureMessage {
-    param([string]$Distro, [string[]]$Output)
+    param([string]$Distro, [string[]]$Output, [switch]$TimedOut)
     $diagnostic = @($Output | Where-Object { $_ }) -join ' '
+    if ($TimedOut) { return "The WSL launch probe for '$Distro' exceeded its time limit. $diagnostic" }
     if ($diagnostic -match 'WSL_E_VM_MODE_INVALID_STATE|HCS_E_HYPERV_NOT_INSTALLED|virtual machine platform|virtualization') {
         return @"
 Windows cannot start the WSL 2 virtual machine for '$Distro'. WSL reported: $diagnostic
@@ -752,14 +1307,25 @@ This guest does not currently have usable virtualization extensions. If Windows 
 }
 
 function Wait-WslDistroReady {
-    param([string]$Distro, [int]$TimeoutSeconds = 180)
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    do {
-        if (Test-WslDistroReady $Distro) {
+    param([string]$Distro, [double]$TimeoutSeconds = 180, [ref]$LastProbe)
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $probe=[pscustomobject]@{Success=$false;ExitCode=$null;TimedOut=$true;Output=@('The WSL readiness deadline expired before another probe could start.')}
+    if($LastProbe){$LastProbe.Value=$probe}
+    while (($remaining=$TimeoutSeconds-$clock.Elapsed.TotalSeconds) -gt 0) {
+        # Each native call shares the overall wait budget. A slow launch cannot
+        # bypass the polling deadline or start an extra diagnostic afterward.
+        $ready=Test-WslDistroReady -Distro $Distro -TimeoutSeconds ([Math]::Min(30,$remaining)) -ProbeResult ([ref]$probe)
+        if($LastProbe){$LastProbe.Value=$probe}
+        if ($ready) {
             return $true
         }
-        Wait-SuiteProgressInterval
-    } while ((Get-Date) -lt $deadline)
+        $nextProbeAt=[Math]::Min($TimeoutSeconds,$clock.Elapsed.TotalSeconds+3)
+        while($clock.Elapsed.TotalSeconds -lt $nextProbeAt) {
+            Update-SuiteProgressPulse
+            $sleepMilliseconds=[Math]::Min(250,[Math]::Ceiling(($nextProbeAt-$clock.Elapsed.TotalSeconds)*1000))
+            if($sleepMilliseconds -gt 0){Start-Sleep -Milliseconds ([int]$sleepMilliseconds)}
+        }
+    }
     return $false
 }
 
@@ -827,6 +1393,11 @@ function Get-NdiRegistration {
         $name -match '^NDI\s+\d+\s+Tools' -or ($name -match 'NDI.*Tools' -and $publisher -match 'NDI|Vizrt|NewTek')
     })
     if ($All) { return $registrations }
+    $registrations=@($registrations|Sort-Object @{Expression={Convert-ToNdiToolsVersion ([string](Get-PropertyValue $_ 'DisplayVersion' ''))};Descending=$true})
+    if($registrations.Count -gt 1) {
+        $locations=@($registrations|ForEach-Object{[string](Get-PropertyValue $_ 'InstallLocation' '')}|Where-Object{$_}|Select-Object -Unique)
+        if($locations.Count -gt 1){throw 'Multiple NDI Tools installations are registered at different locations. Resolve the intended installation in Windows Apps before updating shared NDI files.'}
+    }
     return @($registrations | Select-Object -First 1)[0]
 }
 
@@ -890,15 +1461,37 @@ function Get-NdiToolsFiles {
 }
 
 function Get-NdiDiscoveryExe {
-    $found = Get-NdiToolsFiles | Where-Object Name -eq 'NDI Discovery Service.exe' | Select-Object -First 1
-    if ($found) { return $found.FullName }
+    # Bridge ships a private helper with the same filename. It is not the
+    # standalone Discovery service component managed by Environment.
+    $found = @(Get-NdiToolsFiles | Where-Object { $_.Name -eq 'NDI Discovery Service.exe' -and $_.Directory.Name -in @('Discovery','Discovery Service') })
+    if($found.Count -gt 1){
+        $service=Get-NdiDiscoveryService
+        if($service){
+            $native=@(Get-CimInstance Win32_Service -ErrorAction Stop|Where-Object Name -eq $service.Name)
+            if($native.Count -eq 1 -and $native[0].PathName -match '^\s*(?:"(?<exe>[A-Za-z]:\\[^"]+\.exe)"|(?<exe>[A-Za-z]:\\.+?\.exe))(?:\s|$)'){
+                $matchesService=@($found|Where-Object{$_.FullName -ieq $Matches['exe']})
+                if($matchesService.Count -eq 1){return $matchesService[0].FullName}
+            }
+        }
+        throw 'Multiple NDI Discovery executables were found and the active service identity is ambiguous.'
+    }
+    if ($found.Count -eq 1) { return $found[0].FullName }
     return $null
 }
 
+function Test-NdiClientToolsReady {
+    $files=@(Get-NdiToolsFiles)
+    $access=@($files|Where-Object{$_.Directory.Name -eq 'Access Manager' -and $_.Name -in @('Application.NdiGroupEditor.exe','NDI Access Manager.exe')})
+    $monitor=@($files|Where-Object{$_.Directory.Name -eq 'Studio Monitor' -and $_.Name -in @('Application.Network.StudioMonitor.x64.exe','NDI Studio Monitor.exe')})
+    return $access.Count -gt 0 -and $monitor.Count -gt 0
+}
+
 function Get-NdiDiscoveryService {
-    return @(Get-Service -ErrorAction SilentlyContinue | Where-Object {
+    $services=@(Get-Service -ErrorAction SilentlyContinue | Where-Object {
         $_.Name -match 'NDI.*Discovery' -or $_.DisplayName -match 'NDI.*Discovery'
-    } | Select-Object -First 1)[0]
+    })
+    if($services.Count -gt 1){throw 'Multiple NDI Discovery services are registered. Resolve the intended shared service before maintenance.'}
+    return @($services|Select-Object -First 1)[0]
 }
 
 function Get-InstallState {
@@ -1149,8 +1742,15 @@ function Ensure-WslFeatures {
         }
         if ($feature.State -ne 'Enabled') {
             Write-Detail "Enabling $name"
+            $featureLabel = if ($name -eq 'Microsoft-Windows-Subsystem-Linux') { 'Windows Subsystem for Linux' } else { 'Virtual Machine Platform' }
+            $featureStatus = "Enabling $featureLabel. This can take several minutes."
+            Set-SuiteProgress -Percent $script:ProgressPercent -Status $featureStatus
+            Write-LifecycleResult 'running' $featureStatus -Stage 'Windows prerequisites'
             $result = Enable-WindowsOptionalFeature -Online -FeatureName $name -All -NoRestart
             if ($result.RestartNeeded) { $restart = $true }
+            $featureStatus = "Verifying $featureLabel"
+            Set-SuiteProgress -Percent $script:ProgressPercent -Status $featureStatus
+            Write-LifecycleResult 'running' $featureStatus -Stage 'Windows prerequisites'
             $verified = Get-WindowsOptionalFeature -Online -FeatureName $name
             if ($verified.State -notin @('Enabled', 'EnablePending')) {
                 throw "Windows feature $name did not enter an enabled state. Current state: $($verified.State)."
@@ -1169,9 +1769,27 @@ function Ensure-WslFeatures {
     }
     if (-not (Test-WslRuntime)) {
         Write-Step 'Installing the Windows Subsystem for Linux runtime'
-        Invoke-Native wsl.exe @('--install', '--no-distribution', '--web-download')
+        Write-InstallerLog 'Starting WSL runtime bootstrap: wsl.exe --install --no-distribution --web-download'
+        try {
+            $bootstrapCode=Invoke-WslRuntimeBootstrap
+            if ($bootstrapCode -eq 3010) {
+                Request-RestartAndResume 'The WSL runtime installation requires a Windows restart.'
+                return $false
+            }
+        } catch {
+            # Keep supervisor/producer-persistence diagnostics and ownership intact.
+            if ($script:LifecycleRecoveryRequired -or $script:LifecycleErrorCode -in @('command-timeout','lifecycle-result-write-failed')) { throw }
+            $script:LifecycleErrorCode = 'wsl-runtime-install-failed'
+            $script:LifecycleNextAction = "Check Windows Update and access to Microsoft's WSL downloads, then retry Server setup. Runtime installation help: https://learn.microsoft.com/windows/wsl/install"
+            throw "WSL runtime could not be installed. $($_.Exception.Message) $script:LifecycleNextAction"
+        }
         Set-SuiteProgress -Percent ([Math]::Min(14, $script:ProgressPercent + 2)) -Status 'Waiting for the WSL runtime to become ready'
         if (-not (Wait-WslRuntime -TimeoutSeconds 120)) {
+            if (-not (Test-WslRuntimeInstalled)) {
+                $script:LifecycleErrorCode='wsl-runtime-install-failed'
+                $script:LifecycleNextAction='The WSL runtime was not detected after its bootstrap completed. Check Windows Update and Microsoft WSL installation diagnostics before retrying Server setup.'
+                throw $script:LifecycleNextAction
+            }
             Request-RestartAndResume 'The WSL runtime was installed but has not become ready in the current Windows session.'
             return $false
         }
@@ -1236,7 +1854,7 @@ function Ensure-MirroredNetworking {
     $path = Join-Path $env:USERPROFILE '.wslconfig'
     $lines = New-Object Collections.Generic.List[string]
     if (Test-Path -LiteralPath $path) {
-        foreach ($line in Get-Content -LiteralPath $path) { $lines.Add([string]$line) }
+        foreach ($line in Get-Content -Encoding UTF8 -LiteralPath $path) { $lines.Add([string]$line) }
     }
     $changed = $false
     $changed = (Set-IniKey $lines 'wsl2' 'networkingMode' 'mirrored') -or $changed
@@ -1268,12 +1886,12 @@ function Ensure-Ubuntu {
     Write-Step "Verifying $distro as a working WSL 2 distribution"
     $probe = Get-WslDistroLaunchProbe $distro
     if (-not $probe.Success) {
-        $message = Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output
-        if ($message -match 'nested virtualization') { throw $message }
+        $message = Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output -TimedOut:([bool]$probe.TimedOut)
+        if (-not $probe.TimedOut -and $message -match 'nested virtualization') { throw $message }
         Set-SuiteProgress -Percent ([Math]::Min(28, $script:ProgressPercent + 1)) -Status "Waiting for $distro to finish its first launch"
-        if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 180)) {
-            $probe = Get-WslDistroLaunchProbe $distro
-            throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output)
+        if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 180 -LastProbe ([ref]$probe))) {
+            $script:LifecycleErrorCode='wsl-distro-readiness-timeout'
+            throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output -TimedOut:([bool]$probe.TimedOut))
         }
     }
     $version = Get-WslDistroVersion $distro
@@ -1281,9 +1899,9 @@ function Ensure-Ubuntu {
         Write-Step "Converting $distro to WSL 2"
         Invoke-Native wsl.exe @('--set-version', $distro, '2')
     }
-    if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 60)) {
-        $probe = Get-WslDistroLaunchProbe $distro
-        throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output)
+    if (-not (Wait-WslDistroReady -Distro $distro -TimeoutSeconds 60 -LastProbe ([ref]$probe))) {
+        $script:LifecycleErrorCode='wsl-distro-readiness-timeout'
+        throw (Get-WslLaunchFailureMessage -Distro $distro -Output $probe.Output -TimedOut:([bool]$probe.TimedOut))
     }
     return $distro
 }
@@ -1352,8 +1970,10 @@ fi
     if ($systemdState -contains 'KILOLINK_SYSTEMD_RESTART_REQUIRED') {
         Set-SuiteProgress -Percent ([Math]::Min(42, $script:ProgressPercent + 2)) -Status "Restarting $Distro with systemd enabled"
         Invoke-Native wsl.exe @('--terminate', $Distro)
-        if (-not (Wait-WslDistroReady -Distro $Distro -TimeoutSeconds 120)) {
-            throw "$Distro did not restart with systemd within 120 seconds."
+        $probe=$null
+        if (-not (Wait-WslDistroReady -Distro $Distro -TimeoutSeconds 120 -LastProbe ([ref]$probe))) {
+            $script:LifecycleErrorCode='wsl-distro-readiness-timeout'
+            throw ("$Distro did not restart with systemd within 120 seconds. " + (Get-WslLaunchFailureMessage -Distro $Distro -Output $probe.Output -TimedOut:([bool]$probe.TimedOut)))
         }
     } elseif ($systemdState -notcontains 'KILOLINK_SYSTEMD_READY') {
         throw "Could not verify the systemd state in $Distro. No distribution was restarted."
@@ -1470,7 +2090,7 @@ function Assert-NoPendingKiloRecovery {
     $root = Join-Path $script:StateRoot 'Backups'
     foreach ($directory in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
         $status = Join-Path $directory.FullName 'status'
-        if ((Test-Path -LiteralPath $status) -and (Get-Content -LiteralPath $status -Raw).Trim() -notin @('committed','rolled-back','backup-complete')) {
+        if ((Test-Path -LiteralPath $status) -and (Get-Content -Encoding UTF8 -LiteralPath $status -Raw).Trim() -notin @('committed','rolled-back','backup-complete')) {
             throw "An interrupted KiloLink operation needs recovery from $($directory.FullName). Follow docs/RECOVERY.md before retrying. Its data and previous container were retained."
         }
     }
@@ -1592,27 +2212,132 @@ function Invoke-KiloReplacement {
     if ($existing -and $existing.LinuxDataPath.TrimEnd('/') -ne $Config.LinuxDataPath.TrimEnd('/')) { throw 'Moving KiloLink data requires an explicit migration, not repair.' }
     Write-StateJson (Join-Path $directory 'deployment.json') ([ordered]@{schemaVersion=1; backupId=$id; createdUtc=[datetime]::UtcNow.ToString('o'); before=$existing; requested=$Config})
     $linux = Get-KiloReplacementScript $Config (Get-WslBackupPath $directory) $id -Pull:$Pull -BackupOnly:$BackupOnly -UpdateImage:$UpdateImage
-    # Older installed watchdogs do not know about the Linux lock. Disable their
-    # triggers as well as stopping the current instance during migration/backup.
+    # Preserve task policy, then confirm Linux watchdog quiescence as well as
+    # disabling Windows triggers before migration/backup.
     $watchdog = Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue
     $enabled = $watchdog -and [bool]$watchdog.Settings.Enabled
     $running = $watchdog -and $watchdog.State -eq 'Running'
     if ($watchdog) {
         Write-StateJson (Join-Path $directory 'watchdog.json') @{enabled=$enabled; running=$running; taskName=$script:StartupTaskName}
-        if ($enabled) { Disable-ScheduledTask -TaskName $script:StartupTaskName | Out-Null }
     }
     try {
-        Stop-ManagedTask $script:StartupTaskName
+        Set-KiloWatchdogState -Distro $Config.DistroName -Mode Activate
         Invoke-WslScript $Config.DistroName $linux
     } finally {
         $statusPath = Join-Path $directory 'status'
-        $status = if (Test-Path -LiteralPath $statusPath) { (Get-Content -LiteralPath $statusPath -Raw).Trim() } else { 'not-started' }
-        if ($enabled -and $status -in @('committed','rolled-back','backup-complete','not-started')) {
+        $status = if (Test-Path -LiteralPath $statusPath) { (Get-Content -Encoding UTF8 -LiteralPath $statusPath -Raw).Trim() } else { 'not-started' }
+        if ($enabled -and -not $script:LifecycleRecoveryRequired -and $status -in @('committed','rolled-back','backup-complete','not-started')) {
             Enable-ScheduledTask -TaskName $script:StartupTaskName | Out-Null
             if ($running) { Start-ScheduledTask -TaskName $script:StartupTaskName }
         }
     }
+    Add-LifecycleEffect "KiloLink backup/replacement state recorded under $directory."
     Write-Detail "KiloLink recovery files: $directory" Green
+}
+
+function ConvertFrom-NdiToolsHtml {
+    param([string]$Content)
+    if ($Content.Length -gt 4MB) { throw 'The NDI download page exceeds the metadata size limit.' }
+    $limit = [TimeSpan]::FromMilliseconds(500)
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    # Never use Windows PowerShell's lazy .Links parser: its regexes have no deadline.
+    $hidden = [regex]::new('(?is)<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>', [Text.RegularExpressions.RegexOptions]::None, $limit)
+    $content = $hidden.Replace($Content, '')
+    $tags = [regex]::new('(?is)<a\b(?:"[^"]*"|''[^'']*''|[^''">])*>', [Text.RegularExpressions.RegexOptions]::None, $limit)
+    $attributes = [regex]::new('(?is)(?<name>[^\s"''<>/=]+)(?:\s*=\s*(?:"(?<value>[^"]*)"|''(?<value>[^'']*)''|(?<value>[^\s"''=<>`]+)))?', [Text.RegularExpressions.RegexOptions]::None, $limit)
+    $candidates = New-Object 'Collections.Generic.HashSet[string]'
+    foreach ($tag in $tags.Matches($content)) {
+        if ($watch.Elapsed.TotalSeconds -gt 5) { throw 'The NDI download page exceeded its parsing deadline.' }
+        $href = $null; $hrefCount = 0
+        foreach ($attribute in $attributes.Matches($tag.Value.Substring(2, $tag.Length - 3))) {
+            if ($watch.Elapsed.TotalSeconds -gt 5) { throw 'The NDI download page exceeded its parsing deadline.' }
+            if ($attribute.Groups['name'].Value -eq 'href') { $href = $attribute.Groups['value'].Value; $hrefCount++ }
+        }
+        if ($hrefCount -ne 1) { continue }
+        $href = [Net.WebUtility]::HtmlDecode($href)
+        $uri = $null
+        if ([Uri]::TryCreate($href, [UriKind]::Absolute, [ref]$uri) -and
+            $uri.Scheme -eq 'https' -and $uri.Host -eq 'downloads.ndi.tv' -and $uri.Port -eq 443 -and -not $uri.UserInfo -and
+            [Uri]::UnescapeDataString($uri.AbsolutePath) -match '^/Tools/NDI[^/]*Tools\.exe$') {
+            [void]$candidates.Add($uri.AbsoluteUri)
+        }
+    }
+    if ($candidates.Count -ne 1) { throw 'The current Windows NDI Tools download could not be identified on ndi.video/tools/. Try again later.' }
+    $versions = New-Object 'Collections.Generic.HashSet[string]'
+    $labels = [regex]::new('(?i)>\s*Version\s+(\d+\.\d+\.\d+(?:\.\d+)?)\s*<', [Text.RegularExpressions.RegexOptions]::None, $limit)
+    foreach ($match in $labels.Matches($content)) {
+        if ($watch.Elapsed.TotalSeconds -gt 5) { throw 'The NDI download page exceeded its parsing deadline.' }
+        $version = [version]$match.Groups[1].Value
+        [void]$versions.Add(([version]::new($version.Major, $version.Minor, $version.Build, [Math]::Max(0, $version.Revision))).ToString())
+    }
+    [pscustomobject]@{Url=@($candidates)[0];Version=$(if ($versions.Count -eq 1) { @($versions)[0] } else { $null })}
+}
+
+function Read-NdiToolsMetadata {
+    param([string]$Uri = 'https://ndi.video/tools/')
+    # This function runs only in the bounded read-only child. Its caller also
+    # bounds the complete fetch/decode/parse lifetime, including DNS and TLS.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $request = [Net.HttpWebRequest]::Create($Uri)
+    $request.Timeout = 20000
+    $request.ReadWriteTimeout = 10000
+    $request.MaximumAutomaticRedirections = 3
+    $request.AutomaticDecompression = [Net.DecompressionMethods]::GZip -bor [Net.DecompressionMethods]::Deflate
+    $request.UserAgent = 'Kiloview-Environment-Setup'
+    $request.Headers['Cache-Control'] = 'no-cache'
+    $response = $null; $stream = $null; $buffer = $null
+    try {
+        $response = $request.GetResponse()
+        if ($response.ContentLength -gt 4MB) { throw 'The NDI download page exceeds the metadata size limit.' }
+        $stream = $response.GetResponseStream()
+        $buffer = New-Object IO.MemoryStream
+        $bytes = New-Object byte[] 16384
+        while (($count = $stream.Read($bytes, 0, $bytes.Length)) -gt 0) {
+            if ($buffer.Length + $count -gt 4MB) { throw 'The NDI download page exceeds the metadata size limit.' }
+            $buffer.Write($bytes, 0, $count)
+        }
+        $encoding = [Text.Encoding]::UTF8
+        if ($response.CharacterSet) { $encoding = [Text.Encoding]::GetEncoding($response.CharacterSet) }
+        ConvertFrom-NdiToolsHtml ($encoding.GetString($buffer.ToArray()))
+    } finally {
+        if ($buffer) { $buffer.Dispose() }
+        if ($stream) { $stream.Dispose() }
+        if ($response) { $response.Close() }
+    }
+}
+
+function New-NdiMetadataProbeScript {
+    $parser = (Get-Command ConvertFrom-NdiToolsHtml -CommandType Function).Definition
+    $reader = (Get-Command Read-NdiToolsMetadata -CommandType Function).Definition
+    return ('$ErrorActionPreference=''Stop''; $ProgressPreference=''SilentlyContinue''; function ConvertFrom-NdiToolsHtml {' + $parser +
+        '}; function Read-NdiToolsMetadata {' + $reader +
+        '}; try { Read-NdiToolsMetadata | ConvertTo-Json -Compress } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }')
+}
+
+function Get-NdiToolsMetadata {
+    param([int]$TimeoutSeconds = 60)
+    $previousMessage = $script:OperationMessage
+    $previousStage = $script:LifecycleStage
+    $script:OperationMessage = 'Checking the current NDI Tools package information.'
+    Write-LifecycleResult 'running' $script:OperationMessage -Stage 'ndi-metadata'
+    Set-SuiteProgress -Percent $script:ProgressPercent -Status $script:OperationMessage
+    $shell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes((New-NdiMetadataProbeScript)))
+    try {
+        $output = Invoke-Native $shell @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -Capture -ReadOnly -TimeoutSeconds $TimeoutSeconds -StallSeconds 0
+        $metadata = ($output -join "`n") | ConvertFrom-Json
+        if (-not $metadata.Url) { throw 'The NDI metadata probe returned no verified download URL.' }
+    } catch {
+        if ($script:LifecycleErrorCode -eq 'lifecycle-result-write-failed') { throw }
+        $timeout = $script:LifecycleErrorCode -eq 'command-timeout'
+        $script:LifecycleErrorCode = if ($timeout) { 'ndi-metadata-timeout' } else { 'ndi-metadata-unavailable' }
+        $script:LifecycleNextAction = 'Check access to ndi.video/tools/, then retry setup. No NDI installation or Windows feature change was started by this metadata check.'
+        throw "NDI package information could not be checked within the metadata limits. $($script:LifecycleNextAction) $($_.Exception.Message)"
+    }
+    $script:OperationMessage = $previousMessage
+    $script:LifecycleStage = $previousStage
+    Write-LifecycleResult 'running' $previousMessage
+    return $metadata
 }
 
 function Convert-ToVersion {
@@ -1631,6 +2356,9 @@ function Download-FileWithProgress {
         [int]$PercentSpan,
         [string]$Status
     )
+    # Reserve the final points for verification and the operation outcome.
+    $BasePercent = [Math]::Max(0, [Math]::Min(98, $BasePercent))
+    $PercentSpan = [Math]::Max(0, [Math]::Min(98 - $BasePercent, $PercentSpan))
     if ($PackageDirectory) {
         $name = if (([uri]$Uri).Host -eq 'downloads.ndi.tv') { 'NDI-Tools.exe' }
             elseif ($Uri -like 'https://github.com/JohnDevAc/Kiloview-PC-Onboarding/releases/download/*') { 'PC-Agent.zip' }
@@ -1667,7 +2395,9 @@ function Download-FileWithProgress {
             # BITS reports UInt64.MaxValue until the server supplies the content length.
             # Treat that sentinel as unknown so the UI never displays an absurd total.
             if ($job.BytesTotal -gt 0 -and [uint64]$job.BytesTotal -ne [uint64]::MaxValue) {
-                $fraction = [Math]::Min(1, [double]$job.BytesTransferred / [double]$job.BytesTotal)
+                # Explicit doubles avoid PowerShell selecting Min(int,int) and
+                # rounding a half-complete transfer to one whole download.
+                $fraction = [Math]::Min([double]1, [double]$job.BytesTransferred / [double]$job.BytesTotal)
                 $percent = $BasePercent + [int]([Math]::Floor($fraction * $PercentSpan))
                 $downloaded = [Math]::Round($job.BytesTransferred / 1MB, 1)
                 $total = [Math]::Round($job.BytesTotal / 1MB, 1)
@@ -1715,22 +2445,9 @@ function Get-InstallerSignatureWithProgress {
 
 function Get-CurrentNdiToolsUrl {
     param($Page = $null)
-    if (-not $Page) {
-        $Page = Invoke-WebRequest -UseBasicParsing -Uri 'https://ndi.video/tools/' -TimeoutSec 60
-        $script:NdiDownloadPage = $Page
-    }
-    $candidates = @($page.Links | ForEach-Object {
-        $url = $null
-        if ([Uri]::TryCreate([string](Get-PropertyValue $_ 'href' ''), [UriKind]::Absolute, [ref]$url) -and
-            $url.Scheme -eq 'https' -and $url.Host -eq 'downloads.ndi.tv' -and
-            [Uri]::UnescapeDataString($url.AbsolutePath) -match '^/Tools/NDI[^/]*Tools\.exe$') {
-            $url.AbsoluteUri
-        }
-    } | Select-Object -Unique)
-    if ($candidates.Count -ne 1) {
-        throw 'The current Windows NDI Tools download could not be identified on ndi.video/tools/. Try again later.'
-    }
-    return $candidates[0]
+    $metadata = if ($Page) { ConvertFrom-NdiToolsHtml ([string]$Page.Content) } else { Get-NdiToolsMetadata }
+    $script:NdiDownloadPage = $metadata
+    return $metadata.Url
 }
 
 function Convert-ToNdiToolsVersion {
@@ -1745,22 +2462,12 @@ function Convert-ToNdiToolsVersion {
 
 function Get-CurrentNdiToolsVersion {
     param([string]$Uri)
-    try {
-        $page = if ($script:NdiDownloadPage) { $script:NdiDownloadPage } else { Invoke-WebRequest -UseBasicParsing -Uri 'https://ndi.video/tools/' -TimeoutSec 20 -Headers @{'Cache-Control'='no-cache'} }
-        $script:NdiDownloadPage = $null
-        # The advertised version must belong to the package this operation uses.
-        if ((Get-CurrentNdiToolsUrl -Page $page) -ne $Uri) { return $null }
-        $content = [string](Get-PropertyValue $page 'Content' '')
-        $content = [regex]::Replace($content, '(?is)<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>', '')
-        $versions = @([regex]::Matches($content, '(?i)>\s*Version\s+(\d+\.\d+\.\d+(?:\.\d+)?)\s*<') | ForEach-Object {
-            $version = Convert-ToNdiToolsVersion $_.Groups[1].Value
-            if ($version) { $version }
-        } | Select-Object -Unique)
-        if ($versions.Count -eq 1) { return $versions[0] }
-    } catch {
-        Write-InstallerLog "NDI version metadata is unavailable; checking the signed installer instead: $($_.Exception.Message)"
-    }
-    return $null
+    $metadata = if ($script:NdiDownloadPage) { $script:NdiDownloadPage } else { Get-NdiToolsMetadata }
+    $script:NdiDownloadPage = $null
+    # Missing/ambiguous labels still fall back to the signed installer, but a
+    # timed-out mandatory website lookup must fail before any package mutation.
+    if ($metadata.Url -ne $Uri) { return $null }
+    return Convert-ToNdiToolsVersion ([string]$metadata.Version)
 }
 
 function Initialize-QuietInstaller {
@@ -1793,13 +2500,15 @@ function Install-NdiTools {
     $preparedCheck = if (-not $PrepareOnly) { $script:PreparedNdiCheck } else { $null }
     $script:PreparedNdiCheck = $null
     $registration = Get-NdiRegistration
+    $forceRepair=[bool](Get-Variable ForceComponentRepair -ValueOnly -ErrorAction SilentlyContinue)
+    if ($ClientOnly -and $registration -and -not $forceRepair) { $UpdateOnly=$true }
     if ($EnsureLatest -and $registration) { $UpdateOnly = $true }
     if ($UpdateOnly -and -not $registration) {
         throw 'NDI Tools is missing. Choose Repair / Reconfigure to install it.'
     }
-    $componentsMissing = -not $ClientOnly -and -not (Get-NdiDiscoveryExe)
+    $componentsMissing = if($ClientOnly){-not(Test-NdiClientToolsReady)}else{-not(Get-NdiDiscoveryExe)}
     $installedVersion = if ($registration) { Convert-ToNdiToolsVersion ([string](Get-PropertyValue $registration 'DisplayVersion' '')) } else { $null }
-    if ($registration -and -not $UpdateOnly -and -not $ClientOnly -and -not $componentsMissing) {
+    if ($registration -and -not $UpdateOnly -and -not $ClientOnly -and -not $componentsMissing -and -not $forceRepair) {
         Write-Detail "NDI Tools $installedVersion is already installed." Green
         return
     }
@@ -1809,7 +2518,7 @@ function Install-NdiTools {
         elseif ($preparedCheck) { $preparedCheck.Url }
         elseif (-not $PackageDirectory) { Get-CurrentNdiToolsUrl }
         else { $script:NdiToolsUrl }
-    if ($UpdateOnly -and -not $ClientOnly -and -not $componentsMissing -and $installedVersion -and
+    if ($UpdateOnly -and -not $forceRepair -and -not $componentsMissing -and $installedVersion -and
         -not $PackageDirectory -and -not $script:PreparedNdiInstaller) {
         $currentVersion = if ($preparedCheck -and $preparedCheck.Url -eq $downloadUrl) { $preparedCheck.Version } else { Get-CurrentNdiToolsVersion -Uri $downloadUrl }
         if ($currentVersion -and $installedVersion -ge $currentVersion) {
@@ -1823,14 +2532,16 @@ function Install-NdiTools {
     $downloadDir = Join-Path $env:TEMP 'KiloLinkSuite'
     $installer = Join-Path $downloadDir 'NDI-Tools.exe'
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-    $downloadSpan = if ($ClientOnly) { 35 } else { 8 }
+    $downloadBase = if ($ClientOnly) { 30 } else { $script:ProgressPercent }
+    $downloadSpan = if ($ClientOnly) { 30 } else { 8 }
     if ($script:PreparedNdiInstaller) { $installer = $script:PreparedNdiInstaller }
     else {
-        Download-FileWithProgress -Uri $downloadUrl -Destination $installer -BasePercent $script:ProgressPercent -PercentSpan $downloadSpan -Status 'Downloading NDI Tools'
+        Download-FileWithProgress -Uri $downloadUrl -Destination $installer -BasePercent $downloadBase -PercentSpan $downloadSpan -Status 'Downloading NDI Tools'
         $script:PreparedNdiSource = $downloadUrl
     }
 
-    Set-SuiteProgress -Percent ([Math]::Min(90, $script:ProgressPercent + 1)) -Status 'Verifying the NDI Tools signature'
+    $signaturePercent = if ($ClientOnly) { if ($PrepareOnly) { 62 } else { 67 } } else { [Math]::Min(90, $script:ProgressPercent + 1) }
+    Set-SuiteProgress -Percent $signaturePercent -Status 'Verifying the NDI Tools signature'
     $signature = Get-InstallerSignatureWithProgress -Path $installer
     if ([string]$signature.Status -ne 'Valid') {
         throw "NDI installer signature validation failed: $($signature.Status)"
@@ -1842,8 +2553,8 @@ function Install-NdiTools {
     Save-ResolvedPackage 'ndiTools' ([string]$packageVersion) $downloadUrl $installer
     if ($componentsMissing -and $installedVersion -and $packageVersion -and $installedVersion -gt $packageVersion) { throw 'A newer NDI Tools installation is incomplete. Repair it with its matching vendor installer.' }
     $install = $componentsMissing -or -not $registration -or -not $installedVersion -or -not $packageVersion -or $packageVersion -gt $installedVersion
-    # Re-running client setup repairs the current package without requiring any server components.
-    if ($ClientOnly -and $packageVersion -eq $installedVersion) { $install = $true }
+    if ($forceRepair -and $packageVersion -eq $installedVersion) { $install = $true }
+    if ($forceRepair -and $installedVersion -and $packageVersion -and $installedVersion -gt $packageVersion) { throw 'Repair requires the matching installed NDI version; a newer installed version will not be downgraded.' }
     if ($install) { Assert-NdiToolsFilesAvailable }
     if ($PrepareOnly) { $script:PreparedNdiInstaller = $installer; return }
     $script:PreparedNdiInstaller = $null
@@ -1853,15 +2564,22 @@ function Install-NdiTools {
         return
     }
 
-    Set-SuiteProgress -Percent ([Math]::Min(92, $script:ProgressPercent + 2)) -Status 'Installing NDI Tools'
+    Set-SuiteProgress -Percent $(if ($ClientOnly) { 70 } else { [Math]::Min(92, $script:ProgressPercent + 2) }) -Status 'Installing NDI Tools'
     $vendorLogDirectory = Join-Path $script:StateRoot 'Logs'
     New-Item -ItemType Directory -Path $vendorLogDirectory -Force | Out-Null
     $vendorLog = Join-Path $vendorLogDirectory ('ndi-tools-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N') + '.log')
     $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NORESTARTAPPLICATIONS', '/NOCLOSEAPPLICATIONS', '/RESTARTEXITCODE=3010', '/SP-', ('/LOG="' + $vendorLog + '"'))
     Write-InstallerLog "Starting NDI Tools setup. Vendor log: $vendorLog"
     $process = Start-QuietInstaller -FilePath $installer -ArgumentList $arguments
+    Add-LifecycleEffect 'NDI Tools vendor installation started; it may have changed shared files.'
+    $vendorDeadline=[datetime]::UtcNow.AddMinutes(30)
     try {
         while (-not $process.HasExited) {
+            if ([datetime]::UtcNow -gt $vendorDeadline) {
+                $script:LifecycleRecoveryRequired=$true
+                $script:LifecycleNextAction='Inspect the NDI vendor log and installed version before repairing shared NDI Tools.'
+                throw "NDI Tools unattended installation exceeded 30 minutes. Vendor log: $vendorLog"
+            }
             Update-SuiteProgressPulse
             Start-Sleep -Milliseconds 300
             $process.Refresh()
@@ -1871,12 +2589,16 @@ function Install-NdiTools {
         if ($exitCode -notin @(0, 3010)) { throw "NDI Tools installer failed with exit code $exitCode. Vendor log: $vendorLog" }
     } finally { $process.Dispose() }
     Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
-    if (-not (Get-NdiRegistration)) {
+    $observedRegistration=Get-NdiRegistration
+    if (-not $observedRegistration) {
         throw 'NDI Tools finished installing but was not detected in Programs and Features.'
     }
+    $observedVersion=Convert-ToNdiToolsVersion ([string](Get-PropertyValue $observedRegistration 'DisplayVersion' ''))
+    if ($packageVersion -and $observedVersion -ne $packageVersion) { throw 'NDI Tools finished but its registered version does not match the verified installer.' }
     if (-not $ClientOnly -and -not (Get-NdiDiscoveryExe)) {
         throw 'NDI Tools finished installing but its Discovery Service executable is still missing.'
     }
+    if($ClientOnly -and -not(Test-NdiClientToolsReady)){throw 'NDI Tools finished but required Client applications are still missing.'}
     $script:NdiRestartRequired = $exitCode -eq 3010
     Write-Detail 'NDI Tools installed or updated.' Green
 }
@@ -1916,7 +2638,7 @@ function Get-PcAgentPublicRelease {
 
 function Get-PcAgentRelease {
     try {
-        if ($PackageDirectory) { $release = Get-Content -LiteralPath (Join-Path $PackageDirectory 'pc-agent-release.json') -Raw | ConvertFrom-Json }
+        if ($PackageDirectory) { $release = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $PackageDirectory 'pc-agent-release.json') -Raw | ConvertFrom-Json }
         else { $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/JohnDevAc/Kiloview-PC-Onboarding/releases/latest' -TimeoutSec 15 -Headers @{
             'User-Agent' = 'Kiloview-Environment-Setup'; Accept = 'application/vnd.github+json'
         } }
@@ -2019,7 +2741,7 @@ function Test-PcAgentConfigured {
     $statePath = Join-Path $local 'NDI Configurator\PC Agent\agent-state.json'
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return $false }
     try {
-        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $state = Get-Content -Encoding UTF8 -LiteralPath $statePath -Raw | ConvertFrom-Json
         return Test-PcAgentState $state
     } catch { return $false }
 }
@@ -2065,7 +2787,7 @@ function Invoke-PcAgentSetup {
 function Install-PcAgent {
     param([switch]$PrepareOnly)
     if (-not [Environment]::Is64BitOperatingSystem) { throw 'NDI Configurator PC Agent requires 64-bit Windows.' }
-    Set-SuiteProgress -Percent 50 -Status 'Checking the PC Agent production release'
+    Set-SuiteProgress -Percent $(if ($PrepareOnly) { 2 } else { 85 }) -Status 'Checking the PC Agent production release'
     $release = if ($script:PreparedPcAgentRelease) { $script:PreparedPcAgentRelease } else { Get-PcAgentRelease }
     $installRoot = Join-Path $env:ProgramFiles 'NDI Configurator\PC Agent'
     $installedSetup = Join-Path $installRoot 'NDI Configurator PC Agent Setup.exe'
@@ -2074,6 +2796,18 @@ function Install-PcAgent {
     $agentVersion = Get-PcAgentBinaryVersion $installedAgent 'NDI Configurator PC Agent'
     if ($setupVersion -and $agentVersion -and (Compare-PcAgentVersion $setupVersion $agentVersion) -eq 0 -and (Compare-PcAgentVersion $agentVersion $release.Version) -ge 0) {
         if ($PrepareOnly) { $script:PreparedPcAgentRelease = $release; return $true }
+        $entry=Get-PcAgentLifecycleEntry $installRoot 'inspect'
+        if($entry){
+            $inspection=Invoke-PcAgentLifecycle $entry 'inspect'
+            $component=@($inspection.components|Where-Object productId -eq 'pc-agent')
+            if($inspection.outcome -ne 'succeeded' -or $component.Count -ne 1){throw 'PC Agent inspection did not return verified component evidence.'}
+            if(-not(Get-Variable ForceComponentRepair -ValueOnly -ErrorAction SilentlyContinue) -and $component[0].installed -eq $true -and
+                ($component[0].healthy -eq $true -or $component[0].configured -eq $false)){
+                Write-Detail "PC Agent $agentVersion files are current. Its configuration and onboarding are managed separately." Green
+                return $true
+            }
+            return Invoke-OwnedPcAgentSetup $installedSetup
+        }
         if (Test-PcAgentConfigured) {
             Write-Detail "PC Agent $agentVersion is already installed and configured." Green
             return $true
@@ -2090,7 +2824,9 @@ function Install-PcAgent {
     New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
     try {
         $archive = Join-Path $packageRoot 'PC-Agent.zip'
-        if (-not $script:PreparedPcAgentRoot) { Download-FileWithProgress -Uri $release.Url -Destination $archive -BasePercent 52 -PercentSpan 30 -Status 'Downloading NDI Configurator PC Agent' }
+        if (-not $script:PreparedPcAgentRoot) {
+            Download-FileWithProgress -Uri $release.Url -Destination $archive -BasePercent $(if ($PrepareOnly) { 4 } else { 86 }) -PercentSpan $(if ($PrepareOnly) { 21 } else { 6 }) -Status 'Downloading NDI Configurator PC Agent'
+        }
         if ((Get-Item -LiteralPath $archive).Length -ne $release.Size -or
             (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $release.Hash) {
             throw 'The PC Agent package size or SHA-256 did not match its production release.'
@@ -2112,7 +2848,7 @@ function Install-PcAgent {
             $prepared = $true
             return $true
         }
-        $completed = Invoke-PcAgentSetup $setup
+        $completed = Invoke-OwnedPcAgentSetup $setup
         if (-not $completed) { return $false }
         $setupVersion = Get-PcAgentBinaryVersion $installedSetup 'NDI Configurator PC Agent'
         $agentVersion = Get-PcAgentBinaryVersion $installedAgent 'NDI Configurator PC Agent'
@@ -2125,7 +2861,7 @@ function Install-PcAgent {
         if (-not $resolvedPackage.StartsWith($cacheRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
             throw 'PC Agent cleanup path is outside the download cache.'
         }
-        if (-not $prepared) {
+        if (-not $prepared -and -not $script:LifecycleRecoveryRequired) {
             Remove-Item -LiteralPath $resolvedPackage -Recurse -Force -ErrorAction SilentlyContinue
             $script:PreparedPcAgentRoot = $null
             $script:PreparedPcAgentRelease = $null
@@ -2172,6 +2908,103 @@ function Prepare-ClientPackages {
     }
 }
 
+function Get-PcAgentLifecycleEntry([string]$Directory,[string]$Action) {
+    $descriptor=Join-Path $Directory 'toolbox-lifecycle.json'
+    if(-not(Test-Path -LiteralPath $descriptor -PathType Leaf)){return $null}
+    Initialize-LifecycleProtocol
+    [KiloLink.Lifecycle.SafePath]::Check($descriptor)
+    $data=Get-Content -Encoding UTF8 -LiteralPath $descriptor -Raw|ConvertFrom-Json
+    if($data.schemaVersion -ne 1 -or $data.productId -cne 'pc-agent' -or $Action -notin @($data.supportedActions)) {
+        throw 'PC Agent lifecycle metadata does not support this request. Use its verified complete package.'
+    }
+    $relative=[string]$data.entryPoint
+    if([IO.Path]::IsPathRooted($relative) -or $relative.Contains(':')){throw 'PC Agent lifecycle entry must be relative to its owned directory.'}
+    $path=[IO.Path]::GetFullPath((Join-Path $Directory $relative))
+    if(-not $path.StartsWith([IO.Path]::GetFullPath($Directory).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetExtension($path) -ine '.exe' -or -not(Test-Path -LiteralPath $path -PathType Leaf)) {throw 'PC Agent lifecycle entry escaped its verified package or is missing.'}
+    [KiloLink.Lifecycle.SafePath]::Check($path)
+    if(-not(Get-PcAgentBinaryVersion $path 'NDI Configurator PC Agent')){throw 'PC Agent lifecycle executable identity is invalid.'}
+    return $path
+}
+
+function New-OwnedOperationDirectory {
+    $root=Join-Path $env:LOCALAPPDATA 'Kiloview Environment Setup\Operations'
+    $path=Join-Path $root ([guid]::NewGuid().ToString('D'))
+    Initialize-LifecycleProtocol
+    [KiloLink.Lifecycle.SafePath]::CheckParent($path)
+    New-Item -ItemType Directory -Path $path -Force|Out-Null
+    [KiloLink.Lifecycle.SafePath]::Check($path)
+    $acl=New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true,$false)
+    $owner=[Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl.SetOwner($owner)
+    foreach($sid in @($owner.Value,'S-1-5-18','S-1-5-32-544')){
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
+    }
+    Set-Acl -LiteralPath $path -AclObject $acl
+    return $path
+}
+
+function Invoke-PcAgentLifecycle([string]$Entry,[string]$Action) {
+    $directory=New-OwnedOperationDirectory
+    $id=[IO.Path]::GetFileName($directory)
+    $requestPath=Join-Path $directory 'request.json'
+    $resultPath=Join-Path $directory 'result.json'
+    Write-StateJson $requestPath @{schemaVersion=1;operationId=$id;productId='pc-agent';action=$Action;resultPath=$resultPath;preserveData=$true}
+    $request=[KiloLink.Lifecycle.Request]::LoadForProduct($requestPath,'pc-agent')
+    $process=Start-Process -FilePath $Entry -ArgumentList ('--lifecycle-request "'+$requestPath+'"') -WorkingDirectory (Split-Path -Parent $Entry) -WindowStyle $(if($Action -eq 'inspect'){'Hidden'}else{'Normal'}) -PassThru
+    $started=[datetime]::UtcNow
+    try {
+        while(-not $process.HasExited) {
+            if($Action -eq 'inspect' -and ([datetime]::UtcNow-$started).TotalSeconds -gt 90){
+                $process.Kill();throw 'PC Agent read-only inspection exceeded its deadline.'
+            }
+            if($Action -ne 'inspect') {
+                if(([datetime]::UtcNow-$script:LifecycleLastHeartbeat).TotalSeconds -ge 5){Write-LifecycleResult 'running' 'Waiting for PC Agent to complete its own operation. Licence and onboarding choices remain in PC Agent.' -Stage 'pc-agent'}
+                if(Test-Path -LiteralPath $resultPath) {
+                    $progress=$request.ReadResult()
+                    $waiting=[KiloLink.Lifecycle.Request]::Text($progress,'stage') -match 'waiting|review|licen|elevation|user'
+                    $stamp=[datetime]::Parse([KiloLink.Lifecycle.Request]::Text($progress,'updatedUtc')).ToUniversalTime()
+                    if(-not $waiting -and ([datetime]::UtcNow-$stamp).TotalMinutes -gt 10){
+                        $script:LifecycleRecoveryRequired=$true
+                        Write-StateJson (Join-Path $script:StateRoot 'pending-process.json') @{processId=$process.Id;startedUtc=$process.StartTime.ToUniversalTime().ToString('o');filePath=$Entry;childResult=$resultPath}
+                        throw "PC Agent stopped reporting progress. Its process was retained; inspect $resultPath before retrying."
+                    }
+                }
+                elseif(([datetime]::UtcNow-$started).TotalMinutes -gt 10){
+                    $script:LifecycleRecoveryRequired=$true
+                    Write-StateJson (Join-Path $script:StateRoot 'pending-process.json') @{processId=$process.Id;startedUtc=$process.StartTime.ToUniversalTime().ToString('o');filePath=$Entry;childResult=$resultPath}
+                    throw "PC Agent has not reported a result. Its process was retained; inspect $directory before retrying."
+                }
+            }
+            Start-Sleep -Milliseconds 500
+            $process.Refresh()
+        }
+        $result=$request.ReadResult()
+        if(-not $result -or [KiloLink.Lifecycle.Request]::Text($result,'outcome') -eq 'running'){throw "PC Agent exited without a terminal correlated result. Inspect $directory"}
+        $expected=[KiloLink.Lifecycle.Request]::ExitCode([KiloLink.Lifecycle.Request]::Text($result,'outcome'),[KiloLink.Lifecycle.Request]::Text($result,'errorCode'))
+        if($process.ExitCode -eq 0 -and $expected -ne 0){throw 'PC Agent result and process exit code disagree.'}
+        if($process.ExitCode -ne 0 -and $expected -eq 0){throw 'PC Agent reported success but its process failed.'}
+        return ($result|ConvertTo-Json -Depth 15|ConvertFrom-Json)
+    } finally {$process.Dispose()}
+}
+
+function Invoke-OwnedPcAgentSetup([string]$Path) {
+    $entry=Get-PcAgentLifecycleEntry (Split-Path -Parent $Path) 'install'
+    if(-not $entry){return Invoke-PcAgentSetup $Path}
+    $action=if(Get-Variable ForceComponentRepair -ValueOnly -ErrorAction SilentlyContinue){'repair'}else{'install'}
+    $entry=Get-PcAgentLifecycleEntry (Split-Path -Parent $Path) $action
+    $result=Invoke-PcAgentLifecycle $entry $action
+    foreach($effect in @(Get-PropertyValue $result 'partialEffects' @())){Add-LifecycleEffect ('PC Agent: '+$effect)}
+    if($result.outcome -eq 'cancelled'){return $false}
+    if($result.outcome -eq 'restart-required'){$script:PcAgentRestartRequired=$true;return $true}
+    if($result.outcome -notin @('succeeded','no-change')){throw ('PC Agent needs attention: '+$result.message+' '+(Get-PropertyValue $result 'nextAction' ''))}
+    $component=@($result.components|Where-Object productId -eq 'pc-agent')
+    if($component.Count -ne 1 -or $component[0].installed -ne $true){throw 'PC Agent did not verify its installed files.'}
+    if($result.outcome -eq 'succeeded'){Add-LifecycleEffect 'PC Agent installation completed and its files were verified.'}
+    return $true
+}
+
 function Get-InteractiveUserSid {
     $current = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -2191,11 +3024,11 @@ function Get-ServerOwnerSid {
     $path = Join-Path $script:StateRoot 'installation-components.json'
     $serverSelected = $false
     if (Test-Path -LiteralPath $path) {
-        $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $receipt = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json
         if ($receipt.schemaVersion -ne 1) { throw 'The installation ownership receipt has an unsupported schema.' }
         $serverSelected = @($receipt.roles) -contains 'server'
         $owner = [string](Get-PropertyValue $receipt 'serverOwnerSid' '')
-        if ($serverSelected -and $owner) {
+        if (($serverSelected -or (Get-PropertyValue $receipt 'retainedServer' $false)) -and $owner) {
             if ($owner -notmatch '^S-1-\d+(?:-\d+)+$') { throw 'The recorded server owner SID is invalid.' }
             return $owner
         }
@@ -2274,11 +3107,12 @@ timeout 60 apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=12 -o Acquire
 }
 
 function Save-ComponentReceipt([string]$Role, [switch]$Remove) {
+    $previous=$null
     $path = Join-Path $script:StateRoot 'installation-components.json'
     $roles = @()
     $owner = $null
     if (Test-Path -LiteralPath $path) {
-        $previous = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $previous = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json
         if ($previous.schemaVersion -ne 1) { throw 'Unsupported component receipt. Existing deployment ownership was preserved.' }
         if (@($previous.roles | Where-Object { $_ -notin @('client', 'server') }).Count -gt 0) {
             throw 'Unknown component role. Existing deployment ownership was preserved.'
@@ -2287,12 +3121,18 @@ function Save-ComponentReceipt([string]$Role, [switch]$Remove) {
         $owner = Get-PropertyValue $previous 'serverOwnerSid' $null
     }
     if ($Role -eq 'server' -and -not $Remove) { Assert-ServerOwner; $owner = Get-CurrentUserSid }
-    if ($Role -eq 'server' -and $Remove) { $owner = $null }
+    $retained=Test-Path -LiteralPath (Join-Path $script:StateRoot 'retained-server.json')
+    if($Role -eq 'server' -and -not $Remove -and $Action -ne 'Uninstall' -and $retained){
+        Remove-OwnedFile (Join-Path $script:StateRoot 'retained-server.json');$retained=$false
+    }
+    if ($Role -eq 'server' -and $Remove -and -not $retained) { $owner = $null }
     New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
     $selected = if ($Remove) { @($roles | Where-Object { $_ -ne $Role }) } else { @(($roles + $Role) | Select-Object -Unique) }
-    $receipt = @{schemaVersion=1; roles=@($selected); serverOwnerSid=$owner; updatedUtc=[datetime]::UtcNow.ToString('o')}
-    $receipt | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath ($path + '.tmp') -Encoding UTF8
-    Move-Item -LiteralPath ($path + '.tmp') -Destination $path -Force
+    if(@($roles).Count -eq @($selected).Count -and (@($roles|Sort-Object)-join ',') -eq (@($selected|Sort-Object)-join ',') -and $previous -and
+        (Get-PropertyValue $previous 'serverOwnerSid' $null) -eq $owner -and [bool](Get-PropertyValue $previous 'retainedServer' $false) -eq [bool]$retained){return}
+    $receipt = @{schemaVersion=1; roles=@($selected); serverOwnerSid=$owner; retainedServer=$retained; updatedUtc=[datetime]::UtcNow.ToString('o')}
+    Write-StateJson $path $receipt
+    Add-LifecycleEffect "Environment $Role role record updated."
 }
 
 function Assert-SuitePorts($Config) {
@@ -2309,11 +3149,16 @@ function Install-ClientTools {
     try {
         Invoke-DeploymentStep 'Verify and stage client packages' { Prepare-ClientPackages }
         Save-ComponentReceipt 'client'
+        Set-SuiteProgress -Percent 65 -Status 'Installing or validating NDI Tools'
         Invoke-DeploymentStep 'NDI Tools' { Install-NdiTools -ClientOnly }
         $ndiInstalled = $true
         $ndiNeedsRestart = $script:NdiRestartRequired
-        $agentCompleted = Invoke-DeploymentStep 'PC Agent' { Install-PcAgent }
+        Set-SuiteProgress -Percent 85 -Status 'Installing or validating PC Agent'
+        $agentCompleted = Invoke-DeploymentStep 'PC Agent' { Install-PcAgent } -IncompleteOnFalse
+        $ndiNeedsRestart=$ndiNeedsRestart -or $script:PcAgentRestartRequired
         if (-not $agentCompleted) {
+            $script:LifecycleErrorCode='pc-agent-incomplete'
+            $script:LifecycleNextAction='Run Client setup again to finish PC Agent and review its licence. Review the selected operation before applying; explicit repair may reinstall NDI Tools.'
             if ($ndiNeedsRestart) {
                 Set-OperationOutcome 'RestartRequired' 'NDI Tools needs a Windows restart. PC Agent setup was not completed; run Client setup again afterwards.'
             } else {
@@ -2321,13 +3166,15 @@ function Install-ClientTools {
             }
             return
         }
-        Set-SuiteProgress -Percent 100 -Status 'Client installation finished'
+        Set-SuiteProgress -Percent 98 -Status 'Verifying client installation'
         if ($ndiNeedsRestart) {
             Set-OperationOutcome 'RestartRequired' 'NDI Tools and PC Agent are installed. Restart Windows to finish NDI Tools installation.'
         } else {
-            Set-OperationOutcome 'Completed' 'NDI Tools and NDI Configurator PC Agent are installed.'
+            if($script:Lifecycle -and $script:LifecycleEffects.Count -eq 0){Set-OperationOutcome 'NoChange' 'NDI Tools and PC Agent are already current. Onboarding remains a separate Agent operation.'}
+            else {Set-OperationOutcome 'Completed' 'NDI Tools and NDI Configurator PC Agent are installed. Onboarding is managed separately by PC Agent.'}
         }
     } catch {
+        if ($script:LifecycleErrorCode -eq 'lifecycle-result-write-failed') { throw }
         if (-not $ndiInstalled) { throw }
         $failure = $_.Exception.Message
         $evidence = 'PC Agent installed state could not be verified.'
@@ -2364,15 +3211,15 @@ function Test-ServerOwnershipEvidence {
     if (Get-SavedConfig) { return $true }
     $discoveryPath = Join-Path $script:StateRoot 'discovery-ownership.json'
     if (Test-Path -LiteralPath $discoveryPath) {
-        $discovery = Get-Content -LiteralPath $discoveryPath -Raw | ConvertFrom-Json
+        $discovery = Get-Content -Encoding UTF8 -LiteralPath $discoveryPath -Raw | ConvertFrom-Json
         if ($discovery.schemaVersion -ne 1) { throw 'Unsupported Discovery ownership receipt.' }
         if (-not (Get-PropertyValue $discovery 'restoreCompleted' $false)) { return $true }
     }
     $path = Join-Path $script:StateRoot 'installation-components.json'
     if (Test-Path -LiteralPath $path) {
-        $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $receipt = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json
         if ($receipt.schemaVersion -ne 1) { throw 'Unsupported component receipt. Server ownership cannot be verified.' }
-        if ('server' -in @($receipt.roles)) { return $true }
+        if ('server' -in @($receipt.roles) -or (Get-PropertyValue $receipt 'retainedServer' $false)) { return $true }
     }
     return [bool](Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue)
 }
@@ -2380,7 +3227,7 @@ function Test-ServerOwnershipEvidence {
 function Save-DiscoveryOwnership {
     $path = Join-Path $script:StateRoot 'discovery-ownership.json'
     if (Test-Path -LiteralPath $path) {
-        $previous = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $previous = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json
         if ($previous.schemaVersion -ne 1) { throw 'Unsupported Discovery ownership receipt.' }
         if (-not (Get-PropertyValue $previous 'restoreCompleted' $false)) { return }
         Remove-Item -LiteralPath $path -Force
@@ -2405,7 +3252,7 @@ function Save-DiscoveryOwnership {
 
 function Restore-DiscoveryOwnership {
     $path = Join-Path $script:StateRoot 'discovery-ownership.json'
-    $receipt = if (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } else { $null }
+    $receipt = if (Test-Path -LiteralPath $path) { Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json } else { $null }
     if (-not $receipt -and -not (Test-ServerOwnershipEvidence)) { return }
     if ($receipt -and $receipt.schemaVersion -ne 1) { throw 'Unsupported Discovery ownership receipt. No Discovery settings were changed.' }
     if ($receipt -and (Get-PropertyValue $receipt 'restoreCompleted' $false)) { return }
@@ -2474,7 +3321,7 @@ function Configure-NdiServer {
 
     if ($service) {
         $ownershipPath = Join-Path $script:StateRoot 'discovery-ownership.json'
-        $ownership = Get-Content -LiteralPath $ownershipPath -Raw | ConvertFrom-Json
+        $ownership = Get-Content -Encoding UTF8 -LiteralPath $ownershipPath -Raw | ConvertFrom-Json
         $ownership.managedServiceName = $service.Name
         $ownership | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($ownershipPath + '.tmp') -Encoding UTF8
         Move-Item -LiteralPath ($ownershipPath + '.tmp') -Destination $ownershipPath -Force
@@ -2497,6 +3344,158 @@ function Configure-NdiServer {
     Register-ScheduledTask -TaskName $script:NdiTaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
     Start-ScheduledTask -TaskName $script:NdiTaskName
     Write-Detail 'NDI Discovery Server startup task installed.' Green
+}
+
+# Windows task termination does not terminate its Linux descendants. Retire the
+# known loops cooperatively before changing services or starting another owner.
+function Get-KiloWatchdogTransitionScript {
+    param([ValidateSet('Quiesce','Activate','Retain')][string]$Mode='Quiesce', [switch]$Reactivate)
+    $commands=New-Object 'Collections.Generic.List[string]'
+    foreach($body in @((Get-LegacyKiloWatchdogCommand),(Get-KiloWatchdogCommand))){
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
+        $commands.Add("printf '%s' '$encoded' | base64 -d | bash")
+    }
+    # The last installed helper can identify a previous supported generation.
+    # It is never executed here; its exact command is only observed in /proc.
+    if(Test-Path -LiteralPath $script:StartupScriptPath -PathType Leaf){
+        $helper=[IO.File]::ReadAllText($script:StartupScriptPath)
+        $match=[regex]::Match($helper,'(?m)^\$linux = ''([A-Za-z0-9+/=]+)''\r?$')
+        if($match.Success){$commands.Add("printf '%s' '$($match.Groups[1].Value)' | base64 -d | bash")}
+    }
+    $known=(@($commands|Select-Object -Unique|ForEach-Object {Convert-ToBashLiteral $_}) -join ' ')
+    $scriptText=@'
+set -euo pipefail
+root=/var/lib/kilolink
+stop="$root/watchdog-stop"
+recovery="$root/recovery-required"
+normal=kiloview-watchdog-stop-v1
+inactive=kiloview-role-inactive-v1
+mode=__MODE__
+reactivate=__REACTIVATE__
+known=(__KNOWN__)
+mkdir -p "$root"
+exec 9>"$root/maintenance.lock"
+flock -w 45 -x 9 || { echo 'Timed out acquiring the KiloLink maintenance lock.' >&2; exit 40; }
+owned_stop() {
+    test -f "$stop" && test ! -L "$stop" &&
+    { test "$(cat "$stop")" = "$normal" || test "$(cat "$stop")" = "$inactive"; }
+}
+owned_pair() {
+    owned_stop && test -f "$recovery" && test ! -L "$recovery" && test "$stop" -ef "$recovery"
+}
+if [ -e "$recovery" ] || [ -L "$recovery" ]; then
+    owned_pair || { echo 'Existing recovery marker is not an owned watchdog inhibit; preserve it and resolve recovery first.' >&2; exit 30; }
+else
+    if [ -e "$stop" ] || [ -L "$stop" ]; then
+        owned_stop || { echo 'Existing watchdog inhibit is ambiguous; preserve it for recovery.' >&2; exit 30; }
+    else
+        (set -o noclobber; printf '%s\n' "$normal" > "$stop")
+    fi
+    # Exclusive hard link makes the compatibility marker identifiable without
+    # overwriting any pre-existing backup/recovery record, even after a crash.
+    ln -- "$stop" "$recovery"
+fi
+if [ "$mode" = Activate ] && [ "$(cat "$stop")" = "$inactive" ] && [ "$reactivate" != true ]; then
+    echo 'Server role is inactive. Explicitly review Server setup or repair to reactivate it.' >&2; exit 31
+fi
+if [ "$mode" = Retain ]; then printf '%s\n' "$inactive" > "$stop"; fi
+flock -u 9
+
+find_watchdogs() {
+    local path command holder; local -a args
+    for path in /proc/[0-9]*/cmdline; do
+        args=()
+        { mapfile -d '' -t args < "$path"; } 2>/dev/null || continue
+        [ "${#args[@]}" -eq 3 ] || continue
+        case "${args[0]}" in bash|/bin/bash|/usr/bin/bash) ;; *) continue ;; esac
+        [ "${args[1]}" = -lc ] || continue
+        for command in "${known[@]}"; do
+            if [ "${args[2]}" = "$command" ]; then
+                printf '%s\n' "${path%/cmdline}"
+                break
+            fi
+        done
+    done
+    # Legacy inner loops keep fd9 open during their sleep. Observe holders too:
+    # an outer wrapper can disappear without proving its descendants exited.
+    # This only waits on the exact maintenance file; it never signals a process.
+    for path in /proc/[0-9]*/fd/9; do
+        holder=${path#/proc/}; holder=${holder%%/*}
+        [ "$holder" != "$$" ] && [ "$holder" != "$BASHPID" ] || continue
+        if [ "$(readlink "$path" 2>/dev/null || true)" = "$root/maintenance.lock" ]; then
+            printf '/proc/%s (maintenance fd9)\n' "$holder"
+        fi
+    done
+}
+deadline=$((SECONDS+45))
+while true; do
+    remaining=$(find_watchdogs)
+    [ -n "$remaining" ] || break
+    if [ "$SECONDS" -ge "$deadline" ]; then
+        echo "Owned watchdogs have not exited: $remaining. Inhibition retained." >&2; exit 41
+    fi
+    sleep .2
+done
+flock -w 45 -x 9 || { echo 'Could not reacquire maintenance ownership; inhibition retained.' >&2; exit 40; }
+owned_pair || { echo 'Watchdog inhibit ownership changed; preserve all recovery records.' >&2; exit 30; }
+# Future generations also hold this lock for their entire lifetime.
+exec 8>"$root/watchdog.lock"
+flock -w 2 -x 8 || { echo 'A watchdog still owns its lifetime lock; inhibition retained.' >&2; exit 41; }
+if [ "$mode" = Activate ]; then
+    rm -- "$recovery"
+    rm -- "$stop"
+fi
+echo KILOLINK_WATCHDOGS_QUIESCED
+'@
+    return $scriptText.Replace('__MODE__',$Mode).Replace('__REACTIVATE__',([string][bool]$Reactivate).ToLowerInvariant()).Replace('__KNOWN__',$known)
+}
+
+function Set-KiloWatchdogState {
+    param([string]$Distro,[ValidateSet('Quiesce','Activate','Retain')][string]$Mode='Quiesce',[switch]$Reactivate)
+    if($Reactivate -and $Action -notin @('Setup','Install','Repair','Update','Resume')){throw 'Only reviewed Server setup or repair can reactivate a retained role.'}
+    $pending=Join-Path $script:StateRoot 'pending-watchdog.json'
+    try {
+        $ownership=@{schemaVersion=1;distro=$Distro;action=$Action;mode=$Mode;startedUtc=[datetime]::UtcNow.ToString('o')}
+        if($script:ActiveJournal){$script:ActiveJournal['pendingWatchdog']=$ownership}
+        Write-StateJson $pending $ownership
+        $task=Get-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction SilentlyContinue
+        if($task){Disable-ScheduledTask -TaskName $script:StartupTaskName -ErrorAction Stop|Out-Null}
+        Stop-ManagedTask $script:StartupTaskName
+        if($Distro){
+            $output=@(Invoke-WslScript $Distro (Get-KiloWatchdogTransitionScript -Mode $Mode -Reactivate:$Reactivate) -Capture)
+            if($output -notcontains 'KILOLINK_WATCHDOGS_QUIESCED'){throw 'Linux watchdog quiescence was not confirmed.'}
+        }
+        Remove-OwnedFile $pending
+        if($script:ActiveJournal){$script:ActiveJournal.Remove('pendingWatchdog')}
+    } catch {
+        $script:LifecycleRecoveryRequired=$true
+        if(-not $script:LifecycleErrorCode){$script:LifecycleErrorCode='watchdog-quiescence-failed'}
+        $script:LifecycleNextAction='Keep the watchdog inhibit and recovery records. Wait for any recorded native command to finish, then run Verify to confirm watchdog shutdown before retrying. Genuine backup recovery must be resolved first. Reactivating a retained Server requires explicit Server setup or repair.'
+        throw
+    }
+}
+
+function Get-PendingWatchdogRecovery {
+    $path=Join-Path $script:StateRoot 'pending-watchdog.json'
+    if(Test-Path -LiteralPath $path){return Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json}
+    if($script:ActiveJournal){return Get-PropertyValue $script:ActiveJournal 'pendingWatchdog' $null}
+    $journalPath=Join-Path $script:StateRoot 'last-operation.json'
+    if(Test-Path -LiteralPath $journalPath){
+        $journal=Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8|ConvertFrom-Json
+        return Get-PropertyValue $journal 'pendingWatchdog' $null
+    }
+    return $null
+}
+
+function Test-PendingWatchdogRecovery {
+    $pending=Get-PendingWatchdogRecovery
+    if(-not $pending){return $false}
+    $distro=[string](Get-PropertyValue $pending 'distro' '')
+    if($distro -and $distro -ne $script:ManagedDistroName){throw 'Unexpected watchdog recovery distribution. Preserve the recovery record.'}
+    Set-KiloWatchdogState -Distro $distro -Mode Quiesce
+    # Verify only establishes that an interrupted shutdown can be retried. It
+    # does not reactivate services or mark the interrupted removal successful.
+    return $true
 }
 
 function Install-FirewallRules {
@@ -2549,7 +3548,7 @@ function Stop-ManagedTask {
     throw "The scheduled task '$TaskName' did not stop. Its configuration has not been replaced."
 }
 
-function Get-KiloWatchdogCommand {
+function Get-LegacyKiloWatchdogCommand {
     $linux = @'
 set -euo pipefail
 while true; do
@@ -2569,10 +3568,24 @@ done
     return $linux.Replace('__CONTAINER__', $script:ContainerName).Replace("`r`n", "`n").Replace("`r", "`n")
 }
 
+function Get-KiloWatchdogCommand {
+    $prefix=@'
+set -euo pipefail
+mkdir -p /var/lib/kilolink
+exec 8>/var/lib/kilolink/watchdog.lock
+until flock -n -x 8; do
+    test ! -e /var/lib/kilolink/watchdog-stop || exit 0
+    sleep 1
+done
+'@
+    $body=(Get-LegacyKiloWatchdogCommand).Replace('    test ! -e /var/lib/kilolink/recovery-required',"    test ! -e /var/lib/kilolink/watchdog-stop || exit 0`n    test ! -e /var/lib/kilolink/recovery-required")
+    return ($prefix+"`n"+$body).Replace("`r`n","`n")
+}
+
 function Install-StartupTask {
     param($Config)
     Write-Step 'Installing the KiloLink startup and watchdog task'
-    Stop-ManagedTask $script:StartupTaskName
+    Set-KiloWatchdogState -Distro $Config.DistroName -Mode Activate
     New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
     $template = @'
 $ErrorActionPreference = 'Continue'
@@ -2757,16 +3770,16 @@ function Repair-Suite {
         Set-OperationOutcome 'Cancelled' 'Installation was cancelled before changes were applied.'
         return
     }
-    Assert-ServerDownloads $config
-    Start-DeploymentJournal $Action $config
-    Save-ComponentReceipt 'server'
-    Save-DiscoveryOwnership
-    Save-Config $config
-    Register-MaintenanceEntry
     $showProgress = $LauncherMode -or $Action -in @('Menu', 'Resume')
     $succeeded = $false
-    if ($showProgress) { Start-SuiteProgress -Activity 'Installing KiloLink Server Pro and NDI' -Status 'Preparing the saved configuration' }
+    if ($showProgress) { Start-SuiteProgress -Activity 'Installing KiloLink Server Pro and NDI' -Status 'Checking required server package sources' }
     try {
+        Assert-ServerDownloads $config
+        Start-DeploymentJournal $Action $config
+        Save-ComponentReceipt 'server'
+        Save-DiscoveryOwnership
+        Save-Config $config
+        Register-MaintenanceEntry
         Set-SuiteProgress -Percent 5 -Status 'Checking Windows and WSL prerequisites'
         if (-not (Invoke-DeploymentStep 'Windows prerequisites' { Ensure-WslFeatures })) { return }
         Set-SuiteProgress -Percent 15 -Status 'Configuring mirrored multi-adapter networking'
@@ -2774,6 +3787,7 @@ function Repair-Suite {
         Set-SuiteProgress -Percent 22 -Status 'Preparing the dedicated Ubuntu environment'
         $distro = Invoke-DeploymentStep 'Dedicated Ubuntu distribution' { Ensure-Ubuntu $config }
         if (-not $distro) { return }
+        Invoke-DeploymentStep 'Quiesce previous Server watchdogs' { Set-KiloWatchdogState -Distro $distro -Mode Activate -Reactivate }
         Set-SuiteProgress -Percent 30 -Status 'Preparing systemd, Docker Engine, and Avahi'
         Assert-LinuxDownloads $distro
         Invoke-DeploymentStep 'Docker and Avahi' { Ensure-Docker $distro }
@@ -2830,7 +3844,15 @@ function Wait-ResumeNetwork {
 function Resume-Suite {
     Assert-ServerOwner
     $continuation = Get-ResumeState
-    Remove-ResumeTask
+    if ($script:Lifecycle -and (Get-PropertyValue $continuation 'OperationId' '') -ne $script:Lifecycle.OperationId) { throw 'Restart continuation does not belong to this lifecycle operation.' }
+    if ((Get-PropertyValue $continuation 'Action' '') -eq 'InstallClient') { Install-ClientTools; if($script:OperationOutcome -in @('Completed','NoChange')){Clear-ResumeContinuation}; return }
+    $reviewedConfig=Get-PropertyValue $continuation 'ConfigurationPath' ''
+    if ($reviewedConfig -and -not (Get-SavedConfig)) {
+        $previousAction=$Action
+        try { $Action=Get-PropertyValue $continuation 'Action' 'Setup'; Repair-Suite -RequestedConfiguration (Get-RequestedSuiteConfig $reviewedConfig) -LicenseAccepted -BringCurrent:($Action -eq 'Setup') }
+        finally {$Action=$previousAction}
+        return
+    }
     if (-not (Get-SavedConfig)) {
         throw 'Setup cannot resume because its saved configuration is missing.'
     }
@@ -2997,17 +4019,21 @@ function Remove-LegacyPortProxies {
 
 function Uninstall-Suite {
     param([switch]$Confirmed)
+    $purge=[bool](Get-Variable PurgeData -ValueOnly -ErrorAction SilentlyContinue)
     Assert-ServerOwner
+    if(-not $purge -and -not(Get-SavedConfig) -and (Test-Path -LiteralPath (Join-Path $script:StateRoot 'retained-server.json'))){
+        Set-OperationOutcome 'NoChange' 'Server role is already inactive. Its data and dedicated Linux environment remain retained.';return
+    }
     if (-not (Test-ServerOwnershipEvidence)) {
         Set-OperationOutcome 'Completed' 'No Environment Server installation was found. Client components and shared NDI settings were retained.'
         return
     }
-    Set-OperationOutcome 'Running' 'Uninstalling the suite.'
+    Set-OperationOutcome 'Running' 'Removing Server role.'
     Start-DeploymentJournal 'Uninstall' (Get-SavedConfig)
     Write-Heading 'Uninstall KiloLink Suite'
-    Write-Host 'This removes KiloLink and its persisted data and managed Discovery Server settings,' -ForegroundColor Yellow
+    Write-Host $(if($purge){'This permanently removes KiloLink and its persisted data.'}else{'This stops managed services and keeps KiloLink data and its Linux environment.'}) -ForegroundColor Yellow
     Write-Host 'scheduled tasks, installer firewall rules, and browser shortcuts.' -ForegroundColor Yellow
-    Write-Host "The dedicated $($script:ManagedDistroName) distribution will be deleted." -ForegroundColor Yellow
+    Write-Host $(if($purge){"The dedicated $($script:ManagedDistroName) distribution will be deleted."}else{'The inactive distribution and its disk footprint are retained for recovery.'}) -ForegroundColor Yellow
     Write-Host 'NDI Tools, PC Agent, WSL, unrelated distributions, and the shared .wslconfig file will be retained.' -ForegroundColor Yellow
     if (-not $Confirmed -and (Read-InstallerInput 'Type UNINSTALL to continue') -cne 'UNINSTALL') {
         Write-Host 'Uninstall cancelled.' -ForegroundColor Yellow
@@ -3018,20 +4044,26 @@ function Uninstall-Suite {
     # Persist a verified legacy owner before removing its startup task. Keep the
     # owner until every removal step succeeds so a partial uninstall is retryable.
     Save-ComponentReceipt 'server'
+    Add-LifecycleEffect 'Server role removal started; ownership retained until postconditions pass.'
 
     $showProgress = $LauncherMode -or $Action -eq 'Menu'
-    if ($showProgress) { Start-SuiteProgress -Activity 'Uninstalling the KiloLink and NDI suite' -Status 'Preparing removal' }
+    if ($showProgress) { Start-SuiteProgress -Activity 'Removing Server role' -Status 'Preparing removal' }
     try {
     Set-SuiteProgress -Percent 8 -Status 'Stopping startup tasks and NDI services'
     $config = Get-SavedConfig
     $preferred = if ($config) { [string](Get-PropertyValue $config 'DistroName' '') } else { '' }
     $distro = Get-UbuntuDistro $preferred
-    Stop-ManagedTask $script:StartupTaskName
+    Invoke-DeploymentStep 'Stop Server watchdogs' { Set-KiloWatchdogState -Distro $distro -Mode Retain }
     Remove-ResumeTask
-    Unregister-ScheduledTask -TaskName $script:StartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-OwnedTask $script:StartupTaskName
     Restore-DiscoveryOwnership
 
-    if ($distro -and (Test-KiloContainer $distro)) {
+    if (-not $purge -and $distro -and (Test-KiloContainer $distro)) {
+        Invoke-Wsl $distro "docker update --restart=no '$script:ContainerName' >/dev/null && docker stop '$script:ContainerName' >/dev/null"
+        $remaining=Invoke-Wsl $distro "docker inspect -f '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' '$script:ContainerName'" -Capture
+        if(($remaining -join '').Trim() -ne 'false no'){throw 'The retained KiloLink container is not safely stopped with automatic restart disabled.'}
+    }
+    if ($purge -and $distro -and (Test-KiloContainer $distro)) {
         Set-SuiteProgress -Percent 24 -Status 'Removing the KiloLink container and application data'
         Write-Step 'Removing KiloLink container and data'
         $inspectLines = Invoke-Wsl $distro "docker inspect '$script:ContainerName'" -Capture
@@ -3060,31 +4092,50 @@ function Uninstall-Suite {
     Remove-LegacyPortProxies $config
     $desktop = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'KiloLink Server Pro.url'
     $programs = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Kiloview'
-    Remove-Item -LiteralPath $desktop -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path $programs 'KiloLink Server Pro.url') -Force -ErrorAction SilentlyContinue
+    Remove-OwnedFile $desktop
+    Remove-OwnedFile (Join-Path $programs 'KiloLink Server Pro.url')
     if (Test-Path -LiteralPath $programs) {
         if (@(Get-ChildItem -LiteralPath $programs -Force).Count -eq 0) {
             Remove-Item -LiteralPath $programs -Force
         }
     }
-    if ($distro -eq $script:ManagedDistroName -and (Get-WslDistroNames) -contains $script:ManagedDistroName) {
+    if ($purge -and $distro -eq $script:ManagedDistroName -and (Get-WslDistroNames) -contains $script:ManagedDistroName) {
         Set-SuiteProgress -Percent 90 -Status "Removing the dedicated $($script:ManagedDistroName) distribution"
         Write-Step "Removing dedicated WSL distribution '$($script:ManagedDistroName)'"
         Invoke-Native wsl.exe @('--unregister', $script:ManagedDistroName)
+        if((Get-WslDistroNames) -contains $script:ManagedDistroName){throw 'The dedicated Linux distribution is still registered after removal.'}
     }
+    if(@(Get-NetFirewallRule -Group $script:FirewallGroup -ErrorAction SilentlyContinue).Count){throw 'Owned firewall rules remain after removal.'}
+    if(Get-Command Get-NetFirewallHyperVRule -ErrorAction SilentlyContinue){
+        if(@(Get-NetFirewallHyperVRule -ErrorAction Stop|Where-Object{$_.Name -like "$($script:HyperVPrefix)*"}).Count){throw 'Owned Hyper-V firewall rules remain after removal.'}
+    }
+    if(-not $purge){Write-StateJson (Join-Path $script:StateRoot 'retained-server.json') @{
+        schemaVersion=1;serverOwnerSid=(Get-CurrentUserSid);configuration=$config;distro=$distro;active=$false;retainedUtc=[datetime]::UtcNow.ToString('o')
+    }}
+    else {Remove-OwnedFile (Join-Path $script:StateRoot 'retained-server.json')}
     Set-SuiteProgress -Percent 100 -Status 'Uninstall complete'
     Remove-MaintenanceEntry
     # Retain the reusable installer and logs, including the active transcript.
     foreach ($file in @($script:ConfigPath, $script:StartupScriptPath, $script:ResumeStatePath)) {
-        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        Remove-OwnedFile $file
     }
     Save-ComponentReceipt 'server' -Remove
-    Remove-Item -LiteralPath (Join-Path $script:StateRoot 'discovery-ownership.json') -Force -ErrorAction SilentlyContinue
+    Remove-OwnedFile (Join-Path $script:StateRoot 'discovery-ownership.json')
+    } catch {
+        $removalFailure=$_
+        $script:LifecycleRecoveryRequired=$true
+        if(-not $script:LifecycleErrorCode){$script:LifecycleErrorCode='server-role-removal-incomplete'}
+        $script:LifecycleNextAction='Server removal is incomplete. Preserve its data and watchdog inhibit. Run Verify to confirm watchdog shutdown, then retry removal or explicitly review Server setup/repair to reactivate it.'
+        $watchdogRecovery=@{schemaVersion=1;distro=$distro;action='Uninstall';mode='Retain';startedUtc=[datetime]::UtcNow.ToString('o')}
+        if($script:ActiveJournal){$script:ActiveJournal['pendingWatchdog']=$watchdogRecovery}
+        try { Write-StateJson (Join-Path $script:StateRoot 'pending-watchdog.json') $watchdogRecovery }
+        catch { Write-InstallerLog ('Could not save removal recovery record: '+$_.Exception.Message) }
+        throw $removalFailure
     } finally {
         if ($showProgress) { Stop-SuiteProgress }
     }
     Write-Host 'Uninstall complete. WSL and unrelated distributions were retained.' -ForegroundColor Green
-    Set-OperationOutcome 'Completed' 'Uninstall completed.'
+    Set-OperationOutcome 'Completed' $(if($purge){'Server role and dedicated data environment removed. Shared NDI Tools and PC Agent remain.'}else{'Server services removed and role inactive. KiloLink data and dedicated Linux environment (including disk footprint) are retained; see retained-server.json for recovery.'})
 }
 
 function Show-State {
@@ -3145,6 +4196,57 @@ function Show-Menu {
         Write-Host ''
         Read-InstallerInput 'Press Enter to return to the menu' | Out-Null
     }
+}
+
+function Get-ConfigurationProducts {
+    Initialize-LifecycleProtocol
+    [KiloLink.Lifecycle.ConfigurationMsi]::InstalledProducts()
+}
+
+function Remove-ConfigurationApp {
+    Set-OperationOutcome 'Running' 'Removing configuration app.'
+    $products=@(Get-ConfigurationProducts)
+    if(-not $products.Count){Set-OperationOutcome 'NoChange' 'The configuration MSI is not installed. Server services and shared components were retained.';return}
+    $maintenance=Split-Path -Parent $script:PersistentLauncherPath
+    Initialize-LifecycleProtocol
+    foreach($file in @('Kiloview-Environment-Setup.exe','Install-KiloLinkSuite.ps1','QuietInstaller.cs','toolbox-lifecycle.json')) {
+        $path=Join-Path $maintenance $file
+        if(-not(Test-Path -LiteralPath $path -PathType Leaf)){throw 'Retained maintenance is missing. Run the verified Environment executable before removing the configuration app.'}
+        [KiloLink.Lifecycle.SafePath]::Check($path)
+    }
+    if((Get-FileHash -LiteralPath (Join-Path $maintenance 'Install-KiloLinkSuite.ps1')).Hash -ne (Get-FileHash -LiteralPath $PSCommandPath).Hash) {
+        throw 'Retained maintenance does not match this engine. Run the verified Environment executable again.'
+    }
+    foreach($product in $products) {
+        if($product -notmatch '^\{[A-Fa-f0-9-]{36}\}$'){throw 'Unexpected Windows Installer product identity.'}
+        Add-LifecycleEffect 'Configuration app removal started; server services and data are retained.'
+        $log=Join-Path $script:StateRoot ('remove-app-'+[guid]::NewGuid().ToString('N')+'.log')
+        Invoke-Native msiexec.exe @('/x',$product,'/qn','/norestart','/L*v',$log) -IgnoreExitCode -StallSeconds 0
+        if($LASTEXITCODE -eq 3010){Set-OperationOutcome 'RestartRequired' 'Restart Windows to complete configuration app removal. Server services and data remain.';return}
+        if($LASTEXITCODE -eq 1602){Set-OperationOutcome 'Cancelled' 'Windows Installer cancelled configuration app removal.';return}
+        if($LASTEXITCODE -ne 0){throw "Configuration app removal failed with code $LASTEXITCODE. See $log"}
+    }
+    if(@(Get-ConfigurationProducts).Count){throw 'Windows Installer still reports the configuration app installed. Removal needs attention.'}
+    Set-OperationOutcome 'Completed' 'The configuration application was removed. Server services, data, shared components and the retained maintenance executable remain.'
+}
+
+function Remove-ClientRole {
+    Set-OperationOutcome 'Running' 'Removing Client role.'
+    Save-ComponentReceipt 'client' -Remove
+    $receipt=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $script:StateRoot 'installation-components.json') -Raw|ConvertFrom-Json
+    if(@($receipt.roles) -contains 'client'){throw 'Client role removal could not be verified.'}
+    Add-LifecycleEffect 'Environment Client role record removed; shared NDI Tools and PC Agent retained.'
+    Set-OperationOutcome 'Completed' 'Client role removed. NDI Tools and PC Agent remain installed and are managed separately.'
+}
+
+function Remove-OwnedFile([string]$Path) {
+    if(Test-Path -LiteralPath $Path){Remove-Item -LiteralPath $Path -Force -ErrorAction Stop}
+    if(Test-Path -LiteralPath $Path){throw "Removal could not be verified: $Path"}
+}
+
+function Remove-OwnedTask([string]$Name) {
+    if(Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue){Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop}
+    if(Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue){throw "Scheduled task removal could not be verified: $Name"}
 }
 
 function Update-SuiteRuntimePackages {
@@ -3210,7 +4312,17 @@ try {
     if ($Action -notin @('Plan','Inspect')) {
         $operationMutex = New-Object Threading.Mutex($false, 'Global\KiloviewProvisioner')
         try { $ownsOperationMutex = $operationMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsOperationMutex = $true }
-        if (-not $ownsOperationMutex) { throw 'Another provisioning operation is running. Wait for it to finish before retrying.' }
+        if (-not $ownsOperationMutex) { $script:LifecycleErrorCode='operation-conflict'; throw 'Another provisioning operation is running. Wait for it to finish before retrying.' }
+        Assert-NoPendingNativeProcess
+        $pendingWatchdog=Get-PendingWatchdogRecovery
+        if($Action -notin @('Verify','Menu') -and $pendingWatchdog){
+            $script:LifecycleRecoveryRequired=$true
+            $script:LifecycleErrorCode='watchdog-quiescence-failed'
+            $script:LifecycleNextAction='Run Verify to confirm the interrupted watchdog shutdown before retrying.'
+            throw $script:LifecycleNextAction
+        }
+        if ($Action -ne 'Menu') { Start-DeploymentJournal $Action $null }
+        if($pendingWatchdog -and $script:ActiveJournal){$script:ActiveJournal['pendingWatchdog']=$pendingWatchdog;Save-DeploymentJournal}
     }
     if ($LogPath) {
         $logDirectory = Split-Path -Parent $LogPath
@@ -3220,9 +4332,19 @@ try {
         Start-Transcript -LiteralPath $LogPath -Append | Out-Null
         $transcriptStarted = $true
     }
-    switch ($Action) {
+    if ($PackageRestartContinuation) {
+        if(-not $script:Lifecycle -or -not $AcceptLicenses){throw 'Package continuation requires the original reviewed lifecycle request.'}
+        Register-ResumeContinuation 'Windows Installer requires a restart before provisioning.'
+        Set-OperationOutcome 'RestartRequired' 'The configuration application is installed. Restart Windows and sign in to continue the reviewed operation.'
+    } else { switch ($Action) {
         'Plan' { Get-DeploymentPlan (Get-SavedConfig) | ConvertTo-Json -Depth 10 }
-        'Inspect' { [pscustomobject]@{schemaVersion=1; configuration=(Get-SavedConfig); plan=(Get-DeploymentPlan (Get-SavedConfig)); ownerSid=(Get-ServerOwnerSid)} | ConvertTo-Json -Depth 10 }
+        'Inspect' {
+            $inspection=Get-LifecycleInspection
+            $inspection|ConvertTo-Json -Depth 12
+            $script:OperationOutcome='Completed'
+            Write-LifecycleResult 'succeeded' 'Read-only inspection completed.' -Stage 'inspect' -Components $inspection.components -Evidence @{
+                activeOperationId=$inspection.activeOperationId; safeToRetry=$inspection.safeToRetry; recoveryRequired=$inspection.recoveryRequired; nextAction=$inspection.nextAction}
+        }
         'CheckDownloads' {
             $config = Get-SavedConfig
             if (-not $config) { $config = [pscustomobject]@{WebPort=80;NdiDiscoveryPort=5959;DistroName=$script:ManagedDistroName} }
@@ -3248,10 +4370,15 @@ try {
         'Backup' { Backup-SuiteData }
         'Verify' {
             Assert-ServerOwner
+            Assert-NoPendingKiloRecovery
+            Assert-NoPendingNativeProcess
             $config = Get-SavedConfig
-            if (-not $config) { throw 'A configured server is required for verification.' }
-            Test-SuiteHealth $config
-            Set-OperationOutcome 'Completed' 'Server health verified.'
+            if (Test-PendingWatchdogRecovery) { }
+            elseif ($config) {Test-SuiteHealth $config}
+            else {Test-NonServerRecovery}
+            Remove-VerifiedPendingProcess
+            $script:LifecycleRecoveryRequired=$false
+            Set-OperationOutcome 'Completed' 'Owned component state verified. The interrupted attempt remains recorded; a new operation may now be requested.'
         }
         'Repair' {
             if (-not $AcceptLicenses) {
@@ -3268,22 +4395,37 @@ try {
             Update-Suite
         }
         'Uninstall' {
-            if (-not $ConfirmRemoval) { throw 'Uninstall requires confirmation that KiloLink application data will be deleted.' }
-            Uninstall-Suite -Confirmed
+            if (-not $ConfirmRemoval) { throw 'Uninstall requires review and confirmation of the selected role removal.' }
+            if ($Role -eq 'client') { Remove-ClientRole }
+            else { Uninstall-Suite -Confirmed }
         }
+        'RemoveApp' { if (-not $ConfirmRemoval) { throw 'Review and confirm configuration app removal.' }; Remove-ConfigurationApp }
         'Resume' {
             if (-not $AcceptLicenses) {
                 throw 'A restart continuation requires the license acceptance recorded by the initial setup run.'
             }
             Resume-Suite
         }
-    }
+    } }
 } catch {
-    $backgroundExitCode = 1
-    Set-OperationOutcome 'Failed' $_.Exception.Message
+    if($Action -eq 'Verify'){$script:LifecycleRecoveryRequired=$true}
+    if($script:LifecycleErrorCode -eq 'lifecycle-result-write-failed') {
+        # The journal retains the actual operation outcome and the separate
+        # persistence error. Do not turn an Agent cancellation into an Agent
+        # installation failure, or claim the unsaved terminal result succeeded.
+        $script:OperationFailed=$true
+        $backgroundExitCode=1
+        Write-LauncherEvent -Type 'outcome' -Data @{outcome='Failed';message=$_.Exception.Message}
+    } else {
+        Set-OperationOutcome $(if($script:LifecycleErrorCode -eq 'operation-conflict'){'Blocked'}else{'Failed'}) $_.Exception.Message
+    }
     Write-Host "Operation failed: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "State and logs are under $script:StateRoot" -ForegroundColor Yellow
 } finally {
+    if ($ownsOperationMutex) {
+        try { Complete-FailedResumeContinuation }
+        catch { $backgroundExitCode=1; Write-InstallerLog ('Could not persist restart-continuation recovery status: '+$_.Exception.Message) }
+    }
     if ($ownsOperationMutex) { $operationMutex.ReleaseMutex() }
     if ($operationMutex) { $operationMutex.Dispose() }
     if ($transcriptStarted) {

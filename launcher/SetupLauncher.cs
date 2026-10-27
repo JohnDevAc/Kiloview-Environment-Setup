@@ -25,7 +25,7 @@ using System.Windows.Forms;
 
 namespace KiloLink.Setup
 {
-    internal static class SetupLauncher
+    internal static partial class SetupLauncher
     {
         internal const string InstallerResourceName = "KiloLink.Setup.Install-KiloLinkSuite.ps1";
         internal const string LicenseResourceName = "KiloLink.Setup.LICENSE";
@@ -40,6 +40,8 @@ namespace KiloLink.Setup
         {
             try
             {
+                LoadLifecycle(arguments);
+                if (LifecycleRequest != null && LifecycleRequest.Action == "inspect") { return InspectLifecycle(); }
                 bool autoResume = false;
                 foreach (string argument in arguments)
                 {
@@ -55,11 +57,12 @@ namespace KiloLink.Setup
                 {
                     ProcessStartInfo elevation = new ProcessStartInfo();
                     elevation.FileName = Assembly.GetExecutingAssembly().Location;
-                    elevation.Arguments = autoResume ? "--resume" : (InitialAction == "Repair" ? "--repair" : InitialAction == "Uninstall" ? "--uninstall" : String.Empty);
+                    elevation.Arguments = String.Join(" ", Array.ConvertAll(arguments, Quote));
+                    if(LifecycleRequest!=null && Array.IndexOf(arguments,"--lifecycle-sha256")<0){elevation.Arguments+=" --lifecycle-sha256 "+LifecycleRequestHash;}
                     elevation.Verb = "runas";
                     elevation.UseShellExecute = true;
-                    Process.Start(elevation);
-                    return 0;
+                    WriteLifecycle("running", "Waiting for Windows administrator approval.", "waiting-elevation", "");
+                    using (Process child = Process.Start(elevation)) { child.WaitForExit(); return child.ExitCode; }
                 }
 
                 Application.EnableVisualStyles();
@@ -69,8 +72,9 @@ namespace KiloLink.Setup
                 {
                     if (!ownsMutex)
                     {
+                        WriteLifecycle("blocked", "Another Environment setup window owns this operation.", "preflight", "operation-conflict");
                         MessageBox.Show("Kiloview Environment Setup is already open. Use the existing setup window.", "Setup already running");
-                        return 1;
+                        return 1618;
                     }
                     try { Application.Run(new SetupForm(autoResume)); }
                     finally { instance.ReleaseMutex(); }
@@ -79,6 +83,13 @@ namespace KiloLink.Setup
             }
             catch (Exception exception)
             {
+                System.ComponentModel.Win32Exception native = exception as System.ComponentModel.Win32Exception;
+                bool cancelled = native != null && native.NativeErrorCode == 1223;
+                if (LifecycleRequest != null) {
+                    if (!LifecycleWorkerStarted) { WriteLifecycle(cancelled ? "cancelled" : "failed", exception.Message, "launcher", cancelled ? "elevation-cancelled" : "launcher-failed"); }
+                    return cancelled ? 1602 : 1;
+                }
+                if(Array.IndexOf(arguments,"--lifecycle-request")>=0) { return 1; }
                 MessageBox.Show(
                     "Kiloview Environment Setup could not start.\r\n\r\n" + exception.Message,
                     "Kiloview Environment Setup",
@@ -552,7 +563,7 @@ namespace KiloLink.Setup
 
             pulseTimer = new Timer();
             pulseTimer.Interval = 90;
-            pulseTimer.Tick += delegate { progressBar.AdvancePulse(); };
+            pulseTimer.Tick += delegate { progressBar.AdvancePulse(); CheckConfigurationPackageDeadline(); };
 
             Shown += SetupFormShown;
 
@@ -564,10 +575,12 @@ namespace KiloLink.Setup
             {
                 Shown += delegate
                 {
+                    RestoreLifecycleIntent();
                     ShowProgressView();
                     BeginInvoke((MethodInvoker)StartInstaller);
                 };
             }
+            else { Shown += delegate { ShowLifecycleRequest(); }; }
         }
 
         private static Button CreateButton(string text, bool primary)
@@ -973,30 +986,28 @@ namespace KiloLink.Setup
             installerOperationInProgress = true;
             try
             {
+                KiloLink.Lifecycle.SafePath.CheckParent(launcherDirectory);
                 Directory.CreateDirectory(launcherDirectory);
-                if (pendingOperationArguments == null) { pendingOperationArguments = BuildOperationArguments(); }
-                if (SetupPackage.IsEmbedded && !configurationPackageReady)
+                if (pendingOperationArguments == null) { pendingOperationArguments = AddLifecycleArguments(BuildOperationArguments()); }
+                EnsureRetainedMaintenance();
+                if (SetupPackage.IsEmbedded && !configurationPackageReady && selectedAction != "RemoveApp" && selectedAction != "Uninstall")
                 {
                     if (!acceptanceBox.Checked) { throw new InvalidOperationException("Accept the installer licence and review the operation before continuing."); }
                     string packageLog = Path.Combine(Path.GetDirectoryName(logPath), "configuration-package.log");
-                    installerProcess = new Process { StartInfo = SetupPackage.CreateStartInfo(launcherDirectory, packageLog) };
+                    installerProcess = new Process { StartInfo = SetupPackage.CreateStartInfo(Path.GetDirectoryName(persistentLauncherPath), packageLog) };
                     configurationPackagePath = installerProcess.StartInfo.FileName;
                     configurationPackageInProgress = true;
+                    packageStartedUtc=DateTime.UtcNow;packageHeartbeatUtc=DateTime.MinValue;unattendedTimedOut=false;
                     installerProcess.Exited += InstallerProcessExited;
                     if (!installerProcess.Start()) { throw new InvalidOperationException("Windows did not start the configuration package."); }
+                    SetupLauncher.LifecycleWorkerStarted = true;
+                    SetupLauncher.WriteLifecycle("running", "Installing the configuration application.", "configuration-package", "");
                     activityLabel.Text = "Preparing setup";
                     progressStatusLabel.Text = "Installing or updating the setup application. Your selected components will follow automatically.";
                     installerProcess.EnableRaisingEvents = true;
                     return;
                 }
                 string currentLauncher = Assembly.GetExecutingAssembly().Location;
-                if (!managedInstallation && !String.Equals(
-                    Path.GetFullPath(currentLauncher),
-                    Path.GetFullPath(persistentLauncherPath),
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    File.Copy(currentLauncher, persistentLauncherPath, true);
-                }
 
                 if (File.Exists(legacyPersistentLauncherPath)
                     && !String.Equals(
@@ -1046,12 +1057,14 @@ namespace KiloLink.Setup
                 {
                     throw new InvalidOperationException("Windows did not start the deployment engine.");
                 }
+                SetupLauncher.LifecycleWorkerStarted = true;
 
                 installerProcess.StandardInput.Close();
                 installerProcess.BeginOutputReadLine();
                 installerProcess.BeginErrorReadLine();
-                activityLabel.Text = autoResume ? "Resuming setup" : selectedAction == "InstallClient" ? "Installing client tools" : selectedAction + " in progress";
-                progressStatusLabel.Text = autoResume
+                string removalActivity = GetRemovalProgressActivity();
+                activityLabel.Text = removalActivity ?? (autoResume ? "Resuming setup" : selectedAction == "InstallClient" ? "Installing client tools" : selectedAction + " in progress");
+                progressStatusLabel.Text = removalActivity != null ? removalActivity + "." : autoResume
                     ? "Windows and WSL state are being verified."
                     : selectedAction == "InstallClient" ? "Checking the latest NDI Tools download." : "Applying the settings you reviewed.";
                 // Subscribe to process completion only after both output readers
@@ -1088,11 +1101,16 @@ namespace KiloLink.Setup
 
         private void EnsureProvisionerFiles()
         {
-            if (managedInstallation)
-            {
-                if (!File.Exists(installerPath)) { throw new FileNotFoundException("Provisioner is missing. Repair Kiloview Environment Setup in Windows Apps.", installerPath); }
+            foreach(string name in new[]{"Install-KiloLinkSuite.ps1","QuietInstaller.cs"}) {
+                string path=Path.Combine(Path.GetDirectoryName(installerPath),name);
+                KiloLink.Lifecycle.SafePath.Check(path);
+                using(Stream expected=Assembly.GetExecutingAssembly().GetManifestResourceStream("KiloLink.Setup."+name))
+                using(Stream actual=File.OpenRead(path))
+                using(System.Security.Cryptography.SHA256 hash=System.Security.Cryptography.SHA256.Create()){
+                    string wanted=Convert.ToBase64String(hash.ComputeHash(expected));
+                    if(wanted!=Convert.ToBase64String(hash.ComputeHash(actual))){throw new InvalidDataException("Retained maintenance payload did not verify: "+name);}
+                }
             }
-            else { SetupLauncher.ExtractInstaller(installerPath); }
         }
 
         private void InstallerOutputReceived(object sender, DataReceivedEventArgs eventArgs)
@@ -1126,6 +1144,13 @@ namespace KiloLink.Setup
             catch (InvalidOperationException) { }
         }
 
+        private string GetRemovalProgressActivity()
+        {
+            if (selectedAction == "RemoveApp") { return "Removing configuration app"; }
+            if (selectedAction == "Uninstall") { return clientChoice.Checked ? "Removing Client role" : "Removing Server role"; }
+            return null;
+        }
+
         private void HandleOutputLine(string line)
         {
             if (line.StartsWith(SetupLauncher.EventPrefix, StringComparison.Ordinal))
@@ -1141,15 +1166,19 @@ namespace KiloLink.Setup
                         operationMessage = GetEventText(payload, "message");
                         if (String.Equals(operationOutcome, "Running", StringComparison.OrdinalIgnoreCase))
                         {
-                            activityLabel.Text = "Setup working";
+                            activityLabel.Text = GetRemovalProgressActivity() ?? "Setup working";
                             activityLabel.ForeColor = SetupTheme.Text;
                             progressStatusLabel.Text = operationMessage;
                             pulseTimer.Start();
                         }
                         else
                         {
-                            pulseTimer.Stop();
-                            ApplyInstallerOutcome(0);
+                            if(IsOperationInProgress) {
+                                activityLabel.Text="Finishing setup";
+                                progressStatusLabel.Text=operationMessage;
+                                progressBar.Value=Math.Min(99,progressBar.Value);
+                                pulseTimer.Start();
+                            } else {pulseTimer.Stop();ApplyInstallerOutcome(0);}
                         }
                         return;
                     }
@@ -1159,7 +1188,10 @@ namespace KiloLink.Setup
                         int percent;
                         if (Int32.TryParse(GetEventText(payload, "percent"), out percent))
                         {
-                            progressBar.Value = percent;
+                            // A worker can finish a transfer before installation,
+                            // verification or its own exit. Only a successful
+                            // terminal outcome may fill the overall progress bar.
+                            progressBar.Value = Math.Min(99, percent);
                         }
 
                         string activity = GetEventText(payload, "activity");
@@ -1209,8 +1241,15 @@ namespace KiloLink.Setup
 
         private void ApplyInstallerOutcome(int exitCode)
         {
+            progressBar.Value = Math.Min(99, progressBar.Value);
+            if (exitCode == 1602 || String.Equals(operationOutcome, "Cancelled", StringComparison.OrdinalIgnoreCase)) {
+                Environment.ExitCode = 1602; activityLabel.Text = "Operation cancelled"; progressStatusLabel.Text = operationMessage;
+                activityLabel.ForeColor = SetupTheme.Muted; CompleteLifecycle(1602); return;
+            }
             bool failed = (exitCode != 0 && exitCode != 3010)
                 || String.Equals(operationOutcome, "Failed", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(operationOutcome, "Partial", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(operationOutcome, "Blocked", StringComparison.OrdinalIgnoreCase)
                 || String.Equals(operationOutcome, "Running", StringComparison.OrdinalIgnoreCase);
             if (failed)
             {
@@ -1230,8 +1269,15 @@ namespace KiloLink.Setup
                     ? operationMessage
                     : "Restart Windows and sign back in to continue setup.";
             }
-            else if (String.Equals(operationOutcome, "Completed", StringComparison.OrdinalIgnoreCase))
+            else if (String.Equals(operationOutcome, "Completed", StringComparison.OrdinalIgnoreCase) || String.Equals(operationOutcome, "NoChange", StringComparison.OrdinalIgnoreCase))
             {
+                if (IsOperationInProgress)
+                {
+                    activityLabel.Text = "Finishing setup";
+                    progressStatusLabel.Text = "Waiting for setup to finish.";
+                    pulseTimer.Start();
+                    return;
+                }
                 Environment.ExitCode = 0;
                 progressBar.Value = 100;
                 activityLabel.Text = "Setup finished";
@@ -1240,13 +1286,14 @@ namespace KiloLink.Setup
             }
             else
             {
-                Environment.ExitCode = 0;
+                Environment.ExitCode = 1602;
                 activityLabel.Text = String.Equals(operationOutcome, "Cancelled", StringComparison.OrdinalIgnoreCase)
                     ? "Operation cancelled"
                     : "Setup closed";
                 activityLabel.ForeColor = SetupTheme.Muted;
                 progressStatusLabel.Text = operationMessage;
             }
+            CompleteLifecycle(exitCode);
         }
 
         private void InstallerProcessExited(object sender, EventArgs eventArgs)
@@ -1315,6 +1362,9 @@ namespace KiloLink.Setup
             installerProcess = null;
             configurationPackageInProgress = false;
             installerOperationInProgress = false;
+            if(unattendedTimedOut){
+                operationOutcome="Blocked";pulseTimer.Stop();FinishWizardOperation(1);ApplyInstallerOutcome(1);return;
+            }
             try { if (configurationPackagePath != null) { File.Delete(configurationPackagePath); } } catch (IOException) { } catch (UnauthorizedAccessException) { }
             if (exitCode == 0)
             {
@@ -1332,6 +1382,11 @@ namespace KiloLink.Setup
             }
             else
             {
+                if(exitCode==3010 && SetupLauncher.LifecycleRequest!=null) {
+                    configurationPackageReady=true;packageRestartRequired=true;
+                    pendingOperationArguments+=" -PackageRestartContinuation";
+                    StartInstaller();return;
+                }
                 operationMessage = exitCode == 3010
                     ? "Restart Windows, then reopen this installer to finish setting up your selected components."
                     : "The setup application could not be installed or updated (code " + exitCode + "). See " + Path.Combine(Path.GetDirectoryName(logPath), "configuration-package.log");
@@ -1350,7 +1405,7 @@ namespace KiloLink.Setup
             {
                 try
                 {
-                    if (!installerProcess.HasExited)
+                    if (!installerProcess.HasExited && !unattendedTimedOut)
                     {
                         eventArgs.Cancel = true;
                         MessageBox.Show(
@@ -1362,6 +1417,14 @@ namespace KiloLink.Setup
                     }
                 }
                 catch { }
+            }
+            if (!eventArgs.Cancel && SetupLauncher.LifecycleRequest != null) {
+                Dictionary<string,object> result=SetupLauncher.LifecycleRequest.ReadResult();
+                if(result==null || KiloLink.Lifecycle.Request.Text(result,"outcome")=="running") {
+                    SetupLauncher.WriteLifecycle(SetupLauncher.LifecycleWorkerStarted?"partial":"cancelled", "Setup was closed before the requested operation completed.", "closed", "");
+                }
+                result=SetupLauncher.LifecycleRequest.ReadResult();
+                Environment.ExitCode=KiloLink.Lifecycle.Request.ExitCode(KiloLink.Lifecycle.Request.Text(result,"outcome"),KiloLink.Lifecycle.Request.Text(result,"errorCode"));
             }
         }
 

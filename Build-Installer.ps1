@@ -47,4 +47,16 @@ $releaseOutput = Join-Path $root 'artifacts\installer'
 & (Join-Path $root 'Build-Setup.ps1') -OutputDirectory $releaseOutput -ConfigurationPackage $package
 $bundle = Join-Path $releaseOutput 'Kiloview-Environment-Setup.exe'
 Get-FileHash -LiteralPath $bundle -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLowerInvariant())  Kiloview-Environment-Setup.exe" } | Set-Content -LiteralPath ($bundle + '.sha256') -Encoding ASCII
+# The verified ZIP advertises fresh-install support without guessing switches from version numbers.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.IO.Compression
+$lifecycleZip = Join-Path $root 'artifacts\Kiloview-Environment-Setup-Lifecycle.zip'
+if (Test-Path -LiteralPath $lifecycleZip) { Remove-Item -LiteralPath $lifecycleZip }
+$archive=[IO.Compression.ZipFile]::Open($lifecycleZip,[IO.Compression.ZipArchiveMode]::Create)
+try {
+    foreach($name in @('Kiloview-Environment-Setup.exe','Kiloview-Environment-Setup.exe.sha256','toolbox-lifecycle.json')){
+        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive,(Join-Path $releaseOutput $name),$name)
+    }
+} finally {$archive.Dispose()}
+Get-FileHash -LiteralPath $lifecycleZip -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLowerInvariant())  Kiloview-Environment-Setup-Lifecycle.zip" } | Set-Content -LiteralPath ($lifecycleZip + '.sha256') -Encoding ASCII
 Write-Output "Built installer: $bundle"

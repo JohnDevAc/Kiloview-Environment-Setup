@@ -18,6 +18,8 @@ $source = Join-Path $root 'launcher\SetupLauncher.cs'
 $wizardSource = Join-Path $root 'launcher\SetupWizard.cs'
 $layoutSource = Join-Path $root 'launcher\SetupLayout.cs'
 $packageSource = Join-Path $root 'launcher\SetupPackage.cs'
+$lifecycleSource = Join-Path $root 'launcher\LifecycleProtocol.cs'
+$lifecycleHostSource = Join-Path $root 'launcher\SetupLifecycle.cs'
 $quietSource = Join-Path $root 'launcher\QuietInstaller.cs'
 $manifest = Join-Path $generated 'Setup.exe.manifest'
 [IO.File]::WriteAllText($manifest, ([IO.File]::ReadAllText((Join-Path $root 'launcher\Setup.exe.manifest')).Replace('__PRODUCT_VERSION__', $version)))
@@ -39,7 +41,7 @@ if (-not $compiler) {
     throw 'The Windows .NET Framework C# compiler was not found.'
 }
 
-foreach ($requiredFile in @($source, $wizardSource, $layoutSource, $packageSource, $quietSource, $manifest, $installer, $icon, $iconArtwork, $license, $eula, $thirdPartyNotices)) {
+foreach ($requiredFile in @($source, $wizardSource, $layoutSource, $packageSource, $lifecycleSource, $lifecycleHostSource, $quietSource, $manifest, $installer, $icon, $iconArtwork, $license, $eula, $thirdPartyNotices)) {
     if (-not (Test-Path -LiteralPath $requiredFile)) {
         throw "Required build input is missing: $requiredFile"
     }
@@ -69,6 +71,8 @@ $compilerArguments = @(
     ('"{0}"' -f $wizardSource),
     ('"{0}"' -f $layoutSource),
     ('"{0}"' -f $packageSource),
+    ('"{0}"' -f $lifecycleSource),
+    ('"{0}"' -f $lifecycleHostSource),
     ('"{0}"' -f $assemblyInfo)
 )
 if ($ConfigurationPackage) {
@@ -84,4 +88,7 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $output)) {
 }
 
 $file = Get-Item -LiteralPath $output
+if (-not [string]::Equals([IO.Path]::GetFullPath($OutputDirectory), [IO.Path]::GetFullPath($root), [StringComparison]::OrdinalIgnoreCase)) {
+    Copy-Item -LiteralPath (Join-Path $root 'toolbox-lifecycle.json') -Destination $OutputDirectory -Force
+}
 Write-Host "Built $($file.FullName) ($($file.Length) bytes)" -ForegroundColor Green

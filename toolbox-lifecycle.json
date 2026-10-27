@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "productId": "environment",
+  "entryPoint": "Kiloview-Environment-Setup.exe",
+  "entryPointKind": "native",
+  "supportedActions": ["inspect", "install", "update", "repair", "uninstall", "remove-role", "remove-app", "backup", "maintain-runtime"]
+}

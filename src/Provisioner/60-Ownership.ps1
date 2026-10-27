@@ -17,11 +17,11 @@ function Get-ServerOwnerSid {
     $path = Join-Path $script:StateRoot 'installation-components.json'
     $serverSelected = $false
     if (Test-Path -LiteralPath $path) {
-        $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $receipt = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json
         if ($receipt.schemaVersion -ne 1) { throw 'The installation ownership receipt has an unsupported schema.' }
         $serverSelected = @($receipt.roles) -contains 'server'
         $owner = [string](Get-PropertyValue $receipt 'serverOwnerSid' '')
-        if ($serverSelected -and $owner) {
+        if (($serverSelected -or (Get-PropertyValue $receipt 'retainedServer' $false)) -and $owner) {
             if ($owner -notmatch '^S-1-\d+(?:-\d+)+$') { throw 'The recorded server owner SID is invalid.' }
             return $owner
         }
@@ -100,11 +100,12 @@ timeout 60 apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=12 -o Acquire
 }
 
 function Save-ComponentReceipt([string]$Role, [switch]$Remove) {
+    $previous=$null
     $path = Join-Path $script:StateRoot 'installation-components.json'
     $roles = @()
     $owner = $null
     if (Test-Path -LiteralPath $path) {
-        $previous = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $previous = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-Json
         if ($previous.schemaVersion -ne 1) { throw 'Unsupported component receipt. Existing deployment ownership was preserved.' }
         if (@($previous.roles | Where-Object { $_ -notin @('client', 'server') }).Count -gt 0) {
             throw 'Unknown component role. Existing deployment ownership was preserved.'
@@ -113,12 +114,18 @@ function Save-ComponentReceipt([string]$Role, [switch]$Remove) {
         $owner = Get-PropertyValue $previous 'serverOwnerSid' $null
     }
     if ($Role -eq 'server' -and -not $Remove) { Assert-ServerOwner; $owner = Get-CurrentUserSid }
-    if ($Role -eq 'server' -and $Remove) { $owner = $null }
+    $retained=Test-Path -LiteralPath (Join-Path $script:StateRoot 'retained-server.json')
+    if($Role -eq 'server' -and -not $Remove -and $Action -ne 'Uninstall' -and $retained){
+        Remove-OwnedFile (Join-Path $script:StateRoot 'retained-server.json');$retained=$false
+    }
+    if ($Role -eq 'server' -and $Remove -and -not $retained) { $owner = $null }
     New-Item -ItemType Directory -Path $script:StateRoot -Force | Out-Null
     $selected = if ($Remove) { @($roles | Where-Object { $_ -ne $Role }) } else { @(($roles + $Role) | Select-Object -Unique) }
-    $receipt = @{schemaVersion=1; roles=@($selected); serverOwnerSid=$owner; updatedUtc=[datetime]::UtcNow.ToString('o')}
-    $receipt | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath ($path + '.tmp') -Encoding UTF8
-    Move-Item -LiteralPath ($path + '.tmp') -Destination $path -Force
+    if(@($roles).Count -eq @($selected).Count -and (@($roles|Sort-Object)-join ',') -eq (@($selected|Sort-Object)-join ',') -and $previous -and
+        (Get-PropertyValue $previous 'serverOwnerSid' $null) -eq $owner -and [bool](Get-PropertyValue $previous 'retainedServer' $false) -eq [bool]$retained){return}
+    $receipt = @{schemaVersion=1; roles=@($selected); serverOwnerSid=$owner; retainedServer=$retained; updatedUtc=[datetime]::UtcNow.ToString('o')}
+    Write-StateJson $path $receipt
+    Add-LifecycleEffect "Environment $Role role record updated."
 }
 
 function Assert-SuitePorts($Config) {
@@ -135,11 +142,16 @@ function Install-ClientTools {
     try {
         Invoke-DeploymentStep 'Verify and stage client packages' { Prepare-ClientPackages }
         Save-ComponentReceipt 'client'
+        Set-SuiteProgress -Percent 65 -Status 'Installing or validating NDI Tools'
         Invoke-DeploymentStep 'NDI Tools' { Install-NdiTools -ClientOnly }
         $ndiInstalled = $true
         $ndiNeedsRestart = $script:NdiRestartRequired
-        $agentCompleted = Invoke-DeploymentStep 'PC Agent' { Install-PcAgent }
+        Set-SuiteProgress -Percent 85 -Status 'Installing or validating PC Agent'
+        $agentCompleted = Invoke-DeploymentStep 'PC Agent' { Install-PcAgent } -IncompleteOnFalse
+        $ndiNeedsRestart=$ndiNeedsRestart -or $script:PcAgentRestartRequired
         if (-not $agentCompleted) {
+            $script:LifecycleErrorCode='pc-agent-incomplete'
+            $script:LifecycleNextAction='Run Client setup again to finish PC Agent and review its licence. Review the selected operation before applying; explicit repair may reinstall NDI Tools.'
             if ($ndiNeedsRestart) {
                 Set-OperationOutcome 'RestartRequired' 'NDI Tools needs a Windows restart. PC Agent setup was not completed; run Client setup again afterwards.'
             } else {
@@ -147,13 +159,15 @@ function Install-ClientTools {
             }
             return
         }
-        Set-SuiteProgress -Percent 100 -Status 'Client installation finished'
+        Set-SuiteProgress -Percent 98 -Status 'Verifying client installation'
         if ($ndiNeedsRestart) {
             Set-OperationOutcome 'RestartRequired' 'NDI Tools and PC Agent are installed. Restart Windows to finish NDI Tools installation.'
         } else {
-            Set-OperationOutcome 'Completed' 'NDI Tools and NDI Configurator PC Agent are installed.'
+            if($script:Lifecycle -and $script:LifecycleEffects.Count -eq 0){Set-OperationOutcome 'NoChange' 'NDI Tools and PC Agent are already current. Onboarding remains a separate Agent operation.'}
+            else {Set-OperationOutcome 'Completed' 'NDI Tools and NDI Configurator PC Agent are installed. Onboarding is managed separately by PC Agent.'}
         }
     } catch {
+        if ($script:LifecycleErrorCode -eq 'lifecycle-result-write-failed') { throw }
         if (-not $ndiInstalled) { throw }
         $failure = $_.Exception.Message
         $evidence = 'PC Agent installed state could not be verified.'

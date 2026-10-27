@@ -2,7 +2,9 @@
 
 See [current suite deployment behavior](INTEROPERABILITY.md) for role receipts, download gates, offline Client packages, port restrictions and shared-runtime removal.
 
-Version 3.0.3 is a single Windows setup wizard. Choose **Server** or **Client**,
+This checkout targets **3.1.0 (development candidate)**. See the
+[Toolbox lifecycle interface and VM acceptance steps](docs/LIFECYCLE.md).
+It is a single Windows setup wizard. Choose **Server** or **Client**,
 review the settings and licences, then set up or update the platform in the same
 window. WiX/MSI installs the reusable configuration app silently in the background.
 Windows and WSL are retained. Full NDI Tools supplies Discovery Server.
@@ -31,7 +33,8 @@ MIT; downloaded products retain their separate licences. The EULA and notices
 are also available from the configuration application's first page.
 
 1. Choose **Server** or **Client**, then **Next**. Client goes directly to review.
-2. For Server, select the existing physical Ethernet or Wi-Fi adapter/address.
+2. For Server, reuse a valid saved adapter/address or the sole suitable adapter.
+   Select the existing physical Ethernet or Wi-Fi adapter/address when ambiguous.
    IP addressing, gateway, DNS and DHCP reservations are the user's responsibility;
    setup contains no controls or commands to change them.
 3. Review the detected settings and licences. Saved service ports are retained;
@@ -44,17 +47,21 @@ are also available from the configuration application's first page.
    open KiloLink, return to setup, or finish. When Windows needs a restart,
    choose **Restart Windows** or **Restart later**.
 
-Server uninstall, reached through its Windows Installed apps entry, goes straight to a removal review, without requiring a working
-network adapter. Its confirmation checkbox explicitly acknowledges deletion
-of KiloLink application data before **Uninstall** is enabled.
+Server uninstall opens a removal review without requiring a working adapter.
+By default it removes services and retains KiloLink data, recovery settings and
+the inactive dedicated Linux environment, including its disk footprint. Permanent
+data/environment deletion requires a separate checkbox. Configuration-app-only
+removal retains the active server and a protected maintenance executable under
+`C:\ProgramData\KiloLink\Maintenance`.
 
 ### Client setup
 
 Client review lists NDI Tools and PC Agent, with their licence links. Accept the
 installer EULA and NDI Tools licence and choose **Set up / update client**. Setup obtains the current
 Windows package from [NDI's official download page](https://ndi.video/tools/),
-checks its Windows signature and installs it. Re-running Client updates older
-NDI Tools or reinstalls the current package to restore missing files. A newer
+checks its Windows signature and installs it when needed. A current Client with
+the required NDI applications skips the download and installation. Repair is
+explicit, and missing required applications trigger repair. A newer
 installed version is retained. The vendor installer runs on a private background
 desktop, so its console helpers and completion launcher do not appear. Only that
 installation's remaining child processes are closed when it finishes; existing
@@ -63,10 +70,11 @@ NDI applications are not targeted.
 Setup then obtains the latest stable PC Agent release from
 `JohnDevAc/Kiloview-PC-Onboarding`. It uses the complete Windows x64 package,
 including its .NET runtime, verifies the release SHA-256 digest, size, archive paths
-and binary product/version, then opens the agent's own native Windows setup.
-Review its licence and select the production adapter there. Close that window
-when it reports the agent is ready to return to this installer's completion view.
-A configured PC Agent at the current or a newer version is retained. Its current
+and binary product/version, then uses the Agent-owned lifecycle interface when
+its verified package advertises support. The Agent owns its licence, settings
+and onboarding. Installation alone is not configuration or onboarding. Older
+packages retain their interactive setup flow and its separate adapter choice.
+A verified current Agent is retained when healthy or awaiting initial configuration. Its current
 licence permits unmodified non-commercial use; commercial use requires separate
 permission. The installer's free MIT licence does not relicense PC Agent.
 

@@ -22,6 +22,7 @@
             <File Source="$(var.PayloadDir)\Install-KiloLinkSuite.ps1" />
             <File Source="$(var.PayloadDir)\QuietInstaller.cs" />
             <File Source="$(var.PayloadDir)\managed-installation.json" />
+            <File Source="$(var.PayloadDir)\toolbox-lifecycle.json" />
             <File Source="$(var.PayloadDir)\LICENSE" />
             <File Source="$(var.PayloadDir)\EULA.md" />
             <File Source="$(var.PayloadDir)\EULA.rtf" />
