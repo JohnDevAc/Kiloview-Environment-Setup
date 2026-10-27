@@ -23,52 +23,52 @@ jobs:
           .\Build-Installer.ps1
       - name: Isolated provisioning and native launcher regressions
         shell: powershell
-        run: .\tests\Installer.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Installer.Regression.ps1
       - name: Native vendor process isolation
         shell: powershell
-        run: .\tests\Test-QuietInstaller.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-QuietInstaller.ps1
       - name: Truthful Client progress and terminal outcomes
         shell: powershell
-        run: .\tests\Progress.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Progress.Regression.ps1
       - name: Lifecycle result persistence and partial cancellation
         shell: powershell
-        run: .\tests\LifecyclePersistence.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\LifecyclePersistence.Regression.ps1
       - name: Lifecycle writer ownership and concurrent snapshots
         shell: powershell
-        run: .\tests\LifecycleConcurrency.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\LifecycleConcurrency.Regression.ps1
       - name: Lifecycle Client and Server retry routing
         shell: powershell
-        run: .\tests\LifecycleRoles.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\LifecycleRoles.Regression.ps1
       - name: Stable and development release identities
         shell: powershell
-        run: .\tests\ReleaseMetadata.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\ReleaseMetadata.Regression.ps1
       - name: Bounded native NDI metadata and preflight progress
         shell: powershell
-        run: .\tests\NdiMetadata.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\NdiMetadata.Regression.ps1
       - name: Native WSL arguments and missing-runtime bootstrap
         shell: powershell
-        run: .\tests\WslBootstrap.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\WslBootstrap.Regression.ps1
       - name: WSL console bootstrap, descendants and durable recovery
         shell: powershell
-        run: .\tests\WslConsole.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\WslConsole.Regression.ps1
       - name: Actual PowerShell native PATH resolution and readiness diagnostics
         shell: powershell
-        run: .\tests\NativeResolution.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\NativeResolution.Regression.ps1
       - name: Bounded WSL distro launch and shared readiness deadlines
         shell: powershell
-        run: .\tests\WslReadiness.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\WslReadiness.Regression.ps1
       - name: Concurrent diagnostic readers and interrupted native ownership
         shell: powershell
-        run: .\tests\InstallerLogging.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\InstallerLogging.Regression.ps1
       - name: Cooperative Linux watchdog shutdown and retained-role reactivation
         shell: powershell
-        run: .\tests\WatchdogLifecycle.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\WatchdogLifecycle.Regression.ps1
       - name: Terminal resume failure and automatic continuation ownership
         shell: powershell
-        run: .\tests\ResumeContinuation.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\ResumeContinuation.Regression.ps1
       - name: Package and licence verification
         shell: powershell
-        run: .\tests\Packaging.Regression.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Packaging.Regression.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: unsigned-installer
