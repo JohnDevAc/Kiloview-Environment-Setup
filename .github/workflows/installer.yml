@@ -39,6 +39,9 @@ jobs:
       - name: Lifecycle Client and Server retry routing
         shell: powershell
         run: .\tests\LifecycleRoles.Regression.ps1
+      - name: Stable and development release identities
+        shell: powershell
+        run: .\tests\ReleaseMetadata.Regression.ps1
       - name: Bounded native NDI metadata and preflight progress
         shell: powershell
         run: .\tests\NdiMetadata.Regression.ps1

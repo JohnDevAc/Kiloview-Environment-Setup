@@ -1,4 +1,5 @@
 {
   "version": "3.1.0",
-  "channel": "development"
+  "channel": "development",
+  "releaseVersion": "3.1.0-dev.1"
 }

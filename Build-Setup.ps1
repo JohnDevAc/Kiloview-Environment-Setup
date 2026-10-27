@@ -8,12 +8,13 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 if (-not $OutputDirectory) { $OutputDirectory = $root }
 & (Join-Path $root 'Build-Provisioner.ps1')
-$version = (Get-Content -LiteralPath (Join-Path $root 'version.json') -Raw | ConvertFrom-Json).version
+$metadata = & (Join-Path $root 'Get-BuildVersion.ps1')
+$version = $metadata.Version
 $generated = Join-Path $root 'artifacts\generated'
 New-Item -ItemType Directory -Path $generated -Force | Out-Null
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $assemblyInfo = Join-Path $generated 'Version.cs'
-[IO.File]::WriteAllText($assemblyInfo, ('[assembly: System.Reflection.AssemblyVersion("{0}.0")]{1}[assembly: System.Reflection.AssemblyFileVersion("{0}.0")]' -f $version,[Environment]::NewLine))
+[IO.File]::WriteAllText($assemblyInfo, ('[assembly: System.Reflection.AssemblyVersion("{0}.0")]{1}[assembly: System.Reflection.AssemblyFileVersion("{0}.0")]{1}[assembly: System.Reflection.AssemblyInformationalVersion("{2}")]' -f $version,[Environment]::NewLine,$metadata.ReleaseVersion))
 $source = Join-Path $root 'launcher\SetupLauncher.cs'
 $wizardSource = Join-Path $root 'launcher\SetupWizard.cs'
 $layoutSource = Join-Path $root 'launcher\SetupLayout.cs'

@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param([switch]$Check)
 $ErrorActionPreference = 'Stop'
-$metadata = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'version.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$metadata = & (Join-Path $PSScriptRoot 'Get-BuildVersion.ps1')
 $version=$metadata.version
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid product version.' }
 $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'packages\applications.json') -Raw
@@ -11,7 +11,7 @@ $null = $manifest | ConvertFrom-Json
 $parts = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src\Provisioner') -Filter '*.ps1' | Sort-Object Name)
 $content = ($parts | ForEach-Object { [IO.File]::ReadAllText($_.FullName).TrimEnd() }) -join "`r`n`r`n"
 $content = $content.Replace("`r`n", "`n").Replace("`r", "`n").Replace("`n", "`r`n")
-$content = $content.Replace('__PRODUCT_VERSION__', $version).Replace('__APPLICATION_MANIFEST_BASE64__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($manifest)))
+$content = $content.Replace('__PRODUCT_VERSION__', $metadata.ReleaseVersion).Replace('__APPLICATION_MANIFEST_BASE64__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($manifest)))
 $content = $content.Replace('__PRODUCT_CHANNEL__',[string]$metadata.channel)
 $protocol = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'launcher\LifecycleProtocol.cs'))
 $content = $content.Replace('__LIFECYCLE_PROTOCOL_BASE64__', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($protocol)))

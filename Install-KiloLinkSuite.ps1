@@ -48,7 +48,7 @@ $script:WslVmCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
 $script:ManagedDistroName = 'KiloLink-Ubuntu'
 $script:ContainerName = 'KLNKSVR-pro'
 $script:ApplicationManifest = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('ewogICJzY2hlbWFWZXJzaW9uIjogMSwKICAicG9saWN5IjogImxhdGVzdC1zdGFibGUiLAogICJuZGlUb29scyI6IHsKICAgICJzb3VyY2UiOiAiaHR0cHM6Ly9uZGkudmlkZW8vdG9vbHMvIiwKICAgICJ1cmwiOiAiaHR0cHM6Ly9kb3dubG9hZHMubmRpLnR2L1Rvb2xzL05ESSUyMDYlMjBUb29scy5leGUiLAogICAgInZlcmlmaWNhdGlvbiI6ICJBdXRoZW50aWNvZGUgc2lnbmF0dXJlIGZyb20gTkRJLCBWaXpydCBvciBOZXdUZWs7IHJlY29yZCBkb3dubG9hZGVkIFNIQS0yNTYiCiAgfSwKICAicGNBZ2VudCI6IHsKICAgICJzb3VyY2UiOiAiaHR0cHM6Ly9naXRodWIuY29tL0pvaG5EZXZBYy9LaWxvdmlldy1QQy1PbmJvYXJkaW5nL3JlbGVhc2VzL2xhdGVzdCIsCiAgICAidmVyaWZpY2F0aW9uIjogInByb2R1Y3Rpb24gcmVsZWFzZSwgcHVibGlzaGVkIFNIQS0yNTYsIGFyY2hpdmUgcGF0aHMsIGJpbmFyeSBpZGVudGl0eSBhbmQgdmVyc2lvbnMiCiAgfSwKICAia2lsb0xpbmsiOiB7CiAgICAiaW1hZ2UiOiAia2lsb3ZpZXcva2xuay1wcm86bGF0ZXN0IiwKICAgICJ2ZXJpZmljYXRpb24iOiAiRG9ja2VyIGNvbnRlbnQgZGlnZXN0OyByZXRhaW4gb3JpZ2luYWwgY29udGFpbmVyIGFuZCBiYWNrdXAgYmVmb3JlIHJlcGxhY2VtZW50IgogIH0sCiAgInJ1bnRpbWUiOiB7CiAgICAidWJ1bnR1RGlzdHJpYnV0aW9uIjogIlVidW50dS0yNC4wNCIsCiAgICAibWFpbnRlbmFuY2UiOiAiZXhwbGljaXQgTWFpbnRhaW5SdW50aW1lIGFjdGlvbjsgV2luZG93cy9XU0wgYW5kIGFwdCByZXBvc2l0b3JpZXMgc3VwcGx5IHJ1bnRpbWUgcGFja2FnZXMiCiAgfQp9Cg==')) | ConvertFrom-Json
-$script:ProductVersion = '3.1.0'
+$script:ProductVersion = '3.1.0-dev.1'
 $script:ProductChannel = 'development'
 $script:ActiveJournal = $null
 $script:Lifecycle = $null
@@ -647,7 +647,7 @@ function Get-ObservedComponents {
         foreach($candidate in @($script:PersistentLauncherPath,(Join-Path $script:StateRoot 'Launcher\Kiloview-Environment-Setup.exe'))){if(Test-Path -LiteralPath $candidate -PathType Leaf){$app=$candidate;break}}
     }
     $items.Add([pscustomobject]@{productId='environment';installed=(Test-Path -LiteralPath $app -PathType Leaf);configurationAppInstalled=$msiApp;configured=$null;running=$null;healthy=$null;
-        version=$(if(Test-Path -LiteralPath $app){(Get-Item -LiteralPath $app).VersionInfo.FileVersion}else{$null});channel=$null;inspectionVersion=$script:ProductVersion;inspectionChannel=$script:ProductChannel})
+        version=$(if(Test-Path -LiteralPath $app){(Get-Item -LiteralPath $app).VersionInfo.ProductVersion}else{$null});channel=$null;inspectionVersion=$script:ProductVersion;inspectionChannel=$script:ProductChannel})
     try {
         $registration=Get-NdiRegistration
         $ndiVersion=if($registration){[string](Get-PropertyValue $registration 'DisplayVersion' '')}else{$null}

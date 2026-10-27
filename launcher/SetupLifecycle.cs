@@ -18,6 +18,14 @@ namespace KiloLink.Setup
         internal static bool LifecycleWorkerStarted;
         internal static string LifecycleRequestHash;
 
+        internal static string ReleaseVersion {
+            get {
+                Assembly assembly=Assembly.GetExecutingAssembly();
+                object[] attributes=assembly.GetCustomAttributes(typeof(AssemblyInformationalVersionAttribute),false);
+                return attributes.Length==1 ? ((AssemblyInformationalVersionAttribute)attributes[0]).InformationalVersion : assembly.GetName().Version.ToString(3);
+            }
+        }
+
         internal static void LoadLifecycle(string[] arguments)
         {
             for(int i=0;i<arguments.Length;i++) {
@@ -32,7 +40,7 @@ namespace KiloLink.Setup
                     throw new InvalidDataException("Lifecycle request changed during elevation.");
                 }
             }
-            string version=Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
+            string version=ReleaseVersion;
             if(LifecycleRequest.RequestedVersion.Length>0 && LifecycleRequest.RequestedVersion != version) {
                 WriteLifecycle("blocked","This setup does not match the requested version.","preflight","version-mismatch");
                 throw new InvalidDataException("Use the verified requested installer version.");

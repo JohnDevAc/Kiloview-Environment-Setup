@@ -2,7 +2,8 @@
 #Requires -Version 5.1
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$version = (Get-Content (Join-Path $root 'version.json') -Raw | ConvertFrom-Json).version
+$metadata = & (Join-Path $root 'Get-BuildVersion.ps1')
+$version = $metadata.Version
 $payload = Join-Path $root 'artifacts\payload'
 $msi = Join-Path $root 'artifacts\msi\Kiloview-Configuration.msi'
 function Assert-Packaging($Condition, $Message) { if (-not $Condition) { throw $Message } }
@@ -51,6 +52,11 @@ Assert-Packaging ($eula.EndsWith($license.Substring($license.IndexOf('Copyright'
 $exe = Join-Path $payload 'Kiloview-Environment-Setup.exe'
 Assert-Packaging ((Get-Item $exe).VersionInfo.FileVersion -eq ($version + '.0')) 'Application version differs from MSI.'
 $bundle = Join-Path $root 'artifacts\installer\Kiloview-Environment-Setup.exe'
+foreach ($application in @($exe,$bundle)) {
+    Assert-Packaging ((Get-Item -LiteralPath $application).VersionInfo.ProductVersion -ceq $metadata.ReleaseVersion) 'Application release channel identity differs from version.json.'
+}
+$engineText=[IO.File]::ReadAllText((Join-Path $payload 'Install-KiloLinkSuite.ps1'))
+Assert-Packaging ($engineText.Contains(('''{0}''' -f $metadata.ReleaseVersion)) -and $engineText.Contains(('''{0}''' -f $metadata.Channel))) 'Packaged engine release identity differs from the native app.'
 $recordedHash = (Get-Content ($bundle + '.sha256') -Raw).Split(' ')[0]
 Assert-Packaging ((Get-FileHash $bundle).Hash -ieq $recordedHash) 'Bundle checksum is stale.'
 $bundleAuthoring = [xml](Get-Content (Join-Path $root 'installer\Bundle\Bundle.wxs') -Raw)

@@ -1,8 +1,9 @@
-# Toolbox lifecycle: 3.1.0 development candidate
+# Toolbox lifecycle: 3.1.0
 
-This is an implementation candidate, not a published release or a claim of
-Windows/WSL/vendor/reboot acceptance. The coordinating task owns disposable-VM
-test sequencing. Do not use production services as a substitute for those tests.
+The 3.1.0 implementation has passed isolated regressions and coordinated
+Windows 11 VM acceptance for installation, updates, recovery, role removal and
+retention. See [release notes](releases/v3.1.0.md) for the tested scope and remaining
+hardware/fault limits. A local build does not publish or install a release.
 
 ## Entry points and packages
 
@@ -23,6 +24,7 @@ Build with Windows PowerShell 5.1:
 .\tests\LifecyclePersistence.Regression.ps1
 .\tests\LifecycleConcurrency.Regression.ps1
 .\tests\LifecycleRoles.Regression.ps1
+.\tests\ReleaseMetadata.Regression.ps1
 .\tests\NdiMetadata.Regression.ps1
 .\tests\WslBootstrap.Regression.ps1
 .\tests\WslConsole.Regression.ps1

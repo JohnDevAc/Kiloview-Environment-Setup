@@ -2,8 +2,9 @@
 
 See [current suite deployment behavior](INTEROPERABILITY.md) for role receipts, download gates, offline Client packages, port restrictions and shared-runtime removal.
 
-This checkout targets **3.1.0 (development candidate)**. See the
-[Toolbox lifecycle interface and VM acceptance steps](docs/LIFECYCLE.md).
+This checkout targets the **3.1.0 release family**; `version.json` identifies its
+stable or development channel. See the [release notes](docs/releases/v3.1.0.md)
+and [Toolbox lifecycle interface and VM acceptance steps](docs/LIFECYCLE.md).
 It is a single Windows setup wizard. Choose **Server** or **Client**,
 review the settings and licences, then set up or update the platform in the same
 window. WiX/MSI installs the reusable configuration app silently in the background.

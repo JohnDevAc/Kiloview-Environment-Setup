@@ -116,7 +116,7 @@ function Get-ObservedComponents {
         foreach($candidate in @($script:PersistentLauncherPath,(Join-Path $script:StateRoot 'Launcher\Kiloview-Environment-Setup.exe'))){if(Test-Path -LiteralPath $candidate -PathType Leaf){$app=$candidate;break}}
     }
     $items.Add([pscustomobject]@{productId='environment';installed=(Test-Path -LiteralPath $app -PathType Leaf);configurationAppInstalled=$msiApp;configured=$null;running=$null;healthy=$null;
-        version=$(if(Test-Path -LiteralPath $app){(Get-Item -LiteralPath $app).VersionInfo.FileVersion}else{$null});channel=$null;inspectionVersion=$script:ProductVersion;inspectionChannel=$script:ProductChannel})
+        version=$(if(Test-Path -LiteralPath $app){(Get-Item -LiteralPath $app).VersionInfo.ProductVersion}else{$null});channel=$null;inspectionVersion=$script:ProductVersion;inspectionChannel=$script:ProductChannel})
     try {
         $registration=Get-NdiRegistration
         $ndiVersion=if($registration){[string](Get-PropertyValue $registration 'DisplayVersion' '')}else{$null}
