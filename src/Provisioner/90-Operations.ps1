@@ -41,8 +41,9 @@ function Repair-Suite {
         $distro = Invoke-DeploymentStep 'Dedicated Ubuntu distribution' { Ensure-Ubuntu $config }
         if (-not $distro) { return }
         Invoke-DeploymentStep 'Quiesce previous Server watchdogs' { Set-KiloWatchdogState -Distro $distro -Mode Activate -Reactivate }
+        Set-SuiteProgress -Percent 30 -Status 'Checking Linux package sources'
+        Invoke-DeploymentStep 'Linux source readiness' { Assert-LinuxDownloads $distro }
         Set-SuiteProgress -Percent 30 -Status 'Preparing systemd, Docker Engine, and Avahi'
-        Assert-LinuxDownloads $distro
         Invoke-DeploymentStep 'Docker and Avahi' { Ensure-Docker $distro }
         if ($BringCurrent) {
             if (Test-KiloContainer $distro) {

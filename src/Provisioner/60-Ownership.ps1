@@ -59,6 +59,7 @@ function Assert-ServerDownloads($Config, [switch]$SourcesOnly) {
     if (-not $SourcesOnly) {
         $networkIssue = Get-SuiteNetworkAccessIssue $Config
         if ($networkIssue) { throw $networkIssue }
+        Assert-ServerStorage $Config
     }
     Set-SuiteProgress -Percent 2 -Status 'Checking required server package sources'
     # An existing healthy local runtime does not need an online currency check during repair.
@@ -83,20 +84,65 @@ function Assert-ServerDownloads($Config, [switch]$SourcesOnly) {
     }
 }
 
-function Assert-LinuxDownloads([string]$Distro) {
-    # Run inside the same distribution/network context used by apt and Docker.
-    $probe = @'
+function Get-LinuxSourceCheckScript {
+    return @'
 set -eu
+check_source() {
+  stage="$1"
+  shift
+  printf 'KILOLINK_SOURCE_CHECK_START:%s\n' "$stage"
+  code=0
+  "$@" || code=$?
+  if [ "$code" -ne 0 ]; then
+    printf 'KILOLINK_SOURCE_CHECK_FAILED:%s:%s\n' "$stage" "$code" >&2
+    exit "$code"
+  fi
+  printf 'KILOLINK_SOURCE_CHECK_OK:%s\n' "$stage"
+}
+check_registry() {
+  response=$(curl --connect-timeout 8 --max-time 15 -sS -o /dev/null -w '%{http_code}' https://registry-1.docker.io/v2/) || return $?
+  if [ "$response" != 200 ] && [ "$response" != 401 ]; then
+    printf 'Docker registry returned unexpected HTTP %s\n' "$response" >&2
+    return 22
+  fi
+}
 if command -v curl >/dev/null; then
-  curl --connect-timeout 8 --max-time 15 -fsSI https://download.docker.com/linux/ubuntu/gpg >/dev/null
-  code=$(curl --connect-timeout 8 --max-time 15 -sS -o /dev/null -w '%{http_code}' https://registry-1.docker.io/v2/)
-  test "$code" = 200 || test "$code" = 401
+  check_source docker-download curl --connect-timeout 8 --max-time 15 -fsSI https://download.docker.com/linux/ubuntu/gpg
+  check_source docker-registry check_registry
+else
+  echo 'Docker endpoint checks deferred until curl is installed.'
 fi
-# Only refresh package metadata here; never install or upgrade as a probe.
-timeout 60 apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=12 -o Acquire::https::Timeout=12 update --error-on=any >/dev/null
+# A clean distro must download and process its first package index. Allow four
+# minutes, retaining strict source errors and all progress in the installer log.
+# Linux owns the deadline; its termination grace stays below the Windows native
+# runner's five-minute silence limit. Never install or upgrade as a probe.
+check_source ubuntu-metadata timeout --kill-after=10s 240s apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=12 -o Acquire::https::Timeout=12 update --error-on=any
+echo KILOLINK_LINUX_SOURCES_READY
 '@
-    try { Invoke-WslScript $Distro $probe }
-    catch { throw "Required Linux package sources are unavailable inside WSL. Windows internet access alone is insufficient. Existing application services were retained; retry when sources are reachable. $($_.Exception.Message)" }
+}
+
+function Assert-LinuxDownloads([string]$Distro) {
+    # Native output is logged while it arrives. Keep native observation/timeouts
+    # and persistence failures intact: they may require recovery before retry.
+    $output = @(Invoke-WslScript $Distro (Get-LinuxSourceCheckScript) -Capture -IgnoreExitCode)
+    $code = $LASTEXITCODE
+    if ($code -eq 0 -and $output -contains 'KILOLINK_LINUX_SOURCES_READY') { return }
+    $stage = 'WSL package'
+    foreach ($line in $output) {
+        switch -Exact ([string]$line) {
+            'KILOLINK_SOURCE_CHECK_START:docker-download' { $stage = 'Docker download' }
+            'KILOLINK_SOURCE_CHECK_START:docker-registry' { $stage = 'Docker registry' }
+            'KILOLINK_SOURCE_CHECK_START:ubuntu-metadata' { $stage = 'Ubuntu package' }
+        }
+    }
+    $script:LifecycleNextAction = 'Review the installer diagnostics, then retry setup.'
+    if ($stage -eq 'Ubuntu package' -and $code -eq 124) {
+        $script:LifecycleErrorCode = 'linux-package-check-timeout'
+        throw 'Ubuntu package checks exceeded the 4-minute limit. See diagnostics, then retry.'
+    }
+    $script:LifecycleErrorCode = 'linux-package-check-failed'
+    if ($code -eq 0) { throw 'Linux package checks did not confirm completion. See diagnostics, then retry.' }
+    throw "$stage check failed (exit $code). See diagnostics, then retry."
 }
 
 function Save-ComponentReceipt([string]$Role, [switch]$Remove) {
