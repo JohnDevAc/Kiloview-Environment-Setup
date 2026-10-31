@@ -19,6 +19,7 @@ function Maintain-SuiteRuntime {
     if (-not $AcceptLicenses) { throw 'Runtime maintenance requires vendor licence acceptance.' }
     $config = Get-SavedConfig
     if (-not $config) { throw 'Install the server before maintaining its runtime.' }
+    Assert-ServerStorage $config
     Start-DeploymentJournal 'MaintainRuntime' $config
     Set-OperationOutcome 'Running' 'Maintaining the WSL, Ubuntu and Docker runtime.'
     if (-not (Invoke-DeploymentStep 'WSL runtime' { Ensure-WslFeatures })) { return }

@@ -92,6 +92,7 @@ $baseMocks = {
     function Assert-NdiToolsFilesAvailable { }
     function Prepare-ClientPackages { }
     function Assert-ServerDownloads { }
+    function Assert-ServerStorage { }
     function Assert-ServerOwner { }
     function Assert-LinuxDownloads { }
     function Get-NdiDiscoveryService { $null }
@@ -154,6 +155,7 @@ function Test-Case([string]$Name, [scriptblock]$Body) {
 try {
     . (Join-Path $PSScriptRoot 'Deployment.Regression.ps1')
     . (Join-Path $PSScriptRoot 'Lifecycle.Regression.ps1')
+    . (Join-Path $PSScriptRoot 'StorageIntegration.Regression.ps1')
     . (Join-Path $PSScriptRoot 'Remediation.Engine.Regression.ps1')
     . (Join-Path $PSScriptRoot 'Qa.Regression.ps1')
     . (Join-Path $PSScriptRoot 'ClientUpdate.Regression.ps1')
@@ -206,7 +208,7 @@ try {
             Assert-True ($Distro -eq 'Fixture' -and $Script -match 'registry-1.docker.io' -and $Script -match 'apt-get' -and $Script -notmatch 'apt-get install') 'Linux gate did not use the actual package context.'
             throw 'Fixture WSL DNS failure'
         }
-        Assert-Throws { Assert-LinuxDownloads 'Fixture' } 'unavailable inside WSL'
+        Assert-Throws { Assert-LinuxDownloads 'Fixture' } 'Fixture WSL DNS failure'
     }
     Test-Case 'Explicit local client packages never fall back to the internet' {
         $PackageDirectory = Join-Path $testRoot 'offline-input'
@@ -399,6 +401,18 @@ try {
         Repair-Suite -UseSavedConfiguration -LicenseAccepted
         Assert-True ($script:Recreated -eq 1) 'The stale container was not recreated.'
         Assert-True ($script:OperationOutcome -eq 'Completed') 'Successful repair was not recorded.'
+    }
+    Test-Case 'Failed Linux source check is journalled before dependent installation' {
+        . $repairMocks
+        $script:DependentInstalls = 0
+        function Assert-LinuxDownloads { throw 'Fixture metadata deadline exceeded' }
+        function Ensure-Docker { $script:DependentInstalls++ }
+        function Install-NdiTools { $script:DependentInstalls++ }
+        Assert-Throws { Repair-Suite -RequestedConfiguration (New-Config) -LicenseAccepted } 'Fixture metadata deadline exceeded'
+        $journal = Get-Content -LiteralPath (Join-Path $script:StateRoot 'last-operation.json') -Raw | ConvertFrom-Json
+        $step = @($journal.steps | Where-Object { $_.name -eq 'Linux source readiness' })
+        Assert-True ($step.Count -eq 1 -and $step[0].state -eq 'Failed' -and $step[0].error -eq 'Fixture metadata deadline exceeded') 'Journal omitted the failed package check.'
+        Assert-True ($script:DependentInstalls -eq 0 -and $script:Recreated -eq 0) 'Source failure allowed dependent installation.'
     }
     Test-Case 'Matching live container is retained' {
         . $repairMocks

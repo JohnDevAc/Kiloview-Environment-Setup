@@ -57,6 +57,15 @@ jobs:
       - name: Bounded WSL distro launch and shared readiness deadlines
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\WslReadiness.Regression.ps1
+      - name: Bounded Linux package checks and source diagnostics
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\LinuxSources.Regression.ps1
+      - name: Server storage reserves and preserved WSL locations
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Storage.Regression.ps1
+      - name: Native WSL help exit and install-location compatibility
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\WslLocation.Regression.ps1
       - name: Concurrent diagnostic readers and interrupted native ownership
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\InstallerLogging.Regression.ps1

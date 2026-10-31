@@ -474,7 +474,8 @@ function Invoke-WslScript {
     param(
         [string]$Distro,
         [string]$Content,
-        [switch]$Capture
+        [switch]$Capture,
+        [switch]$IgnoreExitCode
     )
     # PowerShell here-strings use Windows CRLF endings. Bash treats the trailing
     # carriage return as part of tokens such as "pipefail", so normalize every
@@ -483,7 +484,7 @@ function Invoke-WslScript {
     $utf8 = New-Object Text.UTF8Encoding($false)
     $base64 = [Convert]::ToBase64String($utf8.GetBytes($normalizedContent))
     $command = "printf '%s' '$base64' | base64 -d > /tmp/kilolink-suite.sh && chmod 700 /tmp/kilolink-suite.sh && bash /tmp/kilolink-suite.sh"
-    return Invoke-Wsl $Distro $command -Capture:$Capture
+    return Invoke-Wsl $Distro $command -Capture:$Capture -IgnoreExitCode:$IgnoreExitCode
 }
 
 function Test-KiloContainer {

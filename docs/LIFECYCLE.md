@@ -1,9 +1,10 @@
-# Toolbox lifecycle: 3.1.0
+# Toolbox lifecycle: 3.1.1
 
-The 3.1.0 implementation has passed isolated regressions and coordinated
-Windows 11 VM acceptance for installation, updates, recovery, role removal and
-retention. See [release notes](releases/v3.1.0.md) for the tested scope and remaining
-hardware/fault limits. A local build does not publish or install a release.
+The 3.1.1 Server readiness and storage changes passed isolated regressions and
+coordinated Windows 11 VM acceptance for fresh Server roles and reboot recovery.
+The existing lifecycle implementation retains its earlier validation for updates,
+recovery and role removal. See [release notes](releases/v3.1.1.md) for the exact
+scope and remaining limits. A local build does not publish or install a release.
 
 ## Entry points and packages
 
@@ -30,6 +31,9 @@ Build with Windows PowerShell 5.1:
 .\tests\WslConsole.Regression.ps1
 .\tests\NativeResolution.Regression.ps1
 .\tests\WslReadiness.Regression.ps1
+.\tests\LinuxSources.Regression.ps1
+.\tests\Storage.Regression.ps1
+.\tests\WslLocation.Regression.ps1
 .\tests\InstallerLogging.Regression.ps1
 .\tests\WatchdogLifecycle.Regression.ps1
 .\tests\ResumeContinuation.Regression.ps1
@@ -101,6 +105,52 @@ version labels still require verification of the signed installer. Server
 preflight reports progress before downloads and before role receipts or Windows
 feature changes. This deadline is not an interactive Cancel feature; closing
 the owner UI while its deployment worker is active remains blocked.
+
+Server setup, repair, update, resume and runtime maintenance check available
+Windows host storage before large package downloads or WSL/component changes.
+The installer safety policy reserves 16 GiB for distro growth, 2 GiB for Windows
+and NDI working space, and 2 GiB for download/state staging. Different purposes
+on the same volume are added (normally 20 GiB); duplicate paths for one purpose
+on that volume are counted once. This is a conservative headroom snapshot, not
+a prediction or guarantee of final installation, backups or application-data
+size. Existing data and workloads can need substantially more space.
+
+The check uses `GetDiskFreeSpaceEx` available-to-caller bytes (including quotas)
+and Windows volume identities, resolving mounted folders/junctions rather than
+assuming drive C or counting unallocated disk space. Existing WSL distributions
+retain their registered `BasePath`, including moved disks. New managed distros
+use a unique per-attempt folder under the current user's LocalAppData
+`Kiloview Environment Setup\WSL`, explicitly passed through WSL `--location`.
+The runtime must advertise this option; unsupported WSL does not fall back to
+an unchecked location. The bounded read-only help probe accepts exits zero and
+minus one only when an option line advertises `--location`; WSL 3.0.3 returns
+minus one with valid informational help ([upstream issue](https://github.com/microsoft/WSL/issues/6192)).
+Unexpected help exits return `wsl-location-probe-failed`, missing capability
+returns `wsl-location-unsupported`, and timeouts/persistence failures retain
+their original cause. Normal native command failure handling is unchanged.
+Existing/orphaned target folders are never adopted or
+deleted. Storage lookup requires an absolute local drive path; unknown or
+unreadable locations fail closed. See Microsoft's [WSL disk-space guidance](https://learn.microsoft.com/en-us/windows/wsl/disk-space)
+for why Linux virtual disk capacity is not Windows host free space.
+
+Low capacity returns `insufficient-disk-space` with the actual volume and GiB
+to free; an unresolvable probe returns `storage-preflight-unavailable`. Detailed
+paths, byte counts and per-purpose reserves go to diagnostics. Neither preflight
+failure creates a recovery latch. Client setup, Inspect, Verify, source-only
+diagnostics and removal do not require the Server installation reserve. They
+still need enough space for their own logs and any work they perform.
+
+Linux source readiness runs inside the selected distro and is recorded as its
+own deployment step. Its diagnostics retain Docker endpoint stages and complete
+APT output. A first package-index refresh has a four-minute Linux deadline with
+a ten-second termination grace; source failures still fail the check through
+`apt-get update --error-on=any`. This only refreshes metadata and never installs
+or upgrades packages. A metadata timeout returns `linux-package-check-timeout`;
+other source-check exits return `linux-package-check-failed`. Native command
+observation and lifecycle persistence failures retain their existing recovery
+instructions. Successful completion requires both exit zero and the probe's
+completion marker. Detailed output stays in diagnostics; the UI identifies the
+failed check without inferring that Windows or Linux internet access is down.
 
 Missing WSL runtime installation uses [Microsoft's documented command](https://learn.microsoft.com/en-us/windows/wsl/basic-commands#install),
 `wsl.exe --install --no-distribution --web-download`. Native switches

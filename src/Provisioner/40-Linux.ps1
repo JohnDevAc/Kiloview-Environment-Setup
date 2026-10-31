@@ -149,7 +149,7 @@ function Ensure-Ubuntu {
     $distro = Get-UbuntuDistro ([string]$Config.DistroName)
     if (-not $distro) {
         Write-Step "Installing dedicated Ubuntu WSL 2 distribution '$($script:ManagedDistroName)'"
-        Invoke-Native wsl.exe @('--install', $script:ApplicationManifest.runtime.ubuntuDistribution, '--name', $script:ManagedDistroName, '--version', '2', '--no-launch', '--web-download')
+        Invoke-Native wsl.exe (Get-NewWslInstallArguments)
         Set-SuiteProgress -Percent ([Math]::Min(27, $script:ProgressPercent + 2)) -Status 'Waiting for the dedicated Ubuntu distribution to register'
         if (-not (Wait-WslDistroRegistration -Distro $script:ManagedDistroName -TimeoutSeconds 180)) {
             Request-RestartAndResume "The $($script:ManagedDistroName) distribution was installed but has not registered in the current Windows session."

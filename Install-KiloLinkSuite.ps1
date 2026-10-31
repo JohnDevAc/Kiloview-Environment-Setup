@@ -48,7 +48,7 @@ $script:WslVmCreatorId = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
 $script:ManagedDistroName = 'KiloLink-Ubuntu'
 $script:ContainerName = 'KLNKSVR-pro'
 $script:ApplicationManifest = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('ewogICJzY2hlbWFWZXJzaW9uIjogMSwKICAicG9saWN5IjogImxhdGVzdC1zdGFibGUiLAogICJuZGlUb29scyI6IHsKICAgICJzb3VyY2UiOiAiaHR0cHM6Ly9uZGkudmlkZW8vdG9vbHMvIiwKICAgICJ1cmwiOiAiaHR0cHM6Ly9kb3dubG9hZHMubmRpLnR2L1Rvb2xzL05ESSUyMDYlMjBUb29scy5leGUiLAogICAgInZlcmlmaWNhdGlvbiI6ICJBdXRoZW50aWNvZGUgc2lnbmF0dXJlIGZyb20gTkRJLCBWaXpydCBvciBOZXdUZWs7IHJlY29yZCBkb3dubG9hZGVkIFNIQS0yNTYiCiAgfSwKICAicGNBZ2VudCI6IHsKICAgICJzb3VyY2UiOiAiaHR0cHM6Ly9naXRodWIuY29tL0pvaG5EZXZBYy9LaWxvdmlldy1QQy1PbmJvYXJkaW5nL3JlbGVhc2VzL2xhdGVzdCIsCiAgICAidmVyaWZpY2F0aW9uIjogInByb2R1Y3Rpb24gcmVsZWFzZSwgcHVibGlzaGVkIFNIQS0yNTYsIGFyY2hpdmUgcGF0aHMsIGJpbmFyeSBpZGVudGl0eSBhbmQgdmVyc2lvbnMiCiAgfSwKICAia2lsb0xpbmsiOiB7CiAgICAiaW1hZ2UiOiAia2lsb3ZpZXcva2xuay1wcm86bGF0ZXN0IiwKICAgICJ2ZXJpZmljYXRpb24iOiAiRG9ja2VyIGNvbnRlbnQgZGlnZXN0OyByZXRhaW4gb3JpZ2luYWwgY29udGFpbmVyIGFuZCBiYWNrdXAgYmVmb3JlIHJlcGxhY2VtZW50IgogIH0sCiAgInJ1bnRpbWUiOiB7CiAgICAidWJ1bnR1RGlzdHJpYnV0aW9uIjogIlVidW50dS0yNC4wNCIsCiAgICAibWFpbnRlbmFuY2UiOiAiZXhwbGljaXQgTWFpbnRhaW5SdW50aW1lIGFjdGlvbjsgV2luZG93cy9XU0wgYW5kIGFwdCByZXBvc2l0b3JpZXMgc3VwcGx5IHJ1bnRpbWUgcGFja2FnZXMiCiAgfQp9Cg==')) | ConvertFrom-Json
-$script:ProductVersion = '3.1.0'
+$script:ProductVersion = '3.1.1'
 $script:ProductChannel = 'stable'
 $script:ActiveJournal = $null
 $script:Lifecycle = $null
@@ -1344,7 +1344,8 @@ function Invoke-WslScript {
     param(
         [string]$Distro,
         [string]$Content,
-        [switch]$Capture
+        [switch]$Capture,
+        [switch]$IgnoreExitCode
     )
     # PowerShell here-strings use Windows CRLF endings. Bash treats the trailing
     # carriage return as part of tokens such as "pipefail", so normalize every
@@ -1353,7 +1354,7 @@ function Invoke-WslScript {
     $utf8 = New-Object Text.UTF8Encoding($false)
     $base64 = [Convert]::ToBase64String($utf8.GetBytes($normalizedContent))
     $command = "printf '%s' '$base64' | base64 -d > /tmp/kilolink-suite.sh && chmod 700 /tmp/kilolink-suite.sh && bash /tmp/kilolink-suite.sh"
-    return Invoke-Wsl $Distro $command -Capture:$Capture
+    return Invoke-Wsl $Distro $command -Capture:$Capture -IgnoreExitCode:$IgnoreExitCode
 }
 
 function Test-KiloContainer {
@@ -1722,6 +1723,172 @@ function Confirm-LicenseAcceptance {
     return (Read-InstallerInput 'Type YES to accept and continue') -ieq 'YES'
 }
 
+# A snapshot of host headroom, not a prediction of total installation/data size.
+function Initialize-StorageProbe {
+    if ('KiloLink.Storage.VolumeProbe' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace KiloLink.Storage {
+    public sealed class VolumeSpace {
+        public string VolumeId;
+        public string VolumePath;
+        public ulong AvailableBytes;
+    }
+    public static class VolumeProbe {
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern bool GetVolumePathName(string path, StringBuilder volume, uint length);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern bool GetVolumeNameForVolumeMountPoint(string mount, StringBuilder name, uint length);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern bool GetDiskFreeSpaceEx(string path, out ulong available, out ulong total, out ulong free);
+        public static VolumeSpace Read(string directory) {
+            var mount=new StringBuilder(32768);
+            if(!GetVolumePathName(directory,mount,(uint)mount.Capacity)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            var id=new StringBuilder(1024);
+            if(!GetVolumeNameForVolumeMountPoint(mount.ToString(),id,(uint)id.Capacity)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            ulong available,total,free;
+            // This follows junctions and uses the caller's quota, not disk size
+            // or free space that is unavailable to the installing account.
+            if(!GetDiskFreeSpaceEx(directory,out available,out total,out free)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            return new VolumeSpace { VolumeId=id.ToString(),VolumePath=mount.ToString(),AvailableBytes=available };
+        }
+    }
+}
+'@
+}
+
+function Get-LocalStoragePath([string]$Path) {
+    $pathText=[Environment]::ExpandEnvironmentVariables($Path)
+    if ($pathText -match '^(?:\\\\\?\\|\\\?\?\\)[A-Za-z]:\\') { $pathText=$pathText.Substring(4) }
+    if ($pathText -notmatch '^[A-Za-z]:[\\/]') { throw "Storage path is not an absolute local drive path: $Path" }
+    return [IO.Path]::GetFullPath($pathText)
+}
+
+function Get-WindowsStorageVolume([string]$Path) {
+    $directory=Get-LocalStoragePath $Path
+    while (-not (Test-Path -LiteralPath $directory -PathType Container -ErrorAction Stop)) {
+        $parent=[IO.Path]::GetDirectoryName($directory.TrimEnd('\'))
+        if (-not $parent -or $parent -eq $directory) { throw "Storage volume is unavailable for $Path" }
+        $directory=$parent
+    }
+    Initialize-StorageProbe
+    return [KiloLink.Storage.VolumeProbe]::Read($directory)
+}
+
+function Get-WslStorageRegistrations {
+    # Passive current-owner registry lookup; never launch WSL for preflight.
+    $root='HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'
+    if (-not (Test-Path -LiteralPath $root -ErrorAction Stop)) { return @() }
+    foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction Stop)) {
+        $entry=Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+        [pscustomobject]@{Name=[string](Get-PropertyValue $entry 'DistributionName' '');Path=[string](Get-PropertyValue $entry 'BasePath' '')}
+    }
+}
+
+function Get-NewManagedDistroPath {
+    if (-not (Get-Variable PlannedDistroPath -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) {
+        # A new attempt never adopts or deletes an unregistered/orphaned VHD.
+        $script:PlannedDistroPath=Join-Path $env:LOCALAPPDATA ('Kiloview Environment Setup\WSL\'+$script:ManagedDistroName+'-'+[guid]::NewGuid().ToString('N'))
+    }
+    return $script:PlannedDistroPath
+}
+
+function Get-ServerStorageTargets($Config) {
+    $registered=@(Get-WslStorageRegistrations)
+    $selected=@()
+    foreach ($name in @([string]$Config.DistroName,$script:ManagedDistroName)|Select-Object -Unique) {
+        $selected=@($registered|Where-Object {$_.Name -eq $name})
+        if ($selected.Count -gt 1) { throw "Distribution storage registration is ambiguous: $name" }
+        if ($selected.Count -eq 1) { break }
+    }
+    $distroPath=if ($selected.Count) {
+        if (-not $selected[0].Path) { throw 'The registered distribution has no disk location.' }
+        $selected[0].Path
+    } else { Get-NewManagedDistroPath }
+    # Policy: 16 GiB distro growth headroom, 2 GiB Windows working space,
+    # 2 GiB download/state staging. Sum purposes sharing a volume; do not count
+    # the same purpose twice on one volume. These are reserves, not guarantees.
+    [pscustomobject]@{Path=$distroPath;Purpose='WSL disk';Budget='distro';Bytes=16GB}
+    if (-not $env:WINDIR -or -not $env:ProgramFiles) { throw 'The Windows and application storage paths are unavailable.' }
+    foreach ($path in @($env:WINDIR,$env:ProgramFiles)+@(Get-NdiToolsRoots)) {
+        if ($path) { [pscustomobject]@{Path=$path;Purpose='Windows/NDI';Budget='windows';Bytes=2GB} }
+    }
+    foreach ($path in @((Join-Path $env:TEMP 'KiloLinkSuite'),$script:StateRoot)) {
+        [pscustomobject]@{Path=$path;Purpose='Downloads/state';Budget='staging';Bytes=2GB}
+    }
+}
+
+function Assert-ServerStorage($Config) {
+    $volumes=@{}
+    $details=New-Object 'Collections.Generic.List[string]'
+    try {
+        foreach ($target in @(Get-ServerStorageTargets $Config)) {
+            $space=Get-WindowsStorageVolume $target.Path
+            if (-not $space.VolumeId -or -not $space.VolumePath -or $null -eq $space.AvailableBytes) { throw 'Storage probe returned incomplete volume information.' }
+            if (-not $volumes.ContainsKey($space.VolumeId)) {
+                $volumes[$space.VolumeId]=@{Path=$space.VolumePath;Available=[decimal]$space.AvailableBytes;Budgets=@{}}
+            }
+            $volume=$volumes[$space.VolumeId]
+            $volume.Available=[Math]::Min($volume.Available,[decimal]$space.AvailableBytes)
+            $volume.Budgets[$target.Budget]=[decimal]$target.Bytes
+            $details.Add(('Storage target {0}: {1}; volume {2}; reserve {3} GiB ({4}).' -f $target.Purpose,$target.Path,$space.VolumePath,($target.Bytes/1GB),$target.Budget))
+        }
+        if (-not $volumes.Count) { throw 'No Server storage volumes could be identified.' }
+    } catch {
+        Write-InstallerLog ('Storage preflight could not determine capacity: '+$_.Exception.Message)
+        $script:LifecycleErrorCode='storage-preflight-unavailable'
+        $script:LifecycleNextAction='Check the storage paths and permissions in diagnostics, then retry Server setup.'
+        throw 'Cannot verify Server disk space. Check diagnostics, then retry.'
+    }
+    foreach ($line in $details) { Write-InstallerLog $line }
+    foreach ($entry in $volumes.GetEnumerator()|Sort-Object Name) {
+        $volume=$entry.Value
+        $required=[decimal]0
+        foreach ($bytes in $volume.Budgets.Values) { $required+=$bytes }
+        Write-InstallerLog ('Storage preflight {0} ({1}): available={2} bytes; policyReserve={3} bytes. Snapshot only; future packages/data/backups may need more.' -f $volume.Path,$entry.Key,$volume.Available,$required)
+        if ($volume.Available -lt $required) {
+            $needed=[Math]::Ceiling(($required-$volume.Available)/1GB)
+            $script:LifecycleErrorCode='insufficient-disk-space'
+            $script:LifecycleNextAction='Free space on the reported Windows volume, then retry Server setup. See diagnostics for the safety-reserve calculation.'
+            throw ("Free at least {0} GiB on {1} before Server setup ({2:N1} GiB available; {3:N0} GiB safety reserve)." -f $needed,$volume.Path,($volume.Available/1GB),($required/1GB))
+        }
+    }
+}
+
+function Get-NewWslInstallArguments {
+    # Only called after the runtime is installed. An unsupported runtime must
+    # not silently fall back to a different, unchecked default location.
+    $help=@(Invoke-Native wsl.exe @('--help') -Capture -IgnoreExitCode -ReadOnly -TimeoutSeconds 30 -StallSeconds 30)
+    # Invoke-Native publishes the observed exit globally. WSL 3.0.3 (and older
+    # builds) returns -1 for informational --help, even with complete valid help.
+    # Accept that help-only convention only alongside an advertised option line.
+    $helpExitCode=$global:LASTEXITCODE
+    $advertisesLocation=(($help -join "`n") -replace [char]0,'') -match '(?m)^[ \t]*--location(?:[ \t]|$)'
+    Write-InstallerLog ("WSL install-location probe: helpExitCode={0}; advertised={1}." -f $helpExitCode,$advertisesLocation)
+    if ($helpExitCode -notin @(0,-1)) {
+        $script:LifecycleErrorCode='wsl-location-probe-failed'
+        $script:LifecycleNextAction='Check the WSL help failure in diagnostics, then retry Server setup.'
+        throw "Cannot verify WSL install-location support (help exit $helpExitCode). Check diagnostics, then retry."
+    }
+    if (-not $advertisesLocation) {
+        $script:LifecycleErrorCode='wsl-location-unsupported'
+        $script:LifecycleNextAction='Update WSL to a runtime with the --location install option, then retry Server setup.'
+        throw 'Update WSL before Server setup; this runtime does not advertise install-location support.'
+    }
+    $location=Get-NewManagedDistroPath
+    Initialize-LifecycleProtocol
+    [KiloLink.Lifecycle.SafePath]::CheckParent($location)
+    if (Test-Path -LiteralPath $location) { throw 'The new WSL storage folder already exists. It was retained; retry with a new setup operation.' }
+    $parent=Split-Path -Parent $location
+    New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop|Out-Null
+    [KiloLink.Lifecycle.SafePath]::CheckParent($location)
+    Write-InstallerLog "New managed WSL disk location: $location"
+    return @('--install',$script:ApplicationManifest.runtime.ubuntuDistribution,'--name',$script:ManagedDistroName,'--version','2','--no-launch','--web-download','--location',$location)
+}
+
 function Test-SupportedWindows {
     $current = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $build = [int]$current.CurrentBuildNumber
@@ -1873,7 +2040,7 @@ function Ensure-Ubuntu {
     $distro = Get-UbuntuDistro ([string]$Config.DistroName)
     if (-not $distro) {
         Write-Step "Installing dedicated Ubuntu WSL 2 distribution '$($script:ManagedDistroName)'"
-        Invoke-Native wsl.exe @('--install', $script:ApplicationManifest.runtime.ubuntuDistribution, '--name', $script:ManagedDistroName, '--version', '2', '--no-launch', '--web-download')
+        Invoke-Native wsl.exe (Get-NewWslInstallArguments)
         Set-SuiteProgress -Percent ([Math]::Min(27, $script:ProgressPercent + 2)) -Status 'Waiting for the dedicated Ubuntu distribution to register'
         if (-not (Wait-WslDistroRegistration -Distro $script:ManagedDistroName -TimeoutSeconds 180)) {
             Request-RestartAndResume "The $($script:ManagedDistroName) distribution was installed but has not registered in the current Windows session."
@@ -3066,6 +3233,7 @@ function Assert-ServerDownloads($Config, [switch]$SourcesOnly) {
     if (-not $SourcesOnly) {
         $networkIssue = Get-SuiteNetworkAccessIssue $Config
         if ($networkIssue) { throw $networkIssue }
+        Assert-ServerStorage $Config
     }
     Set-SuiteProgress -Percent 2 -Status 'Checking required server package sources'
     # An existing healthy local runtime does not need an online currency check during repair.
@@ -3090,20 +3258,65 @@ function Assert-ServerDownloads($Config, [switch]$SourcesOnly) {
     }
 }
 
-function Assert-LinuxDownloads([string]$Distro) {
-    # Run inside the same distribution/network context used by apt and Docker.
-    $probe = @'
+function Get-LinuxSourceCheckScript {
+    return @'
 set -eu
+check_source() {
+  stage="$1"
+  shift
+  printf 'KILOLINK_SOURCE_CHECK_START:%s\n' "$stage"
+  code=0
+  "$@" || code=$?
+  if [ "$code" -ne 0 ]; then
+    printf 'KILOLINK_SOURCE_CHECK_FAILED:%s:%s\n' "$stage" "$code" >&2
+    exit "$code"
+  fi
+  printf 'KILOLINK_SOURCE_CHECK_OK:%s\n' "$stage"
+}
+check_registry() {
+  response=$(curl --connect-timeout 8 --max-time 15 -sS -o /dev/null -w '%{http_code}' https://registry-1.docker.io/v2/) || return $?
+  if [ "$response" != 200 ] && [ "$response" != 401 ]; then
+    printf 'Docker registry returned unexpected HTTP %s\n' "$response" >&2
+    return 22
+  fi
+}
 if command -v curl >/dev/null; then
-  curl --connect-timeout 8 --max-time 15 -fsSI https://download.docker.com/linux/ubuntu/gpg >/dev/null
-  code=$(curl --connect-timeout 8 --max-time 15 -sS -o /dev/null -w '%{http_code}' https://registry-1.docker.io/v2/)
-  test "$code" = 200 || test "$code" = 401
+  check_source docker-download curl --connect-timeout 8 --max-time 15 -fsSI https://download.docker.com/linux/ubuntu/gpg
+  check_source docker-registry check_registry
+else
+  echo 'Docker endpoint checks deferred until curl is installed.'
 fi
-# Only refresh package metadata here; never install or upgrade as a probe.
-timeout 60 apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=12 -o Acquire::https::Timeout=12 update --error-on=any >/dev/null
+# A clean distro must download and process its first package index. Allow four
+# minutes, retaining strict source errors and all progress in the installer log.
+# Linux owns the deadline; its termination grace stays below the Windows native
+# runner's five-minute silence limit. Never install or upgrade as a probe.
+check_source ubuntu-metadata timeout --kill-after=10s 240s apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=12 -o Acquire::https::Timeout=12 update --error-on=any
+echo KILOLINK_LINUX_SOURCES_READY
 '@
-    try { Invoke-WslScript $Distro $probe }
-    catch { throw "Required Linux package sources are unavailable inside WSL. Windows internet access alone is insufficient. Existing application services were retained; retry when sources are reachable. $($_.Exception.Message)" }
+}
+
+function Assert-LinuxDownloads([string]$Distro) {
+    # Native output is logged while it arrives. Keep native observation/timeouts
+    # and persistence failures intact: they may require recovery before retry.
+    $output = @(Invoke-WslScript $Distro (Get-LinuxSourceCheckScript) -Capture -IgnoreExitCode)
+    $code = $LASTEXITCODE
+    if ($code -eq 0 -and $output -contains 'KILOLINK_LINUX_SOURCES_READY') { return }
+    $stage = 'WSL package'
+    foreach ($line in $output) {
+        switch -Exact ([string]$line) {
+            'KILOLINK_SOURCE_CHECK_START:docker-download' { $stage = 'Docker download' }
+            'KILOLINK_SOURCE_CHECK_START:docker-registry' { $stage = 'Docker registry' }
+            'KILOLINK_SOURCE_CHECK_START:ubuntu-metadata' { $stage = 'Ubuntu package' }
+        }
+    }
+    $script:LifecycleNextAction = 'Review the installer diagnostics, then retry setup.'
+    if ($stage -eq 'Ubuntu package' -and $code -eq 124) {
+        $script:LifecycleErrorCode = 'linux-package-check-timeout'
+        throw 'Ubuntu package checks exceeded the 4-minute limit. See diagnostics, then retry.'
+    }
+    $script:LifecycleErrorCode = 'linux-package-check-failed'
+    if ($code -eq 0) { throw 'Linux package checks did not confirm completion. See diagnostics, then retry.' }
+    throw "$stage check failed (exit $code). See diagnostics, then retry."
 }
 
 function Save-ComponentReceipt([string]$Role, [switch]$Remove) {
@@ -3788,8 +4001,9 @@ function Repair-Suite {
         $distro = Invoke-DeploymentStep 'Dedicated Ubuntu distribution' { Ensure-Ubuntu $config }
         if (-not $distro) { return }
         Invoke-DeploymentStep 'Quiesce previous Server watchdogs' { Set-KiloWatchdogState -Distro $distro -Mode Activate -Reactivate }
+        Set-SuiteProgress -Percent 30 -Status 'Checking Linux package sources'
+        Invoke-DeploymentStep 'Linux source readiness' { Assert-LinuxDownloads $distro }
         Set-SuiteProgress -Percent 30 -Status 'Preparing systemd, Docker Engine, and Avahi'
-        Assert-LinuxDownloads $distro
         Invoke-DeploymentStep 'Docker and Avahi' { Ensure-Docker $distro }
         if ($BringCurrent) {
             if (Test-KiloContainer $distro) {
@@ -4270,6 +4484,7 @@ function Maintain-SuiteRuntime {
     if (-not $AcceptLicenses) { throw 'Runtime maintenance requires vendor licence acceptance.' }
     $config = Get-SavedConfig
     if (-not $config) { throw 'Install the server before maintaining its runtime.' }
+    Assert-ServerStorage $config
     Start-DeploymentJournal 'MaintainRuntime' $config
     Set-OperationOutcome 'Running' 'Maintaining the WSL, Ubuntu and Docker runtime.'
     if (-not (Invoke-DeploymentStep 'WSL runtime' { Ensure-WslFeatures })) { return }
